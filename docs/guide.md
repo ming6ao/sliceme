@@ -263,7 +263,7 @@ retryable failure rather than a code failure.
 | A wave record changes a path outside every node's `owns` | The record is rejected; the coordinator widens `owns` or adds a `depends_on` edge and re-spawns. |
 | Merge conflict at `deliver` | Merge aborted; findings surfaced. The target branch is never left half-merged. |
 | Orchestrator crash | Workers are child processes of the coordinator and are not detached, so a crash kills them. On resume, any node left `running` is reset to `pending` and re-spawned; the campaign worktree is reused, not recreated. Git and `state.db` win over `state.json`. |
-| User suspends (`/suspend`) | The pause flag stops new spawns/records/verifies; the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree becomes `paused`, the wave is re-recorded, and unchanged candidates re-verify from cache. |
+| User suspends (`/suspend`) | The pause flag stops new spawns/records/verifies and the adapter aborts the in-flight turn, killing the current worker and any executor subprocess within seconds; the interrupted node is marked `paused` and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree becomes `paused`, the wave is re-recorded, and unchanged candidates re-verify from cache. |
 
 Caps: `concurrency`, max attempts per node, and a wall-clock budget bound the
 cost of each spawn.

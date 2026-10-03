@@ -194,8 +194,9 @@ class PiPackageTests(unittest.TestCase):
         self.assertTrue((REPO_ROOT / "tests" / "test_waves.py").is_file())
 
     def test_session_suspend_resume_contract(self):
-        # The adapter writes the descriptor, pauses cooperatively, resumes on the
-        # pi session_start hook, and never shadows pi's `/resume`.
+        # The adapter writes the descriptor, hard-aborts the in-flight turn to
+        # suspend quickly, resumes on the pi session_start hook, and never shadows
+        # pi's `/resume`.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         common = PI_COMMON.read_text(encoding="utf-8")
 
@@ -215,16 +216,28 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("sessionPath(ctx.cwd, branch)", coordinator)
         self.assertIn("heartbeatPath(ctx.cwd, branch", coordinator)
 
-        # Cooperative stop: wait for idle, steer, and clear the flag on resume.
+        # Hard stop: abort the tool signal so the worker dies quickly, then wait
+        # for idle and clear the flag on resume.  Steering is deliberately gone:
+        # it only arrives at the next turn boundary, after the node has finished.
+        self.assertIn("ctx.abort()", coordinator)
         self.assertIn("waitForIdle", coordinator)
-        self.assertIn('deliverAs: "steer"', coordinator)
+        self.assertNotIn('deliverAs: "steer"', coordinator)
         self.assertIn("clearPause", coordinator)
         self.assertIn("isPaused", coordinator)
         self.assertIn('event.reason === "resume"', coordinator)
 
-        # The pause flag gates every work-performing path.
+        # A signal-killed worker is reported as interrupted and mapped to a
+        # paused node so resume continues its edits instead of respawning.
+        self.assertIn("interrupted?: boolean", common)
+        self.assertIn("interrupted: signal != null", common)
+        self.assertIn("result.interrupted", coordinator)
+
+        # The pause flag gates every work-performing path, and an interrupted
+        # worker or verifier (a second `pausedResult` after the subagent) is
+        # mapped to a paused result too.
         for action in ("spawn", "record", "verify", "ready"):
             self.assertIn(f'pausedResult("{action}")', coordinator)
+        self.assertGreaterEqual(coordinator.count('pausedResult("verify")'), 2)
 
         # Attempts and switchSession are wired.
         self.assertIn('"--begin"', coordinator)

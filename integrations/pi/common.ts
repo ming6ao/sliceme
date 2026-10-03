@@ -25,6 +25,9 @@ export interface SubagentResult {
 	exitCode: number;
 	output: string;
 	stderr: string;
+	/** True when the child was killed by a signal rather than exiting on its own. */
+	interrupted?: boolean;
+	signal?: NodeJS.Signals | null;
 }
 
 export interface SlicemeInvocation {
@@ -396,12 +399,18 @@ export async function runSubagent(options: {
 			stderr += data.toString();
 			stream?.write(data.toString());
 		});
-		proc.on("close", (code) => {
+		proc.on("close", (code, signal) => {
 			if (buffer.trim()) processLine(buffer);
 			stream?.end();
 			flushHeartbeat(true);
 			cleanup();
-			resolve({ exitCode: code ?? 0, output, stderr });
+			resolve({
+				exitCode: code ?? (signal ? 128 : 0),
+				output,
+				stderr,
+				interrupted: signal != null,
+				signal,
+			});
 		});
 		proc.on("error", (err) => {
 			stream?.end();
@@ -412,10 +421,24 @@ export async function runSubagent(options: {
 
 		if (options.signal) {
 			const kill = () => {
-				proc.kill("SIGTERM");
-				setTimeout(() => {
-					if (!proc.killed) proc.kill("SIGKILL");
-				}, 5000);
+				try {
+					proc.kill("SIGTERM");
+				} catch {
+					/* already gone */
+				}
+				// `proc.killed` turns true as soon as SIGTERM is sent, so it cannot
+				// tell us whether the child actually exited.  Escalate on the real
+				// exit state instead, or a worker that ignores SIGTERM hangs forever.
+				const escalate = setTimeout(() => {
+					if (proc.exitCode === null && proc.signalCode === null) {
+						try {
+							proc.kill("SIGKILL");
+						} catch {
+							/* already gone */
+						}
+					}
+				}, 3000);
+				escalate.unref();
 			};
 			if (options.signal.aborted) kill();
 			else options.signal.addEventListener("abort", kill, { once: true });

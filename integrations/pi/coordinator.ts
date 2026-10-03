@@ -531,7 +531,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					"--attempt",
 					String(attempt),
 					"--status",
-					result.exitCode === 0 ? "ok" : "failed",
+					result.interrupted ? "interrupted" : result.exitCode === 0 ? "ok" : "failed",
 					"--exit-code",
 					String(result.exitCode),
 				],
@@ -918,6 +918,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			log: path.join(stateDir(ctx.cwd), `${branchKey(branch)}.worker_planner.log`),
 			signal,
 		});
+		if (planner.interrupted || isPaused(ctx, branch)) return pausedResult("planner");
 		if (planner.exitCode !== 0 || !fs.existsSync(dagFile)) {
 			return {
 				content: [
@@ -1046,6 +1047,19 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			log: logPath(ctx.cwd, branch, node),
 			signal,
 		});
+		if (result.interrupted || isPaused(ctx, branch)) {
+			// A suspended worker keeps its edits in the shared campaign worktree; mark
+			// the node paused so resume continues it instead of respawning from scratch.
+			// Its attempt is not consumed: the next spawn reuses the same attempt number.
+			state.nodes[node].status = "paused";
+			writeJson(stateFile, state);
+			logEvent(ctx.cwd, branch, "node.suspended", {
+				node,
+				attempt,
+				signal: result.signal ?? null,
+			});
+			return pausedResult("spawn");
+		}
 		state.nodes[node].status = result.exitCode === 0 ? "pending" : "failed";
 		state.nodes[node].attempts = attempt;
 		writeJson(stateFile, state);
@@ -1172,6 +1186,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			log: path.join(stateDir(ctx.cwd), `${branchKey(branch)}.worker_verify_${node}.log`),
 			signal,
 		});
+		if (result.interrupted || isPaused(ctx, branch)) {
+			// Suspended mid-verification: leave the node `recorded` (state is untouched)
+			// so resume re-verifies the same candidate instead of failing the node.
+			return pausedResult("verify");
+		}
 
 		const passed =
 			job?.status === "passed" &&
@@ -1475,12 +1494,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				requested_at: Date.now() / 1000,
 				label,
 			});
+			// Abort the in-flight turn instead of steering and waiting: a steering
+			// message is only delivered at the next turn boundary, so it would not
+			// arrive until the current node's worker had already finished.  ctx.abort()
+			// aborts the tool signal, which kills the worker subagent and any engine
+			// subprocess, so suspension lands at the next safe point within seconds.
 			if (!ctx.isIdle()) {
-				pi.sendUserMessage(
-					"Sliceme: a suspend was requested. Finish the current node, then stop " +
-						"without starting new work.",
-					{ deliverAs: "steer" },
-				);
+				ctx.abort();
 				await ctx.waitForIdle();
 			}
 			clearPause(ctx, branch);

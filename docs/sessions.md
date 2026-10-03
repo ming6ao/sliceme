@@ -90,7 +90,7 @@ the adapter thin and forward to the engine where reconciliation is involved.
 | Command | Behavior |
 |---|---|
 | `/sliceme [DESIGN.md]` | Existing start entry point. Activates the tools and starts a campaign. Refuses while the agent is busy (`ctx.isIdle()`). |
-| `/suspend [label]` | Park the current session: write the pause control flag, request a cooperative stop, wait for idle, write the resume descriptor. |
+| `/suspend [label]` | Park the current session: write the pause control flag, abort the in-flight turn so the current worker and any engine subprocess exit, wait for idle, write the resume descriptor. An interrupted node is marked `paused` so resume continues its edits. |
 | `/campaigns` | Interactive list of registered campaigns: label, target branch, wave, done/total, last activity, status. Actions: resume, rename, show, prune, delete. |
 
 `/resume` is deliberately not registered: pi owns it, and `session_start` with
