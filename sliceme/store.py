@@ -19,17 +19,8 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;
 
-CREATE TABLE IF NOT EXISTS sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT UNIQUE NOT NULL,
-  task TEXT,
-  attachment TEXT NOT NULL DEFAULT 'terminal',
-  created_at REAL NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS units (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER REFERENCES sessions(id),
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'worker',
   worktree TEXT NOT NULL,
@@ -38,46 +29,18 @@ CREATE TABLE IF NOT EXISTS units (
   state TEXT NOT NULL DEFAULT 'working',
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  UNIQUE(session_id, name)
+  UNIQUE(name)
 );
 
 CREATE TABLE IF NOT EXISTS candidates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   unit_id INTEGER NOT NULL REFERENCES units(id),
-  branch TEXT NOT NULL,
   head_commit TEXT NOT NULL,
-  base_commit TEXT,
-  priority INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'prepared',
   summary TEXT,
   node TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS fingerprints (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  candidate_id INTEGER NOT NULL REFERENCES candidates(id),
-  fingerprint TEXT NOT NULL,
-  tree TEXT NOT NULL,
-  cmd_digest TEXT NOT NULL,
-  toolchain_digest TEXT NOT NULL,
-  policy_digest TEXT NOT NULL,
-  source TEXT NOT NULL DEFAULT 'plane',
-  created_at REAL NOT NULL,
-  UNIQUE(candidate_id, fingerprint)
-);
-
-CREATE TABLE IF NOT EXISTS verifications (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  candidate_id INTEGER NOT NULL REFERENCES candidates(id),
-  fingerprint_id INTEGER NOT NULL REFERENCES fingerprints(id),
-  status TEXT NOT NULL,
-  output TEXT,
-  duration REAL,
-  commands TEXT,
-  gpu TEXT,
-  created_at REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
@@ -96,7 +59,6 @@ CREATE TABLE IF NOT EXISTS jobs (
   priority INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'queued',
   fingerprint TEXT,
-  attempt INTEGER NOT NULL DEFAULT 0,
   timeout INTEGER NOT NULL DEFAULT 3600,
   requested_at REAL NOT NULL,
   started_at REAL,
@@ -110,23 +72,6 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_fingerprint ON jobs(fingerprint, status);
-
-CREATE TABLE IF NOT EXISTS campaign_sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  feature_branch TEXT,
-  pi_session_id TEXT,
-  session_file TEXT,
-  label TEXT,
-  status TEXT NOT NULL DEFAULT 'active',
-  reason TEXT,
-  wave INTEGER,
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL,
-  suspended_at REAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_campaign_sessions_branch
-  ON campaign_sessions(feature_branch);
 
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,6 +97,38 @@ CREATE TABLE IF NOT EXISTS attempts (
 
 CREATE INDEX IF NOT EXISTS idx_attempts_node ON attempts(node);
 CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status);
+
+CREATE TABLE IF NOT EXISTS review_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  branch_key TEXT NOT NULL,
+  commit_hash TEXT,
+  action TEXT NOT NULL,
+  actor TEXT,
+  note TEXT,
+  created_at REAL NOT NULL,
+  consumed_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_decisions_commit
+  ON review_decisions(branch_key, commit_hash, id);
+
+CREATE TABLE IF NOT EXISTS comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  branch_key TEXT NOT NULL,
+  commit_hash TEXT,
+  file TEXT,
+  side TEXT,
+  line INTEGER,
+  line_end INTEGER,
+  body TEXT NOT NULL,
+  node TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at REAL NOT NULL,
+  addressed_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_comments_branch
+  ON comments(branch_key, status, id);
 """
 
 
@@ -166,15 +143,16 @@ def _dicts(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
 
 
 class Store:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, migrate: bool = True):
         self.root = root
         path = db_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path), timeout=10.0)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA)
-        self._migrate()
-        self.conn.commit()
+        if migrate:
+            self.conn.executescript(SCHEMA)
+            self._migrate()
+            self.conn.commit()
 
     def _migrate(self) -> None:
         """Additive column migrations for planes created by older versions."""
@@ -208,32 +186,10 @@ class Store:
             self.conn.rollback()
             raise
 
-    # ---- sessions -----------------------------------------------------
-    def create_session(self, name: str, task: str | None, attachment: str) -> int:
-        with self.tx() as c:
-            c.execute(
-                "INSERT INTO sessions(name, task, attachment, created_at) VALUES(?,?,?,?)",
-                (name, task, attachment, now()),
-            )
-            row = c.execute("SELECT id FROM sessions WHERE name=?", (name,)).fetchone()
-        return int(row["id"])
-
-    def get_session(self, name_or_id: str | int) -> dict[str, Any] | None:
-        if isinstance(name_or_id, int) or str(name_or_id).isdigit():
-            return _dict(
-                self.conn.execute(
-                    "SELECT * FROM sessions WHERE id=?", (int(name_or_id),)
-                ).fetchone()
-            )
-        return _dict(
-            self.conn.execute("SELECT * FROM sessions WHERE name=?", (name_or_id,)).fetchone()
-        )
-
     # ---- units --------------------------------------------------------
     def create_unit(
         self,
         *,
-        session_id: int,
         name: str,
         kind: str,
         worktree: str,
@@ -243,13 +199,11 @@ class Store:
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO units(session_id, name, kind, worktree, branch, base_commit,"
-                " state, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (session_id, name, kind, worktree, branch, base_commit, "working", ts, ts),
+                "INSERT INTO units(name, kind, worktree, branch, base_commit,"
+                " state, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (name, kind, worktree, branch, base_commit, "working", ts, ts),
             )
-            row = c.execute(
-                "SELECT id FROM units WHERE session_id=? AND name=?", (session_id, name)
-            ).fetchone()
+            row = c.execute("SELECT id FROM units WHERE name=?", (name,)).fetchone()
         return int(row["id"])
 
     def set_unit_state(self, unit_id: int, state: str) -> None:
@@ -280,20 +234,16 @@ class Store:
         self,
         *,
         unit_id: int,
-        branch: str,
         head_commit: str,
-        base_commit: str,
-        priority: int,
         summary: str | None,
         node: str | None = None,
     ) -> int:
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO candidates(unit_id, branch, head_commit, base_commit,"
-                " priority, status, summary, node, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (unit_id, branch, head_commit, base_commit, priority, "prepared", summary, node, ts, ts),
+                "INSERT INTO candidates(unit_id, head_commit, status, summary, node,"
+                " created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                (unit_id, head_commit, "prepared", summary, node, ts, ts),
             )
             return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
@@ -303,7 +253,6 @@ class Store:
         *,
         status: str | None = None,
         head_commit: str | None = None,
-        base_commit: str | None = None,
     ) -> None:
         sets = ["updated_at=?"]
         params: list[Any] = [now()]
@@ -313,29 +262,29 @@ class Store:
         if head_commit is not None:
             sets.append("head_commit=?")
             params.append(head_commit)
-        if base_commit is not None:
-            sets.append("base_commit=?")
-            params.append(base_commit)
         params.append(candidate_id)
         self.conn.execute(f"UPDATE candidates SET {', '.join(sets)} WHERE id=?", params)
 
     def get_candidate(self, name_or_id: str | int) -> dict[str, Any] | None:
+        select = (
+            "SELECT c.*, u.name AS unit_name, u.branch AS unit_branch,"
+            " u.worktree AS worktree, u.base_commit AS unit_base_commit"
+            " FROM candidates c JOIN units u ON u.id=c.unit_id"
+        )
         text = str(name_or_id)
         if text.isdigit():
-            row = self.conn.execute(
-                "SELECT * FROM candidates WHERE id=?", (int(text),)
-            ).fetchone()
+            row = self.conn.execute(select + " WHERE c.id=?", (int(text),)).fetchone()
         else:
             row = self.conn.execute(
-                "SELECT c.* FROM candidates c JOIN units u ON u.id=c.unit_id"
-                " WHERE u.name=? OR c.node=? ORDER BY c.id DESC LIMIT 1",
+                select + " WHERE u.name=? OR c.node=? ORDER BY c.id DESC LIMIT 1",
                 (text, text),
             ).fetchone()
         return _dict(row)
 
     def list_candidates(self, *, statuses: Sequence[str] | None = None) -> list[dict[str, Any]]:
         sql = (
-            "SELECT c.*, u.name AS unit_name, u.worktree AS worktree"
+            "SELECT c.*, u.name AS unit_name, u.worktree AS worktree,"
+            " u.branch AS unit_branch, u.base_commit AS unit_base_commit"
             " FROM candidates c JOIN units u ON u.id=c.unit_id"
         )
         params: list[Any] = []
@@ -343,87 +292,16 @@ class Store:
             placeholders = ",".join("?" for _ in statuses)
             sql += f" WHERE c.status IN ({placeholders})"
             params.extend(statuses)
-        sql += " ORDER BY c.priority DESC, c.created_at ASC, c.id ASC"
+        sql += " ORDER BY c.created_at ASC, c.id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
 
-    # ---- fingerprints / verifications --------------------------------
-    def get_or_create_fingerprint(
-        self,
-        candidate_id: int,
-        fingerprint: str,
-        tree: str,
-        cmd_digest: str,
-        toolchain_digest: str,
-        policy_digest: str,
-        source: str = "plane",
-    ) -> int:
-        row = self.conn.execute(
-            "SELECT id FROM fingerprints WHERE candidate_id=? AND fingerprint=?",
-            (candidate_id, fingerprint),
-        ).fetchone()
-        if row is not None:
-            return int(row["id"])
-        with self.tx() as c:
-            c.execute(
-                "INSERT INTO fingerprints(candidate_id, fingerprint, tree, cmd_digest,"
-                " toolchain_digest, policy_digest, source, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    candidate_id,
-                    fingerprint,
-                    tree,
-                    cmd_digest,
-                    toolchain_digest,
-                    policy_digest,
-                    source,
-                    now(),
-                ),
-            )
-            return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
-
-    def add_verification(
-        self,
-        candidate_id: int,
-        fingerprint_id: int,
-        status: str,
-        output: str,
-        duration: float,
-        commands: Any = None,
-        gpu: str | None = None,
-    ) -> int:
-        with self.tx() as c:
-            c.execute(
-                "INSERT INTO verifications(candidate_id, fingerprint_id, status, output,"
-                " duration, commands, gpu, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    candidate_id,
-                    fingerprint_id,
-                    status,
-                    output,
-                    duration,
-                    json.dumps(commands) if commands is not None else None,
-                    gpu,
-                    now(),
-                ),
-            )
-            return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
-
-    def latest_verification_for_fingerprint(
-        self, fingerprint_id: int
-    ) -> dict[str, Any] | None:
+    def latest_job_for_commit(self, commit_ref: str) -> dict[str, Any] | None:
+        """The newest terminal check job for a commit (the review evidence)."""
         return _dict(
             self.conn.execute(
-                "SELECT * FROM verifications WHERE fingerprint_id=? ORDER BY id DESC LIMIT 1",
-                (fingerprint_id,),
-            ).fetchone()
-        )
-
-    def latest_verification(self, candidate_id: int) -> dict[str, Any] | None:
-        return _dict(
-            self.conn.execute(
-                "SELECT v.*, f.source AS source, f.fingerprint AS fingerprint"
-                " FROM verifications v JOIN fingerprints f ON f.id = v.fingerprint_id"
-                " WHERE v.candidate_id=? ORDER BY v.id DESC LIMIT 1",
-                (candidate_id,),
+                "SELECT * FROM jobs WHERE commit_ref=?"
+                " AND status IN ('passed', 'failed', 'error') ORDER BY id DESC LIMIT 1",
+                (commit_ref,),
             ).fetchone()
         )
 
@@ -448,7 +326,6 @@ class Store:
             "priority",
             "status",
             "fingerprint",
-            "attempt",
             "timeout",
             "requested_at",
             "started_at",
@@ -481,8 +358,8 @@ class Store:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO jobs(wave, requester, source, commit_ref, tree, commands,"
-                " sandbox, sandbox_digest, gpu, priority, status, fingerprint, attempt,"
-                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " sandbox, sandbox_digest, gpu, priority, status, fingerprint,"
+                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     wave,
                     requester,
@@ -496,7 +373,6 @@ class Store:
                     priority,
                     "queued",
                     fingerprint,
-                    0,
                     int(timeout),
                     ts,
                 ),
@@ -575,80 +451,6 @@ class Store:
             "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
         ).fetchall()
         return {str(r["status"]): int(r["c"]) for r in rows}
-
-    # ---- campaign sessions (resume registry projection) ---------------
-    CAMPAIGN_SESSION_FIELDS = frozenset(
-        {
-            "feature_branch",
-            "pi_session_id",
-            "session_file",
-            "label",
-            "status",
-            "reason",
-            "wave",
-            "suspended_at",
-        }
-    )
-
-    def upsert_campaign_session(
-        self, *, feature_branch: str, **fields: Any
-    ) -> dict[str, Any]:
-        """Insert or update the discovery row for one campaign branch."""
-        unknown = set(fields) - self.CAMPAIGN_SESSION_FIELDS
-        if unknown:
-            raise SlicemeError(
-                f"unknown campaign_session fields: {', '.join(sorted(unknown))}"
-            )
-        ts = now()
-        existing = self.get_campaign_session(feature_branch)
-        if existing is None:
-            columns = ["feature_branch", "created_at", "updated_at", *fields]
-            placeholders = ",".join("?" for _ in columns)
-            values: list[Any] = [feature_branch, ts, ts, *fields.values()]
-            with self.tx() as c:
-                c.execute(
-                    f"INSERT INTO campaign_sessions({','.join(columns)}) "
-                    f"VALUES({placeholders})",
-                    values,
-                )
-                row = c.execute(
-                    "SELECT * FROM campaign_sessions WHERE feature_branch=?",
-                    (feature_branch,),
-                ).fetchone()
-                return _dict(row)  # type: ignore[return-value]
-        sets = ["updated_at=?"]
-        params: list[Any] = [ts]
-        for name, value in fields.items():
-            sets.append(f"{name}=?")
-            params.append(value)
-        params.append(int(existing["id"]))
-        self.conn.execute(
-            f"UPDATE campaign_sessions SET {', '.join(sets)} WHERE id=?", params
-        )
-        return self.get_campaign_session(feature_branch)  # type: ignore[return-value]
-
-    def get_campaign_session(self, feature_branch: str) -> dict[str, Any] | None:
-        return _dict(
-            self.conn.execute(
-                "SELECT * FROM campaign_sessions WHERE feature_branch=?"
-                " ORDER BY id DESC LIMIT 1",
-                (feature_branch,),
-            ).fetchone()
-        )
-
-    def list_campaign_sessions(self) -> list[dict[str, Any]]:
-        return _dicts(
-            self.conn.execute(
-                "SELECT * FROM campaign_sessions ORDER BY updated_at DESC, id DESC"
-            ).fetchall()
-        )
-
-    def delete_campaign_session(self, feature_branch: str) -> int:
-        with self.tx() as c:
-            cursor = c.execute(
-                "DELETE FROM campaign_sessions WHERE feature_branch=?", (feature_branch,)
-            )
-            return int(cursor.rowcount)
 
     # ---- attempts (per-subagent fidelity) ----------------------------
     ATTEMPT_FIELDS = frozenset(
@@ -753,3 +555,167 @@ class Store:
             params.append(int(attempt))
         sql += " ORDER BY id DESC LIMIT 1"
         return _dict(self.conn.execute(sql, params).fetchone())
+
+    # ---- review decisions (per-commit approvals) ----------------------
+    def add_review_decision(
+        self,
+        *,
+        branch_key: str,
+        action: str,
+        commit_hash: str | None = None,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one decision.  The newest row for a commit wins."""
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO review_decisions(branch_key, commit_hash, action, actor,"
+                " note, created_at) VALUES(?,?,?,?,?,?)",
+                (branch_key, commit_hash, action, actor, note, now()),
+            )
+            return _dict(
+                c.execute(
+                    "SELECT * FROM review_decisions WHERE id=last_insert_rowid()"
+                ).fetchone()
+            )  # type: ignore[return-value]
+
+    def latest_review_decision(
+        self, branch_key: str, commit_hash: str | None = None
+    ) -> dict[str, Any] | None:
+        if commit_hash is None:
+            sql = (
+                "SELECT * FROM review_decisions WHERE branch_key=?"
+                " AND commit_hash IS NULL ORDER BY id DESC LIMIT 1"
+            )
+            params: tuple[Any, ...] = (branch_key,)
+        else:
+            sql = (
+                "SELECT * FROM review_decisions WHERE branch_key=? AND commit_hash=?"
+                " ORDER BY id DESC LIMIT 1"
+            )
+            params = (branch_key, commit_hash)
+        return _dict(self.conn.execute(sql, params).fetchone())
+
+    def list_review_decisions(
+        self, *, branch_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM review_decisions"
+        params: list[Any] = []
+        if branch_key:
+            sql += " WHERE branch_key=?"
+            params.append(branch_key)
+        sql += " ORDER BY id ASC"
+        return _dicts(self.conn.execute(sql, params).fetchall())
+
+    def latest_decisions_by_commit(self, branch_key: str) -> dict[str, dict[str, Any]]:
+        """The newest decision for each reviewed commit (ascending id: last wins)."""
+        rows = self.conn.execute(
+            "SELECT * FROM review_decisions WHERE branch_key=?"
+            " AND commit_hash IS NOT NULL ORDER BY id ASC",
+            (branch_key,),
+        ).fetchall()
+        found: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            found[str(row["commit_hash"])] = _dict(row)  # type: ignore[assignment]
+        return found
+
+    def consume_review_decisions(self, decision_ids: Sequence[int]) -> None:
+        ids = [int(item) for item in decision_ids]
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(
+            f"UPDATE review_decisions SET consumed_at=? WHERE id IN ({placeholders})"
+            " AND consumed_at IS NULL",
+            [now(), *ids],
+        )
+
+    # ---- comments -----------------------------------------------------
+    def add_comment(
+        self,
+        *,
+        branch_key: str,
+        body: str,
+        commit_hash: str | None = None,
+        file: str | None = None,
+        side: str | None = None,
+        line: int | None = None,
+        line_end: int | None = None,
+        node: str | None = None,
+    ) -> dict[str, Any]:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO comments(branch_key, commit_hash, file, side, line,"
+                " line_end, body, node, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    branch_key,
+                    commit_hash,
+                    file,
+                    side,
+                    line,
+                    line_end if line_end is not None else line,
+                    body,
+                    node,
+                    "open",
+                    now(),
+                ),
+            )
+            return _dict(
+                c.execute("SELECT * FROM comments WHERE id=last_insert_rowid()").fetchone()
+            )  # type: ignore[return-value]
+
+    def get_comment(self, comment_id: str | int) -> dict[str, Any] | None:
+        return _dict(
+            self.conn.execute(
+                "SELECT * FROM comments WHERE id=?", (int(comment_id),)
+            ).fetchone()
+        )
+
+    def list_comments(
+        self,
+        *,
+        branch_key: str | None = None,
+        statuses: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM comments"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if branch_key:
+            clauses.append("branch_key=?")
+            params.append(branch_key)
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id ASC"
+        return _dicts(self.conn.execute(sql, params).fetchall())
+
+    def set_comment_status(
+        self, comment_id: int, status: str, *, addressed_at: float | None = None
+    ) -> dict[str, Any] | None:
+        self.conn.execute(
+            "UPDATE comments SET status=?, addressed_at=? WHERE id=?",
+            (status, addressed_at, int(comment_id)),
+        )
+        return self.get_comment(comment_id)
+
+    def prune_reviews(
+        self, *, keep_branch_keys: set[str], keep_after: float
+    ) -> dict[str, int]:
+        """Delete review rows older than *keep_after* for unkept branches."""
+        clause = ""
+        params: list[Any] = [keep_after]
+        if keep_branch_keys:
+            keys = sorted(keep_branch_keys)
+            clause = " AND branch_key NOT IN (" + ",".join("?" for _ in keys) + ")"
+            params.extend(keys)
+        with self.tx() as c:
+            decisions = c.execute(
+                "DELETE FROM review_decisions WHERE created_at < ?" + clause, params
+            ).rowcount
+            comments = c.execute(
+                "DELETE FROM comments WHERE created_at < ?" + clause, params
+            ).rowcount
+        return {"decisions": int(decisions), "comments": int(comments)}

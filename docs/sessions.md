@@ -1,9 +1,10 @@
 # Sliceme session suspend and resume design
 
-Status: implemented. Phases 1–4 landed (engine `resume`/`sessions`/`attempt`,
-the `campaign_sessions` projection, the adapter descriptor and pause flag, the
-`/suspend` and `/campaigns` commands, and wave-scoped continuation); budget
-auto-suspend and a paused-worktree prune policy remain future work. Revised to
+Status: implemented. Phases 1–4 landed (engine `status --resume`/`--sessions`
+and `attempt`, the adapter descriptor and pause flag, the `/suspend` and
+`/campaigns` commands, and wave-scoped continuation); budget auto-suspend and a
+paused-worktree prune policy remain future work. The descriptor file is the
+only registry: there is no `campaign_sessions` table. Revised to
 match the single-campaign-worktree refactor (commit `234389e`); the earlier
 draft still assumed one unit worktree per node attempt, which the engine no
 longer does.
@@ -29,7 +30,7 @@ grounded in the current engine and adapter.
 - Workers are **pure editors in one shared campaign worktree**
   (`Service.create_campaign_workspace`, unit name `campaign`), which is never
   recreated or rebased between waves. A wave's changes are committed by
-  `exec --record --wave N`, one commit and one `prepared` candidate per node.
+  `wave --record --wave N`, one commit and one `prepared` candidate per node.
 - `docs/observability.md` already proposes the durable `attempts` table and the
   per-node heartbeat files this design uses for continuation fidelity.
 
@@ -138,44 +139,18 @@ appended here are not sent to the model.
 
 The adapter is the single writer of the resume descriptor, matching the
 existing rule that the orchestrator writes `dag.json` and `state.json`. The
-engine reads the descriptor and projects it into SQLite.
+engine reads the descriptor directly; it keeps no database copy.
 
 | Store | Path | Owner | Role |
 |---|---|---|---|
 | Resume descriptor | `.sliceme/<branch-key>.session.json` | pi adapter | pi session binding, pause reason, wave, resume plan. |
-| Queryable record | `campaign_sessions` table in `.sliceme/state.db` | engine | Rebuildable projection; refreshed by `sliceme sessions`/`resume`. |
 | Global index | optional, see below | pi adapter | Cross-repository discovery cache; rebuildable. |
 | Transcript | pi session JSONL | pi | Conversation history. |
 
 Suspension is a pi-session concern, so there is deliberately **no engine
 `suspend` action**: two rich writers in two languages for one file is the
 failure mode this rule avoids. A second terminal inspects campaigns with
-`sliceme sessions` and resumes by starting pi.
-
-The `campaign_sessions` table is written through the additive migration path in
-`Store._migrate`, like `jobs.timeout` and `candidates.node`. It carries the
-branch so a row can be joined to a specific campaign, and it is refreshed from
-the descriptor files rather than written at shutdown (the adapter cannot spawn a
-subprocess from `session_shutdown`).
-
-```sql
-CREATE TABLE IF NOT EXISTS campaign_sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  feature_branch TEXT,                     -- branch_key scope for the campaign
-  pi_session_id TEXT,
-  session_file TEXT,
-  label TEXT,
-  status TEXT NOT NULL DEFAULT 'active',   -- active | suspended | ready | completed | failed
-  reason TEXT,                             -- user | crash | budget | error
-  wave INTEGER,
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL,
-  suspended_at REAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_campaign_sessions_branch
-  ON campaign_sessions(feature_branch);
-```
+`sliceme status --sessions` and resumes by starting pi.
 
 The optional global index reuses `integrations/pi/common.ts::agentDir()`. That
 helper currently reads `PI_AGENT_DIR`; pi's documented configuration variable is
@@ -187,7 +162,7 @@ never assume `~/.pi/agent/sessions/--repo--/`.
 
 To keep the global index race-free, discovery should be per-campaign fragment
 files plus `cwd`-based lookup rather than one shared JSON document that several
-planes read-modify-write. A `sliceme sessions --rebuild` can regenerate it by
+planes read-modify-write. A `sliceme status --sessions` can regenerate it by
 scanning descriptor files and pi session headers. For v1 it is simplest to drop
 the global index entirely and discover campaigns from `ctx.cwd`.
 
@@ -200,19 +175,18 @@ generated from the registry; `integrations/pi/unit.ts::SLICEME_ACTIONS` and
 `tests/test_pi_package.py` follow.
 
 ```text
-sliceme resume  [--plan-only]
-sliceme sessions [--rebuild]
+sliceme status --resume  [--plan-only]
+sliceme status --sessions
 ```
 
-Both actions also print JSON under the CLI's global `--json` flag, which is how
+Both flags also print JSON under the CLI's global `--json` flag, which is how
 the pi adapter calls the engine.
 
-- `resume` reads `.sliceme/<branch-key>.session.json`, reconciles it with git
-  plus `state.db`, refreshes `campaign_sessions`, and returns the resume plan.
-  `--plan-only` reports without mutating.
-- `sessions` is the engine view of the registered campaigns for a second
-  terminal. It reads the descriptor files and the `campaign_sessions`
-  projection. `--rebuild` regenerates the optional global index.
+- `status --resume` reads `.sliceme/<branch-key>.session.json`, reconciles it
+  with git plus `state.db`, and returns the resume plan. `--plan-only` reports
+  without side effects.
+- `status --sessions` is the engine view of the registered campaigns for a
+  second terminal. It reads the descriptor files.
 
 There is no engine `suspend`; the adapter writes the descriptor.
 
@@ -249,7 +223,7 @@ There is no engine `suspend`; the adapter writes the descriptor.
     }
   },
   "resume_plan": {
-    "record_wave": 1,       // run exec --record --wave 1 first
+    "record_wave": 1,       // run wave --record --wave 1 first
     "resume": ["w3"],       // edits already in the campaign worktree
     "respawn": ["w4"],      // no attributable changes
     "verify": ["w3"],       // re-verify from cache after recording
@@ -303,7 +277,7 @@ This is the main saving for long waves. The campaign worktree is never reset on
 suspend. A `paused` node is one whose worker was interrupted before `record`, so
 on resume the coordinator:
 
-1. runs `exec --record --wave N` under the executor lock, committing whatever
+1. runs `wave --record --wave N` under the executor lock, committing whatever
    edits exist and attributing every changed path to exactly one node by its
    owned directories (`Service._record_wave_commits` diffs against `HEAD`, so
    earlier waves are not re-attributed);
@@ -354,7 +328,7 @@ a node or wave boundary rather than mid-write.
    the model to stop on `paused`. Covering `record` and `verify` matters: a pause
    issued while a wave is being recorded or verified must not be ignored.
 
-3. When the turn settles, the descriptor is written, `campaign_sessions` is
+3. When the turn settles, the descriptor is written, the campaign list is
    refreshed on the next engine call, and the user is told how to resume.
 
 4. Resume clears the pause flag before doing anything else, and ignores a flag
@@ -391,7 +365,7 @@ Note that resume **correctness** does not depend on `attempts`: git plus
 
 | Layer | Files |
 |---|---|
-| Engine | `sliceme/surface.py` (`resume`, `sessions`), `sliceme/service.py` (reconcile + plan), `sliceme/store.py` (`campaign_sessions` projection), `sliceme/campaign.py` (descriptor reader and session paths), `sliceme/cli.py` (generated) |
+| Engine | `sliceme/surface.py` (`status --resume`, `status --sessions`), `sliceme/service.py` (reconcile + plan), `sliceme/campaign.py` (descriptor reader and session paths), `sliceme/cli.py` (generated) |
 | Adapter | `integrations/pi/coordinator.ts` (tool verbs, pause flag, event hooks, resume prompt, `/suspend`, `/campaigns`), `integrations/pi/common.ts` (descriptor writer, registry IO, heartbeat), `integrations/pi/unit.ts` (`SLICEME_ACTIONS`) |
 | Docs | this file; updates to `reference.md` (§1 actions, §3 state layout), `workflow.md`, `guide.md` (§Failure and resume), `database.md` (§11 related proposed work) |
 
@@ -400,8 +374,8 @@ code, because there is none.
 
 ## 8. Phased delivery
 
-1. **Engine resume primitive.** The descriptor reader, `resume`/`sessions`
-   actions, the `campaign_sessions` projection, and path helpers in
+1. **Engine resume primitive.** The descriptor reader, `status --resume` /
+   `--sessions`, and path helpers in
    `campaign.py`. No adapter change; testable from the CLI with a hand-written
    descriptor and reusing existing recovery.
 2. **Attempt fidelity.** The `attempts` table, heartbeat files, and
@@ -410,7 +384,7 @@ code, because there is none.
 3. **Adapter checkpoint and pause.** `session_shutdown` descriptor write,
    `session_start` resume injection, the pause flag in `spawn`/`ready`/
    `record`/`verify`, and `/suspend` using `waitForIdle()`.
-4. **Management UX.** `/campaigns`, `sliceme sessions`, `switchSession` resume,
+4. **Management UX.** `/campaigns`, `sliceme status --sessions`, `switchSession` resume,
    discovery, and `--rebuild`.
 5. **Continuation and budgets.** Wave-scoped record-on-resume, continuation
    workers, budget auto-suspend, and a prune policy for preserved campaign
@@ -422,7 +396,7 @@ code, because there is none.
   to `done`, a `done` node with a matching commit stays `done`, a `prepared`
   candidate without a commit to `pending`, and a preserved worktree to
   `paused`; orphan job recovery; idempotent resume; missing-worktree fallback;
-  additive `campaign_sessions` migration on an older plane.
+  additive `attempts` migration on an older plane.
 - Adapter tests: the pause flag blocks `spawn`/`ready`/`record`/`verify`;
   `session_shutdown` writes the descriptor; `session_start` injects the resume
   prompt only on reason `resume`; `/suspend` clears the flag on resume; a stale
@@ -441,7 +415,7 @@ code, because there is none.
   (`ExtensionCommandContext` extends `ExtensionContext`), so auto-exit is
   straightforward; the default stays park-and-notify.
 - **Registry authority.** The resume descriptor is authoritative for the pi
-  binding; `campaign_sessions` is a rebuildable projection. A global cache is
+  binding. A global cache is
   optional and should be per-campaign fragments, not one shared JSON document.
 - **Paused worktree retention.** Disk cost versus restart cost; add a
   time-boxed prune and surface it in `gc`.

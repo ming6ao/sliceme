@@ -74,24 +74,6 @@ class CheckResult:
         }
 
 
-@dataclass
-class VerificationResult:
-    status: str  # passed | failed | error
-    fingerprint: Fingerprint
-    checks: list[CheckResult] = field(default_factory=list)
-    from_cache: bool = False
-    duration: float = 0.0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "status": self.status,
-            "fingerprint": self.fingerprint.fingerprint,
-            "from_cache": self.from_cache,
-            "duration": round(self.duration, 3),
-            "checks": [c.to_dict() for c in self.checks],
-        }
-
-
 def checks_from_config(config: dict[str, Any]) -> list[CheckSpec]:
     raw = config.get("checks") or []
     return [CheckSpec.from_config(item) for item in raw]
@@ -160,41 +142,6 @@ def acceptance_checks(acceptance: list[str], *, timeout: int = 3600) -> list[Che
         CheckSpec(name=f"acceptance[{i}]", command=command, required=True, timeout=timeout)
         for i, command in enumerate(acceptance)
     ]
-
-
-def verify_node(
-    root: Path,
-    config: dict[str, Any],
-    commit: str,
-    acceptance: list[str],
-    *,
-    source: str,
-    gpu: str = "none",
-    worktree: Path | None = None,
-) -> VerificationResult:
-    """Verify a node's acceptance commands at *commit* (source ``node:<id>``).
-
-    The verifier is the only GPU consumer; ``gpu`` is recorded for audit but
-    the commands themselves own the broker invocation (``tools/gpu.sh``).
-    """
-    checks = acceptance_checks(acceptance)
-    fingerprint = compute_fingerprint(root, config, commit, checks=checks, source=source)
-    status, results, duration = run_checks(
-        root, config, commit, worktree=worktree, checks=checks
-    )
-    if gpu != "none":
-        results.append(
-            CheckResult(
-                name="gpu",
-                command=f"gpu={gpu}",
-                status="passed",
-                returncode=0,
-                output=f"GPU tier {gpu} reserved by the verifier",
-                duration=0.0,
-                required=False,
-            )
-        )
-    return VerificationResult(status, fingerprint, results, False, duration)
 
 
 def run_checks(

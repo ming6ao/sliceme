@@ -33,12 +33,10 @@ import { runSliceme } from "./common.ts";
 export const SLICEME_ACTIONS = [
 	"start",
 	"status",
-	"commit",
 	"deliver",
-	"report",
 	"exec",
-	"resume",
-	"sessions",
+	"wave",
+	"review",
 	"attempt",
 ] as const;
 
@@ -83,7 +81,7 @@ export default function unitExtension(pi: ExtensionAPI) {
 			unit: Type.Optional(Type.String({ description: "unit (defaults to this worktree)" })),
 			task: Type.Optional(Type.String()),
 			summary: Type.Optional(Type.String()),
-			message: Type.Optional(Type.String({ description: "commit message (action=commit)" })),
+			message: Type.Optional(Type.String({ description: "wave: commit message suffix" })),
 			no_unit: Type.Optional(
 				Type.Boolean({ description: "start: initialise the plane without a unit for cwd" }),
 			),
@@ -136,10 +134,10 @@ export default function unitExtension(pi: ExtensionAPI) {
 			),
 			run: Type.Optional(Type.Boolean({ description: "exec: drain the queue" })),
 			open: Type.Optional(
-				Type.Boolean({ description: "exec: create the single worktree for --wave" }),
+				Type.Boolean({ description: "wave: create or reuse the campaign worktree" }),
 			),
 			record: Type.Optional(
-				Type.Boolean({ description: "exec: record a wave (conformance + per-node commits)" }),
+				Type.Boolean({ description: "wave: record a wave (conformance + per-node commits)" }),
 			),
 			wait: Type.Optional(Type.Boolean({ description: "exec: wait for a job" })),
 			cancel: Type.Optional(Type.Boolean({ description: "exec: cancel a queued job" })),
@@ -161,6 +159,36 @@ export default function unitExtension(pi: ExtensionAPI) {
 			wave: Type.Optional(Type.Number({ description: "exec: campaign wave" })),
 			requester: Type.Optional(Type.String({ description: "exec: verifier id" })),
 			limit: Type.Optional(Type.Number({ description: "exec: max jobs to drain" })),
+			serve: Type.Optional(
+				Type.Boolean({ description: "review: start the foreground loopback server" }),
+			),
+			plane: Type.Optional(
+				Type.Array(Type.String(), { description: "review: plane root to serve (repeatable)" }),
+			),
+			port: Type.Optional(Type.Number({ description: "review: bind port" })),
+			poll: Type.Optional(
+				Type.Boolean({ description: "review: print open comments and the newest decision" }),
+			),
+			ack: Type.Optional(Type.Boolean({ description: "review: acknowledge one comment" })),
+			state: Type.Optional(Type.Boolean({ description: "review: print one snapshot" })),
+			diff: Type.Optional(Type.Boolean({ description: "review: print one file diff" })),
+			comment: Type.Optional(Type.Boolean({ description: "review: record a comment" })),
+			decision: Type.Optional(
+				StringEnum(["approve", "request_changes", "override"] as const, {
+					description: "review: record a decision",
+				}),
+			),
+			all: Type.Optional(
+				Type.Boolean({ description: "review: with approve, approve every unapproved commit" }),
+			),
+			file: Type.Optional(Type.String({ description: "review: file path" })),
+			side: Type.Optional(StringEnum(["old", "new"] as const, { description: "review: comment side" })),
+			line: Type.Optional(Type.Number({ description: "review: line number" })),
+			line_end: Type.Optional(Type.Number({ description: "review: end line for a range" })),
+			body: Type.Optional(Type.String({ description: "review: comment body" })),
+			note: Type.Optional(Type.String({ description: "review: decision note" })),
+			actor: Type.Optional(Type.String({ description: "review: who recorded the decision" })),
+			comment_id: Type.Optional(Type.Number({ description: "review: comment id for --ack" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const { action, ...rest } = params as Record<string, unknown> & { action: string };

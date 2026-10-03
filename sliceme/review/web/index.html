@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>sliceme review</title>
+		<link rel="stylesheet" href="/style.css" />
+	</head>
+	<body>
+		<header id="topbar">
+			<div id="identity">
+				<strong id="target-name">sliceme review</strong>
+				<span id="tips" class="tips"></span>
+				<span id="approval-state" class="muted"></span>
+				<button id="stale" class="stale" type="button" hidden>stale</button>
+			</div>
+			<div id="decisions">
+				<button id="approve-all" type="button">Approve all</button>
+				<button id="deliver" type="button" hidden>Deliver</button>
+			</div>
+		</header>
+
+		<main>
+			<aside id="left" aria-label="Commits">
+				<h2>Commits</h2>
+				<div id="commit-list" class="file-tree"></div>
+				<h2>Files</h2>
+				<div id="file-tree" class="file-tree"></div>
+			</aside>
+
+			<section id="center" aria-label="Diff">
+				<div id="diff-header" class="muted"></div>
+				<div id="diff" class="diff"></div>
+				<pre id="report" class="report" hidden></pre>
+			</section>
+
+			<aside id="right" aria-label="Review">
+				<section>
+					<h2>Evidence</h2>
+					<div id="evidence" class="evidence"></div>
+				</section>
+				<section>
+					<h2>
+						Comments <span id="comment-count" class="muted"></span>
+					</h2>
+					<div id="comments" class="comments"></div>
+					<form id="comment-form" hidden>
+						<div id="comment-anchor" class="muted"></div>
+						<textarea
+							id="comment-body"
+							placeholder="Write a comment…"
+							rows="3"
+							aria-label="Comment body"
+						></textarea>
+						<div class="row">
+							<button type="submit">Comment</button>
+							<button type="button" id="comment-cancel">Cancel</button>
+						</div>
+					</form>
+				</section>
+			</aside>
+		</main>
+
+		<footer id="statusbar" class="muted"></footer>
+		<div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+		<script type="module" src="/app.js"></script>
+	</body>
+</html>

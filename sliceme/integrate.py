@@ -37,24 +37,15 @@ from . import campaign, gitutil
 from .ownership import DEFAULT_WAVE_SIZE, plan_dag_waves
 from .store import Store
 from .util import SlicemeError, scratch_dir, worktrees_dir
-from .verifier import (
-    CheckResult,
-    VerificationResult,
-    acceptance_checks,
-    compute_fingerprint,
-    run_checks,
-    verify_node,
-)
+from .verifier import CheckResult, run_checks
 
 __all__ = [
     "LandResult",
     "Wave",
     "deliver",
     "found_default_branch",
-    "integrate",
     "is_default_branch",
     "plan_waves",
-    "record_node_verification",
     "simulate",
     "target_branch_of",
 ]
@@ -85,15 +76,6 @@ class LandResult:
             "already_up_to_date": self.already_up_to_date,
             "checks": [c.to_dict() for c in self.checks],
         }
-
-
-def checks_output(checks: list[CheckResult]) -> str:
-    lines = []
-    for check in checks:
-        lines.append(f"[{check.status}] {check.name}: {check.command}")
-        if check.output:
-            lines.append(check.output[-2000:])
-    return "\n".join(lines) or "(no checks configured)"
 
 
 #: Conventional names that can never be a campaign target branch.
@@ -127,15 +109,6 @@ def main_worktree(root: Path, branch: str) -> tuple[Path, bool]:
     gitutil.cleanup_worktree(root, path)
     gitutil.add_worktree(root, path, branch=branch, base=branch, new_branch=False)
     return path, True
-
-
-def mark_landed(store: Store, candidate: dict[str, Any], merge_commit: str) -> None:
-    cid = int(candidate["id"])
-    store.update_candidate(cid, status="landed", head_commit=merge_commit)
-    unit = store.get_unit(int(candidate["unit_id"]))
-    if unit:
-        store.set_unit_state(int(unit["id"]), "landed")
-    store.conn.commit()
 
 
 def conflict_summary(result: gitutil.GitResult) -> str:
@@ -177,13 +150,6 @@ def found_default_branch(root: Path, *, exclude: str | None = None) -> str:
     return "main"
 
 
-def _recorded_default(config: dict[str, Any], root: Path, *, exclude: str | None = None) -> str:
-    recorded = config.get("default_branch")
-    if recorded:
-        return str(recorded)
-    return found_default_branch(root, exclude=exclude)
-
-
 def is_default_branch(
     root: Path, name: str | None, config: dict[str, Any] | None = None
 ) -> bool:
@@ -201,328 +167,6 @@ def is_default_branch(
     if recorded and name == recorded:
         return True
     return name == found_default_branch(root)
-
-
-def _verify_and_record_plane(
-    store: Store,
-    root: Path,
-    config: dict[str, Any],
-    candidate: dict[str, Any],
-    commit: str,
-    *,
-    worktree: Path | None = None,
-) -> tuple[bool, list[CheckResult]]:
-    """Run (or reuse) the plane check vector for *commit* and persist it."""
-    cid = int(candidate["id"])
-    fingerprint = compute_fingerprint(root, config, commit)
-    fp_id = store.get_or_create_fingerprint(
-        cid,
-        fingerprint.fingerprint,
-        fingerprint.tree,
-        fingerprint.cmd_digest,
-        fingerprint.toolchain_digest,
-        fingerprint.policy_digest,
-        source=fingerprint.source,
-    )
-    cached = store.latest_verification_for_fingerprint(fp_id)
-    if cached is not None:
-        checks = [
-            CheckResult(
-                name="cache",
-                command="(cached)",
-                status=str(cached["status"]),
-                returncode=0,
-                output=cached.get("output") or "",
-                duration=float(cached.get("duration") or 0.0),
-            )
-        ]
-        return cached["status"] == "passed", checks
-    status, checks, duration = run_checks(root, config, commit, worktree=worktree)
-    store.add_verification(
-        cid,
-        fp_id,
-        status,
-        checks_output(checks),
-        duration,
-        commands=fingerprint.commands,
-    )
-    store.conn.commit()
-    return status == "passed", checks
-
-
-def record_node_verification(
-    store: Store,
-    root: Path,
-    config: dict[str, Any],
-    candidate: dict[str, Any],
-    acceptance: list[str],
-    *,
-    node: str,
-    gpu: str = "none",
-    worktree: Path | None = None,
-) -> tuple[bool, VerificationResult]:
-    """Record a node's acceptance verdict, reusing a cached fingerprint (§6.4).
-
-    Returns ``(passed, result)``; when a passing verdict already exists for the
-    same ``(tree, acceptance, toolchain, policy, source)`` fingerprint the
-    commands are not re-run.
-    """
-    source = f"node:{node}"
-    head = gitutil.rev_parse(root, candidate["branch"])
-    fingerprint = compute_fingerprint(
-        root, config, head, checks=acceptance_checks(acceptance), source=source
-    )
-    fp_id = store.get_or_create_fingerprint(
-        int(candidate["id"]),
-        fingerprint.fingerprint,
-        fingerprint.tree,
-        fingerprint.cmd_digest,
-        fingerprint.toolchain_digest,
-        fingerprint.policy_digest,
-        source=fingerprint.source,
-    )
-    cached = store.latest_verification_for_fingerprint(fp_id)
-    if cached is not None:
-        result = VerificationResult(
-            status=str(cached["status"]),
-            fingerprint=fingerprint,
-            checks=[],
-            from_cache=True,
-            duration=float(cached.get("duration") or 0.0),
-        )
-        return cached["status"] == "passed", result
-    result = verify_node(
-        root, config, head, acceptance, source=source, gpu=gpu, worktree=worktree
-    )
-    store.add_verification(
-        int(candidate["id"]),
-        fp_id,
-        result.status,
-        checks_output(result.checks),
-        result.duration,
-        commands=fingerprint.commands,
-        gpu=gpu,
-    )
-    store.conn.commit()
-    return result.status == "passed", result
-
-
-def _candidate_for_node(
-    store: Store, node: str
-) -> tuple[dict[str, Any] | None, bool]:
-    """Resolve the latest candidate for a node/unit id.
-
-    Returns ``(candidate, already_landed)``.  A landed candidate is reported as
-    already integrated so a repeated ``--node`` call is a no-op.
-    """
-    candidates = [
-        c
-        for c in store.list_candidates()
-        if c["unit_name"] == node
-        or c.get("node") == node
-        or str(c["unit_id"]) == str(node)
-    ]
-    if not candidates:
-        return None, False
-    prepared = [c for c in candidates if c["status"] == "prepared"]
-    if prepared:
-        return prepared[-1], False
-    return candidates[-1], True
-
-
-def integrate(
-    store: Store,
-    root: Path,
-    config: dict[str, Any],
-    *,
-    node: str | None = None,
-    acceptance: list[str] | None = None,
-    gpu: str = "none",
-    check_only: bool = False,
-    run_checks_flag: bool = True,
-) -> list[LandResult]:
-    main_branch = target_branch_of(config)
-    if is_default_branch(root, main_branch, config):
-        raise SlicemeError(
-            f"refusing to integrate onto the default branch '{main_branch}'; "
-            "sliceme never commits to main or master "
-            "(`sliceme start --no-unit --target feat/... --base ...`)"
-        )
-
-    acceptance = list(acceptance or [])
-    results: list[LandResult] = []
-
-    if node is not None:
-        candidate, already_landed = _candidate_for_node(store, node)
-        if candidate is None:
-            raise SlicemeError(f"no candidate for node '{node}'")
-        candidates = [] if already_landed else [candidate]
-        if already_landed:
-            results.append(
-                LandResult(
-                    candidate_id=int(candidate["id"]),
-                    unit_name=candidate["unit_name"],
-                    branch=candidate["branch"],
-                    status="landed",
-                    detail="already integrated",
-                    already_up_to_date=True,
-                )
-            )
-    else:
-        candidates = store.list_candidates(statuses=["prepared"])
-
-    # The wave planner merges onto the plane's ``base``; for a campaign the
-    # integration target is the feature branch, so plan against that instead.
-    wave_config = {**config, "base": main_branch}
-
-    if check_only:
-        for candidate in ordered_candidates(store, root, wave_config, candidates):
-            if acceptance:
-                passed, result = record_node_verification(
-                    store,
-                    root,
-                    config,
-                    candidate,
-                    acceptance,
-                    node=node or candidate["unit_name"],
-                    gpu=gpu,
-                )
-                results.append(
-                    LandResult(
-                        candidate_id=int(candidate["id"]),
-                        unit_name=candidate["unit_name"],
-                        branch=candidate["branch"],
-                        status="passed" if passed else "failed",
-                        detail="node acceptance " + ("passed" if passed else "failed"),
-                        checks=result.checks,
-                    )
-                )
-            elif run_checks_flag:
-                head = gitutil.rev_parse(root, candidate["branch"])
-                passed, checks = _verify_and_record_plane(
-                    store, root, config, candidate, head
-                )
-                results.append(
-                    LandResult(
-                        candidate_id=int(candidate["id"]),
-                        unit_name=candidate["unit_name"],
-                        branch=candidate["branch"],
-                        status="passed" if passed else "failed",
-                        detail="plane checks " + ("passed" if passed else "failed"),
-                        checks=checks,
-                    )
-                )
-        return results
-
-    ordered = ordered_candidates(store, root, wave_config, candidates)
-    if not ordered:
-        return results
-
-    wt_path, _created = main_worktree(root, main_branch)
-    if not gitutil.is_clean(wt_path):
-        raise SlicemeError(
-            f"integration worktree {wt_path} is dirty; commit or discard changes before integrate"
-        )
-
-    for candidate in ordered:
-        head = gitutil.rev_parse(root, candidate["branch"])
-        feature_head = gitutil.head_commit(wt_path)
-        if gitutil.merge_base(root, feature_head, head) == head:
-            mark_landed(store, candidate, feature_head)
-            results.append(
-                LandResult(
-                    candidate_id=int(candidate["id"]),
-                    unit_name=candidate["unit_name"],
-                    branch=candidate["branch"],
-                    status="landed",
-                    detail="already contained in the feature branch",
-                    merge_commit=feature_head,
-                    already_up_to_date=True,
-                )
-            )
-            continue
-
-        pre_merge = feature_head
-
-        # Node acceptance first (when the orchestrator passes it), so a failing
-        # acceptance never advances the feature branch.
-        if acceptance:
-            passed, result = record_node_verification(
-                store,
-                root,
-                config,
-                candidate,
-                acceptance,
-                node=node or candidate["unit_name"],
-                gpu=gpu,
-            )
-            if not passed:
-                results.append(
-                    LandResult(
-                        candidate_id=int(candidate["id"]),
-                        unit_name=candidate["unit_name"],
-                        branch=candidate["branch"],
-                        status="failed",
-                        detail="node acceptance failed",
-                        checks=result.checks,
-                    )
-                )
-                break
-
-        merge = gitutil.merge_into(
-            wt_path,
-            candidate["branch"],
-            message=f"sliceme integrate {candidate['branch']}",
-            no_ff=True,
-        )
-        if not merge.ok:
-            gitutil.merge_abort(wt_path)
-            results.append(
-                LandResult(
-                    candidate_id=int(candidate["id"]),
-                    unit_name=candidate["unit_name"],
-                    branch=candidate["branch"],
-                    status="failed",
-                    detail="merge conflict: " + conflict_summary(merge),
-                )
-            )
-            break
-
-        merge_commit = gitutil.head_commit(wt_path)
-        checks: list[CheckResult] = []
-        if run_checks_flag:
-            passed, checks = _verify_and_record_plane(
-                store, root, config, candidate, merge_commit
-            )
-            if not passed:
-                gitutil.reset_hard(wt_path, pre_merge)
-                store.conn.commit()
-                results.append(
-                    LandResult(
-                        candidate_id=int(candidate["id"]),
-                        unit_name=candidate["unit_name"],
-                        branch=candidate["branch"],
-                        status="failed",
-                        detail="combined checks failed; feature branch restored",
-                        checks=checks,
-                    )
-                )
-                break
-
-        mark_landed(store, candidate, merge_commit)
-        store.conn.commit()
-        results.append(
-            LandResult(
-                candidate_id=int(candidate["id"]),
-                unit_name=candidate["unit_name"],
-                branch=candidate["branch"],
-                status="landed",
-                detail=f"merged into {main_branch}",
-                merge_commit=merge_commit,
-                checks=checks,
-            )
-        )
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +280,7 @@ def deliver(
 ) -> list[LandResult]:
     """Merge the campaign worktree into the target feature branch.
 
-    Called once, after every wave is recorded and the user approves delivery.
+    Called once, after every wave is recorded and every commit is approved.
     The target branch is never the default branch: there is no override.
     """
     target = target or target_branch_of(config)
@@ -646,20 +290,19 @@ def deliver(
             "sliceme never commits to main or master"
         )
     source = source or config.get("worktree_branch")
-    if source and gitutil.branch_exists(root, source):
-        return _deliver_branch(
-            store,
-            root,
-            config,
-            target=target,
-            source=str(source),
-            no_ff=no_ff,
-            run_checks_flag=run_checks_flag,
+    if not source or not gitutil.branch_exists(root, source):
+        raise SlicemeError(
+            "no campaign worktree branch to deliver; run `sliceme wave --open` first"
         )
-
-    # Non-campaign planes keep the generic per-candidate path.
-    merged = {**config, "target_branch": target, "main_branch": target}
-    return integrate(store, root, merged, run_checks_flag=run_checks_flag)
+    return _deliver_branch(
+        store,
+        root,
+        config,
+        target=target,
+        source=str(source),
+        no_ff=no_ff,
+        run_checks_flag=run_checks_flag,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +321,7 @@ class Wave:
             "wave": self.index,
             "combined": self.combined,
             "members": [
-                {"candidate": c["id"], "unit": c["unit_name"], "branch": c["branch"]}
+                {"candidate": c["id"], "unit": c["unit_name"], "branch": c["unit_branch"]}
                 for c in self.candidates
             ],
             "check_status": self.check_status,
@@ -734,26 +377,6 @@ def plan_waves(
     return waves
 
 
-def ordered_candidates(
-    store: Store, root: Path, config: dict[str, Any], candidates: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Flatten the wave plan into a merge order, preserving every member."""
-    waves = plan_waves(store, root, config, candidates)
-    ordered: list[dict[str, Any]] = []
-    seen: set[int] = set()
-    for wave in waves:
-        for candidate in wave.candidates:
-            cid = int(candidate["id"])
-            if cid not in seen:
-                seen.add(cid)
-                ordered.append(candidate)
-    for candidate in candidates:
-        cid = int(candidate["id"])
-        if cid not in seen:
-            ordered.append(candidate)
-    return ordered
-
-
 def _synthetic_commit(root: Path, tree: str, parents: list[str], message: str) -> str:
     args = ["commit-tree", tree]
     for parent in parents:
@@ -787,7 +410,7 @@ def simulate(
     for wave in waves:
         combined = gitutil.rev_parse(root, base_ref)
         for candidate in wave.candidates:
-            ok, combined = _merge_into_wave(root, combined, candidate["branch"])
+            ok, combined = _merge_into_wave(root, combined, candidate["unit_branch"])
             if not ok:
                 combined = ""
                 break

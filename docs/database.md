@@ -15,14 +15,16 @@ only. The plane directory layout is described in `docs/reference.md` §3.
 
 The database holds what git and the plane files cannot express quickly:
 
-- the set of sessions, isolated work units, and candidate commits;
-- content fingerprints and verification verdicts pinned to them;
-- the single executor's check queue and timing.
+- the work units and the commits they offer;
+- the single executor's check queue, its fingerprints, and its results;
+- the per-subagent attempt metrics;
+- the review decisions and comments.
 
 It deliberately does **not** hold the plan. `dag.json` and `state.json` are
 files under `.sliceme/`; the plan is authoritative there and is read by the
 engine. `state.json` is a rebuildable cache, and git plus this database win on
-conflict.
+conflict. The suspend/resume descriptor is a file too; the database keeps no
+projection of it.
 
 ## 2. Location and connection
 
@@ -39,7 +41,8 @@ conflict.
 WAL lets many readers proceed while one writer holds the write lock, which
 suits a coordinator, parallel subagents, and a second terminal all reading.
 `busy_timeout` lets a writer wait rather than fail immediately when another
-process holds the lock.
+process holds the lock. The review server opens each plane's `Store` once to run
+the schema, then request threads open with `migrate=False`.
 
 ## 3. Schema evolution
 
@@ -61,61 +64,47 @@ working.
 ## 4. Entity relationships
 
 ```text
-sessions 1 ──── * units 1 ──── * candidates 1 ──── * fingerprints
-                                      │                     │
-                                      └───────── * verifications
+units 1 ──── * candidates
 
-jobs  (standalone; no foreign-key edges)
+jobs              (standalone; no foreign-key edges)
+attempts          (standalone)
+review_decisions  (standalone; keyed by branch_key and commit)
+comments          (standalone; keyed by branch_key)
 ```
 
-- A **session** groups units.
-- A **unit** is one writer: a git worktree plus a branch. Kinds are `worker`
-  and `wave`.
-- A **candidate** is a committed head a unit offers for landing.
-- A **fingerprint** pins a candidate to a content identity.
-- A **verification** is a verdict against a fingerprint.
-- A **job** is a check vector queued for the single executor. It is
-  intentionally decoupled: the fingerprint is stored as text and the source is
-  `node:<id>` or `wave:<n>`, not a foreign-key edge.
+- A **unit** is one writer: a git worktree plus a branch. The campaign unit is
+  named `campaign`; `start` may create one more unit for a directory.
+- A **candidate** is a committed head a unit offers for delivery. The campaign
+  worktree accumulates commits, so a later wave adds rows.
+- A **job** is a check vector queued for the single executor. It carries its own
+  fingerprint and result; the review evidence reads the newest terminal job for
+  a commit.
+- An **attempt** is one subagent run and its metrics.
+- A **review decision** is one approval or rejection for one commit.
+- A **comment** is one review comment on a commit or the report.
 
 All `*_at` columns are `REAL` epoch seconds from `util.now()` (`time.time()`).
 
 ## 5. Table reference
 
-### 5.1 `sessions`
+### 5.1 `units`
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `name` | TEXT UNIQUE NOT NULL | defaults to the unit name |
-| `task` | TEXT | free task description |
-| `attachment` | TEXT NOT NULL DEFAULT `'terminal'` | only value used today |
-| `created_at` | REAL NOT NULL | |
-
-Created by `Store.create_session` through `Service.create_session`, and only
-when the name does not already exist. Read by `Store.get_session` (id or name),
-`Service.create_workspace`, and `Service.create_wave_workspace`.
-
-### 5.2 `units`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `session_id` | INTEGER → `sessions(id)` | |
-| `name` | TEXT NOT NULL | node id, `wave-<N>`, or `<node>-a<attempt>` |
-| `kind` | TEXT NOT NULL DEFAULT `'worker'` | `worker` or `wave` |
+| `name` | TEXT NOT NULL | `campaign`, or a `start` unit name |
+| `kind` | TEXT NOT NULL DEFAULT `'worker'` | `worker` or `campaign` |
 | `worktree` | TEXT NOT NULL | absolute path under `.sliceme/worktrees/` |
 | `branch` | TEXT NOT NULL | `sliceme/<name>` (or the campaign worktree branch) |
 | `base_commit` | TEXT | fork point |
 | `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, then `landed` |
 | `created_at` | REAL NOT NULL | |
 | `updated_at` | REAL NOT NULL | |
-| UNIQUE(session_id, name) | | |
+| UNIQUE(name) | | |
 
-Created by `Service.create_workspace` and `Service.create_campaign_workspace` (the
-wave-scope alias) after `gitutil.add_worktree` succeeds; if the insert fails the
-worktree is cleaned up.
-Updated by `Store.set_unit_state` (via `integrate.mark_landed`/`_mark_delivered`,
+Created by `Service.create_workspace` and `Service.create_campaign_workspace`
+after `gitutil.add_worktree` succeeds; if the insert fails the worktree is
+cleaned up. Updated by `Store.set_unit_state` (via `integrate._mark_delivered`,
 which sets `landed`). Read by `list_units`, `get_unit`, `require_unit`,
 `Service.current_unit` (worktree containment, else branch match),
 `Service.status`, `campaign.build_skeleton`, and `Service.gc`.
@@ -123,91 +112,35 @@ which sets `landed`). Read by `list_units`, `get_unit`, `require_unit`,
 `gc` prunes worktrees and branches for units in state `landed` or `closed`. Only
 `landed` is written today; `closed` is reserved.
 
-### 5.3 `candidates`
+### 5.2 `candidates`
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `unit_id` | INTEGER NOT NULL → `units(id)` | |
-| `branch` | TEXT NOT NULL | the unit's branch |
-| `head_commit` | TEXT NOT NULL | candidate commit, later the merge commit |
-| `base_commit` | TEXT | |
-| `priority` | INTEGER NOT NULL DEFAULT 0 | ordering hint |
+| `head_commit` | TEXT NOT NULL | the node commit on the campaign branch |
 | `status` | TEXT NOT NULL DEFAULT `'prepared'` | `prepared`, `pending`, `landed`, `failed`, `blocked` |
-| `summary` | TEXT | review text |
+| `summary` | TEXT | review text from `wave --record --summary` |
 | `node` | TEXT | DAG node id (migration) |
 | `created_at` | REAL NOT NULL | |
 | `updated_at` | REAL NOT NULL | |
 
 Index: `idx_candidates_status`.
 
-Created by `Service.finish` (node scope) and `Service._record_wave_commits`
-(wave scope, one per node with `node` set). `Service.finish` reuses an existing
-`prepared`, `failed`, or `blocked` row and rewrites `head_commit` and
-`status='prepared'` rather than accumulating duplicates for one unit.
+Created by `Service._record_wave_commits`, one per changed node in a wave (with
+`node` set). The campaign worktree accumulates commits, so a later wave adds
+rows and never rewrites an earlier wave's row. The branch and the base commit
+are read from the unit join, so the table does not duplicate them.
 
-Updated by `integrate.mark_landed`, which sets `status='landed'` and the merge
-commit.
+Updated by `integrate._mark_delivered`, which sets `status='landed'` without
+rewriting `head_commit` (the node commit is provenance).
 
-Read by `Store.list_candidates` (joins `units` to add `unit_name` and
-`worktree`), `Store.get_candidate` (by id, else by unit name or node), and the
-integration ordering functions `_candidate_for_node`, `plan_waves`,
-`ordered_candidates`, plus `Service.status` and `campaign.build_skeleton`.
+Read by `Store.list_candidates` and `Store.get_candidate` (both join `units` to
+add `unit_name`, `unit_branch`, `worktree`, and `unit_base_commit`),
+`plan_waves`, `Service.status`, `Service.review_snapshot`, and
+`campaign.build_skeleton`.
 
-Ordering for landing is: wave index, then higher `priority`, then
-`created_at`, then `id`. This is what makes landing deterministic.
-
-### 5.4 `fingerprints`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `candidate_id` | INTEGER NOT NULL → `candidates(id)` | |
-| `fingerprint` | TEXT NOT NULL | sha256 over the identity tuple |
-| `tree` | TEXT NOT NULL | git tree hash |
-| `cmd_digest` | TEXT NOT NULL | hash of the command vector |
-| `toolchain_digest` | TEXT NOT NULL | git and Python versions plus lockfile hashes |
-| `policy_digest` | TEXT NOT NULL | policy block from `config.json` |
-| `source` | TEXT NOT NULL DEFAULT `'plane'` | `plane`, `node:<id>`, or `wave:<n>` |
-| `created_at` | REAL NOT NULL | |
-| UNIQUE(candidate_id, fingerprint) | | |
-
-Created by `Store.get_or_create_fingerprint`, called from
-`integrate._verify_and_record_plane` and `integrate.record_node_verification`.
-The unique pair makes creation idempotent: an existing identity returns its id.
-
-Read by those same functions and by `Store.latest_verification_for_fingerprint`
-and `Store.latest_verification`, which join it to attach the source and the
-fingerprint text.
-
-The `source` is part of the identity so unrelated verdicts cannot collide. A
-sandbox profile and an executor-semantics version are folded into the
-fingerprint at computation time, so tightening isolation or changing how checks
-run invalidates a cached verdict.
-
-### 5.5 `verifications`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `candidate_id` | INTEGER NOT NULL → `candidates(id)` | |
-| `fingerprint_id` | INTEGER NOT NULL → `fingerprints(id)` | |
-| `status` | TEXT NOT NULL | `passed`, `failed`, `error` |
-| `output` | TEXT | formatted check output |
-| `duration` | REAL | seconds |
-| `commands` | TEXT | JSON command vector |
-| `gpu` | TEXT | GPU tier used |
-| `created_at` | REAL NOT NULL | |
-
-Created by `Store.add_verification` after `run_checks`, from
-`integrate._verify_and_record_plane` and `integrate.record_node_verification`.
-
-Read by `Store.latest_verification_for_fingerprint`, the cache lookup that
-skips re-running an unchanged command vector, and by
-`Store.latest_verification`, the newest verdict for a candidate. The latter
-feeds `Service.status`, `Service._project_unit`, and `campaign.build_skeleton`.
-
-### 5.6 `jobs`
+### 5.3 `jobs`
 
 | Column | Type | Notes |
 |---|---|---|
@@ -224,7 +157,6 @@ feeds `Service.status`, `Service._project_unit`, and `campaign.build_skeleton`.
 | `priority` | INTEGER NOT NULL DEFAULT 0 | higher runs first |
 | `status` | TEXT NOT NULL DEFAULT `'queued'` | `queued`, `running`, `passed`, `failed`, `error`, `cancelled` |
 | `fingerprint` | TEXT | text fingerprint, not a foreign key |
-| `attempt` | INTEGER NOT NULL DEFAULT 0 | placeholder, not yet advanced |
 | `timeout` | INTEGER NOT NULL DEFAULT 3600 | per-command timeout (migration) |
 | `requested_at` | REAL NOT NULL | enqueue time |
 | `started_at` | REAL | claim time |
@@ -252,57 +184,134 @@ and marks it `running` inside one transaction, so two runners can never take the
 same job.
 
 Read by `Executor.status` (`job_counts`, queued, running, recent rows),
-`Executor.wait`, and `Service.status`.
+`Executor.wait`, `Service.status`, and `Store.latest_job_for_commit`, which is
+the review evidence for a commit.
+
+### 5.4 `attempts`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `node` | TEXT NOT NULL | DAG node id |
+| `unit` | TEXT | unit name |
+| `attempt` | INTEGER NOT NULL DEFAULT 1 | attempt number |
+| `agent` | TEXT NOT NULL DEFAULT `'worker'` | `worker`, `planner`, `verifier` |
+| `status` | TEXT NOT NULL DEFAULT `'running'` | `running`, then `ok`, `failed`, `cancelled` |
+| `started_at` | REAL NOT NULL | |
+| `finished_at` | REAL | |
+| `duration` | REAL | |
+| `exit_code` | INTEGER | |
+| `turns` | INTEGER NOT NULL DEFAULT 0 | |
+| `tool_calls` | INTEGER NOT NULL DEFAULT 0 | |
+| `tools` | TEXT | JSON tool histogram |
+| `tokens_in` | INTEGER NOT NULL DEFAULT 0 | |
+| `tokens_out` | INTEGER NOT NULL DEFAULT 0 | |
+| `cost` | REAL NOT NULL DEFAULT 0 | approximate cost |
+| `last_tool` | TEXT | |
+| `last_activity_at` | REAL | |
+| `error` | TEXT | |
+
+Indexes: `idx_attempts_node`, `idx_attempts_status`.
+
+Created by `Store.create_attempt` through `Service.begin_attempt` (the
+`attempt --begin` action). Finished by `Store.finish_attempt` through
+`Service.end_attempt` (`attempt --end`). Read by `Service.attempts` and the
+resume continuation prompt.
+
+### 5.5 `review_decisions`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `branch_key` | TEXT NOT NULL | feature-branch key (`feat/x` → `feat--x`) |
+| `commit_hash` | TEXT | the reviewed commit; null is a campaign-level override |
+| `action` | TEXT NOT NULL | `approve`, `request_changes`, `override` |
+| `actor` | TEXT | who recorded the decision |
+| `note` | TEXT | required for `override` |
+| `created_at` | REAL NOT NULL | |
+| `consumed_at` | REAL | set by a successful merge |
+
+Index: `idx_review_decisions_commit(branch_key, commit_hash, id)`.
+
+Append-only. `Store.add_review_decision` inserts; the newest row for a commit
+wins. `Store.latest_decisions_by_commit` reads the newest row per commit, and
+`Store.consume_review_decisions` sets `consumed_at` after a landed merge. An
+approval binds to one commit hash, so a later commit re-opens the gate and an
+approval can never outlive the diff it approved. A failed check run leaves the
+rows unconsumed, so a retry needs no new review.
+
+### 5.6 `comments`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `branch_key` | TEXT NOT NULL | feature-branch key |
+| `commit_hash` | TEXT | the commit the comment attaches to; null for the report |
+| `file` | TEXT | file path |
+| `side` | TEXT | `old` or `new` |
+| `line` | INTEGER | start line |
+| `line_end` | INTEGER | end line for a range |
+| `body` | TEXT NOT NULL | the comment text |
+| `node` | TEXT | DAG node attribution |
+| `status` | TEXT NOT NULL DEFAULT `'open'` | `open`, `delivered`, `addressed` |
+| `created_at` | REAL NOT NULL | |
+| `addressed_at` | REAL | when the coordinator addressed it |
+
+Index: `idx_comments_branch(branch_key, status, id)`.
+
+Created by `Service.review_comment`. `Service.review_poll` reads the `open` rows
+for the relay; `Service.review_ack` sets `delivered`. The queue is at-least-once:
+a lost ack repeats a comment, never loses it.
 
 ## 6. Lifecycle: how data is created and used
 
 1. **Plane bootstrap.** `start` writes `.sliceme/config.json` and opens
    `Store`, which creates the schema. No domain rows are inserted.
-2. **Session and unit.** A campaign `spawn` creates a worktree and branch, then
-   inserts a `sessions` row (if needed) and a `units` row with
-   `state='working'`.
-3. **Commit.** The worker commits, then `Service.finish` runs the
-   plan-conformance check and inserts a `candidates` row with
-   `status='prepared'`. A re-spawn for the same node reuses and resets a prior
-   candidate row.
-4. **Verification.**
-   - The executor path inserts `jobs` rows from `exec --submit` and updates
-     them through `exec --run`; a passing fingerprint is served from cache.
-   - The integrate path inserts `fingerprints` and `verifications` rows and
-     reuses an existing verdict when the fingerprint is unchanged.
-5. **Delivery.** When every wave is done and the user approves, `deliver` merges
-the campaign worktree branch into the target with `git merge --no-ff`, then
-`mark_landed`/`_mark_delivered` sets the candidates and their unit to `landed`.
-A generic non-campaign plane falls back to ordering `prepared` candidates by wave
-and priority and merging each branch.
-6. **Dashboard and report.** `Service.status` reads units, candidates, waves,
+2. **Unit.** `start` or `wave --open` creates a worktree and branch, then
+   inserts a `units` row with `state='working'`.
+3. **Wave record.** `wave --record --wave N` runs conformance-by-ownership on
+   the campaign worktree and inserts one `candidates` row per changed node with
+   `status='prepared'`.
+4. **Verification.** The executor inserts `jobs` rows from `exec --submit` and
+   updates them through `exec --run`; a passing fingerprint is served from
+   cache. `Service.review_snapshot` reads the newest terminal job per commit as
+   evidence.
+5. **Delivery.** When every wave is done and every commit is approved,
+   `deliver` merges the campaign worktree branch into the target with
+   `git merge --no-ff`, then `_mark_delivered` sets the candidates and their
+   unit to `landed`.
+6. **Review.** The browser writes `comments` and `review_decisions`; the pi
+   relay reads `open` comments and marks them `delivered`.
+7. **Dashboard and report.** `Service.status` reads units, candidates, waves,
    and job counts. `campaign.build_skeleton` reads units, candidates, and the
-   latest verification per candidate for the report.
-7. **Cleanup.** `Service.gc` reads `landed`/`closed` units and removes their
-   worktrees and branches. Rows are never deleted; the table remains the audit
-   trail.
+   newest job per candidate for the report.
+8. **Cleanup.** `Service.gc` reads `landed`/`closed` units and removes their
+   worktrees and branches, and prunes expired review rows. Rows are never
+   deleted otherwise; the tables remain the audit trail.
 
 ## 7. Access summary
 
 | Table | Writers | Readers |
 |---|---|---|
-| `sessions` | `Service.create_session` | `Service.create_workspace`, `create_campaign_workspace`, `get_session` |
-| `units` | `Service.create_workspace`, `create_campaign_workspace`, `integrate.mark_landed`, `gc` (branch prune) | `Service.status`, `current_unit`, `unit_detail`, `gc`, `campaign.build_skeleton` |
-| `candidates` | `Service.finish`, `Service._record_wave_commits`, `integrate.mark_landed` | `Service.status`, `integrate.ordered_candidates`, `campaign.build_skeleton` |
-| `fingerprints` | `integrate._verify_and_record_plane`, `integrate.record_node_verification` | same, plus `latest_verification*` |
-| `verifications` | `integrate._verify_and_record_plane`, `integrate.record_node_verification` | `Service.status`, `_project_unit`, `campaign.build_skeleton` |
-| `jobs` | `Executor.submit/run_job/cancel`, `recover_orphan_jobs` | `Executor.status/wait`, `Service.status` |
+| `units` | `Service.create_workspace`, `create_campaign_workspace`, `integrate._mark_delivered`, `gc` (branch prune) | `Service.status`, `current_unit`, `unit_detail`, `gc`, `campaign.build_skeleton` |
+| `candidates` | `Service._record_wave_commits`, `integrate._mark_delivered` | `Service.status`, `Service.review_snapshot`, `campaign.build_skeleton` |
+| `jobs` | `Executor.submit/run_job/cancel`, `recover_orphan_jobs` | `Executor.status/wait`, `Service.status`, `Service.review_snapshot` |
+| `attempts` | `Service.begin_attempt`, `end_attempt` | `Service.attempts`, the resume prompt |
+| `review_decisions` | `Service.review_decision`, `consume_approvals` | `Service.review_snapshot`, `require_all_approved` |
+| `comments` | `Service.review_comment`, `review_ack` | `Service.review_poll`, `review_snapshot` |
 
 ## 8. Status and value domains
 
 | Table | Column | Values |
 |---|---|---|
 | `units` | `state` | `working` (default), `landed`; `closed` reserved |
+| `units` | `kind` | `worker` (default), `campaign` |
 | `candidates` | `status` | `prepared` (default), `pending`, `landed`, `failed`, `blocked` |
-| `verifications` | `status` | `passed`, `failed`, `error` |
 | `jobs` | `status` | `queued` (default), `running`, `passed`, `failed`, `error`, `cancelled` |
 | `jobs` | `gpu` | `none`, `T1`, `T2` |
-| `fingerprints` | `source` | `plane`, `node:<id>`, `wave:<n>` |
+| `attempts` | `status` | `running` (default), `ok`, `failed`, `cancelled` |
+| `review_decisions` | `action` | `approve`, `request_changes`, `override` |
+| `comments` | `status` | `open` (default), `delivered`, `addressed` |
 
 ## 9. Concurrency and integrity
 
@@ -316,34 +325,40 @@ and priority and merging each branch.
   cleanup.
 - WAL plus `busy_timeout` allows a coordinator, subagents, and a second
   terminal to read the same plane safely.
-- The unique constraints that matter for correctness are
-  `sessions.name`, `units(session_id, name)`, and
-  `fingerprints(candidate_id, fingerprint)`. The last one is what makes
-  verification idempotent.
+- The unique constraints that matter for correctness are `units.name` and
+  `jobs.fingerprint` with `status='passed'` (the cache lookup).
 
 ## 10. What is not in the database
 
 - `dag.json` (the authored plan) and `state.json` (per-node status cache) are
   files under `.sliceme/`. The coordinator owns writing them; Python reads
   them. `state.json` is rebuildable, and git plus the database win on conflict.
+- The suspend/resume descriptor `.sliceme/<branch-key>.session.json` is a file.
+  `status --sessions` and `status --resume` read it directly; there is no
+  `campaign_sessions` projection.
 - `events.jsonl` is the extension's append-only audit log.
 - Worker logs are files, one per node.
-- The report is a Markdown file.
+- The report is a Markdown file, included in the review snapshot.
 
-## 11. Session suspend/resume and attempts (implemented)
+## 11. Suspend/resume and attempts
 
 `attempts` persists per-subagent timings and agent metrics (turns, tool calls,
 tokens, cost, last tool, last activity), written through the `attempt --begin` /
 `--end` action. It follows the additive-migration approach used for
-`jobs.timeout` and `candidates.node` (the table is created with
-`CREATE TABLE IF NOT EXISTS`, so an older plane upgrades on open).
+`jobs.timeout` and `candidates.node`.
 
-`campaign_sessions` records the pi session bound to a campaign (branch, session
-file, label, status, suspend reason, and wave) so a suspended campaign can be
-listed and resumed.  It is a **rebuildable projection**: the pi adapter writes
-`.sliceme/<branch-key>.session.json` and the engine refreshes the table from
-those descriptor files in `resume`/`sessions --rebuild`.
+The suspend/resume descriptor is the pi adapter's file. The engine reads it in
+`status --resume` and `status --sessions` and keeps no database copy, so the
+descriptor is the single source of truth.
 
-Both tables live in `.sliceme/state.db`; see `docs/sessions.md` for the
-lifecycle and `docs/reference.md` §1 for the `resume`, `sessions`, and
-`attempt` actions.
+## 12. Local review
+
+`review_decisions` is an append-only approval log: the newest row for a commit
+wins, and `consumed_at` marks a merge that already used the approval. The row
+binds to one commit hash, so `Service.deliver` refuses until every accumulated
+commit is approved. `comments` is the review queue: the pi relay reads `open`
+rows with `review --poll`, sends them to the coordinator session, and marks them
+`delivered` with `review --ack`. `gc` prunes rows for campaigns without a
+descriptor older than the retention window (`policy.review_retention_days`,
+default 30) and never prunes the current campaign. See `docs/review.md` for the
+design.

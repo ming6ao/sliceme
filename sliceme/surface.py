@@ -51,10 +51,8 @@ ACTIONS: tuple[Action, ...] = (
         params=(
             Param("name", "string", "unit name (default: slug of the directory name)"),
             Param("path", "string", "directory to bootstrap (default: cwd)"),
-            Param("session", "string", "session name (default: unit name)"),
-            Param("kind", "string", "unit kind", choices=("session", "worker")),
+            Param("kind", "string", "unit kind", choices=("worker",)),
             Param("base", "string", "base branch/ref for new worktrees"),
-            Param("task", "string", "task description stored on the session"),
             Param("target", "string", "target (feature) branch delivery lands on; never main/master", flag="target"),
             Param("target_mode", "string", "how to resolve --target", choices=("current", "existing", "new")),
             Param("worktree_branch", "string", "campaign accumulation branch (default derived)"),
@@ -74,15 +72,9 @@ ACTIONS: tuple[Action, ...] = (
             Param("health", "boolean", "check git/plane health"),
             Param("gc", "boolean", "prune worktrees and landed-unit branches"),
             Param("no_checks", "boolean", "with --simulate: plan only, do not run checks"),
-        ),
-    ),
-    Action(
-        name="commit",
-        summary="commit the worktree and register the candidate",
-        params=(
-            Param("unit", "string", "unit (defaults to the worktree containing cwd)"),
-            Param("message", "string", "commit message", required=True),
-            Param("summary", "string", "candidate summary for review"),
+            Param("sessions", "boolean", "list registered campaigns instead of the plane"),
+            Param("resume", "boolean", "reconcile a suspended campaign and return its resume plan"),
+            Param("plan_only", "boolean", "with --resume: report without side effects"),
         ),
     ),
     Action(
@@ -97,14 +89,6 @@ ACTIONS: tuple[Action, ...] = (
         ),
     ),
     Action(
-        name="report",
-        summary="write the deterministic campaign report skeleton (plus optional narrative)",
-        params=(
-            Param("narrative", "string", "what-changed/risks text appended to the skeleton"),
-            Param("design", "string", "design document reference (default: dag.json)"),
-        ),
-    ),
-    Action(
         name="exec",
         summary="single sandboxed verification executor: submit/run/wait/cancel check jobs",
         params=(
@@ -112,10 +96,6 @@ ACTIONS: tuple[Action, ...] = (
             Param("validate", "boolean", "resolve and validate the project sandbox gate"),
             Param("gpu_required", "boolean", "with --validate: require a GPU runner"),
             Param("run", "boolean", "drain the queue with the single executor"),
-            Param("open", "boolean", "create the single worktree for --wave"),
-            Param("record", "boolean", "record a wave worktree: conformance + per-node commits"),
-            Param("message", "string", "record: commit message suffix"),
-            Param("summary", "string", "record: candidate summary"),
             Param("wait", "boolean", "wait for a job to finish (requires --job)"),
             Param("cancel", "boolean", "cancel a queued job (requires --job)"),
             Param("job", "string", "job id for --wait/--cancel"),
@@ -132,25 +112,44 @@ ACTIONS: tuple[Action, ...] = (
         ),
     ),
     Action(
-        name="resume",
-        summary="reconcile a suspended campaign and return its resume plan",
+        name="wave",
+        summary="the campaign worktree: open it, or record a wave as per-node commits",
         params=(
-            Param(
-                "plan_only",
-                "boolean",
-                "report the plan without refreshing the session registry",
-            ),
+            Param("open", "boolean", "create or reuse the single campaign worktree"),
+            Param("record", "boolean", "record a wave: conformance + per-node commits"),
+            Param("wave", "int", "wave index to record"),
+            Param("message", "string", "record: commit message suffix"),
+            Param("summary", "string", "record: candidate summary"),
         ),
     ),
     Action(
-        name="sessions",
-        summary="list registered campaigns (the suspend/resume discovery surface)",
+        name="review",
+        summary="local review: serve the browser client, poll comments, or record one review action",
         params=(
-            Param(
-                "rebuild",
-                "boolean",
-                "rebuild the campaign_sessions projection from descriptors",
-            ),
+            Param("serve", "boolean", "start the foreground review server (loopback only)"),
+            Param("plane", "list", "plane root to serve (repeatable; default: this workspace)", flag="plane"),
+            Param("host", "string", "bind host (loopback only)"),
+            Param("port", "int", "bind port (0 chooses a free port)"),
+            Param("poll", "boolean", "print open comments and the newest decision"),
+            Param("ack", "boolean", "acknowledge one comment (requires --comment-id)"),
+            Param("state", "boolean", "print one review snapshot"),
+            Param("diff", "boolean", "print one file diff"),
+            Param("comment", "boolean", "record a comment"),
+            Param("decision", "string", "record a decision", choices=("approve", "request_changes", "override")),
+            Param("all", "boolean", "with --decision approve: approve every unapproved commit"),
+            Param("report", "boolean", "write the deterministic campaign report"),
+            Param("narrative", "string", "report: what-changed/risks text"),
+            Param("design", "string", "report: design document reference"),
+            Param("comment_id", "int", "comment id for --ack"),
+            Param("target", "string", "deliver: target branch override"),
+            Param("commit", "string", "commit to review or approve"),
+            Param("file", "string", "file path"),
+            Param("side", "string", "comment side", choices=("old", "new")),
+            Param("line", "int", "line number"),
+            Param("line_end", "int", "end line for a range"),
+            Param("body", "string", "comment body"),
+            Param("note", "string", "decision note"),
+            Param("actor", "string", "who recorded the decision"),
         ),
     ),
     Action(
@@ -219,7 +218,6 @@ def start(params: dict[str, Any], *, cwd: str | Path | None = None) -> dict[str,
     return Service.init(
         path,
         name=params.get("name"),
-        session=params.get("session"),
         base=params.get("base"),
         kind=params.get("kind") or "worker",
         main_branch=params.get("main_branch"),
@@ -258,13 +256,6 @@ def doctor(root: Path) -> dict[str, Any]:
     }
 
 
-def _resolve_unit(service: "Service", params: dict[str, Any]) -> str:
-    explicit = params.get("unit")
-    if explicit:
-        return str(explicit)
-    return service.current_unit()["name"]
-
-
 def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
     if p.get("gc"):
         return service.gc()
@@ -272,18 +263,15 @@ def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
         return doctor(service.root)
     if p.get("simulate"):
         return service.simulation(run_checks_flag=not p.get("no_checks"))
+    if p.get("sessions"):
+        return service.sessions()
+    if p.get("resume"):
+        return service.resume(plan_only=bool(p.get("plan_only")))
     if p.get("short"):
         return {"unit": service.current_unit()["name"]}
     if p.get("unit"):
         return service.unit_detail(p["unit"])
     return service.status()
-
-
-def _dispatch_commit(service: "Service", p: dict[str, Any]) -> Any:
-    unit = _resolve_unit(service, p)
-    commit = service.commit(unit, p["message"])
-    candidate = service.finish(unit, summary=p.get("summary"))
-    return {"commit": commit, "candidate": candidate}
 
 
 def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
@@ -294,18 +282,6 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
         cleanup=p.get("cleanup") or "none",
         run_checks_flag=not p.get("no_checks"),
     )
-
-
-def _dispatch_report(service: "Service", p: dict[str, Any]) -> Any:
-    return service.report(narrative=p.get("narrative"), design=p.get("design"))
-
-
-def _dispatch_resume(service: "Service", p: dict[str, Any]) -> Any:
-    return service.resume(plan_only=bool(p.get("plan_only")))
-
-
-def _dispatch_sessions(service: "Service", p: dict[str, Any]) -> Any:
-    return service.sessions(rebuild=bool(p.get("rebuild")))
 
 
 def _dispatch_attempt(service: "Service", p: dict[str, Any]) -> Any:
@@ -351,6 +327,20 @@ def _dispatch_attempt(service: "Service", p: dict[str, Any]) -> Any:
     return service.attempts(node=str(node))
 
 
+def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
+    if p.get("open"):
+        return {"unit": service.create_campaign_workspace()}
+    if p.get("record"):
+        if p.get("wave") is None:
+            raise SlicemeError("wave --record requires --wave")
+        # Serialize git mutation with the single executor's check runs.
+        with service.executor().lock():
+            return service.record_wave(
+                int(p["wave"]), message=p.get("message"), summary=p.get("summary")
+            )
+    raise SlicemeError("wave needs --open or --record")
+
+
 def _dispatch_exec(service: "Service", p: dict[str, Any]) -> Any:
     executor = service.executor()
     if p.get("validate"):
@@ -358,16 +348,6 @@ def _dispatch_exec(service: "Service", p: dict[str, Any]) -> Any:
         if not info.get("ok"):
             raise SlicemeError(str(info.get("error") or "sandbox gate failed"))
         return info
-    if p.get("open"):
-        return {"unit": service.create_campaign_workspace()}
-    if p.get("record"):
-        if p.get("wave") is None:
-            raise SlicemeError("exec --record requires --wave")
-        # Serialize git mutation with the single executor's check runs.
-        with executor.lock():
-            return service.record_wave(
-                int(p["wave"]), message=p.get("message"), summary=p.get("summary")
-            )
     if p.get("cancel"):
         if not p.get("job"):
             raise SlicemeError("exec --cancel requires --job")
@@ -395,15 +375,38 @@ def _dispatch_exec(service: "Service", p: dict[str, Any]) -> Any:
     return executor.status()
 
 
+def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
+    from .review import api as review_api
+
+    if p.get("serve"):
+        roots = [Path(item) for item in (p.get("plane") or [])] or [service.root]
+        return review_api.serve(
+            roots,
+            host=p.get("host") or "127.0.0.1",
+            port=int(p.get("port") or 0),
+        )
+    if p.get("poll"):
+        return review_api.poll(service, p)
+    if p.get("ack"):
+        return review_api.ack(service, p)
+    if p.get("comment"):
+        return review_api.comment(service, p)
+    if p.get("decision"):
+        return review_api.decision(service, p)
+    if p.get("report"):
+        return review_api.report(service, p)
+    if p.get("diff"):
+        return review_api.diff(service, p)
+    return review_api.state(service, p)
+
+
 _HANDLERS = {
     "status": _dispatch_status,
-    "commit": _dispatch_commit,
     "deliver": _dispatch_deliver,
-    "report": _dispatch_report,
-    "resume": _dispatch_resume,
-    "sessions": _dispatch_sessions,
     "attempt": _dispatch_attempt,
     "exec": _dispatch_exec,
+    "wave": _dispatch_wave,
+    "review": _dispatch_review,
 }
 
 

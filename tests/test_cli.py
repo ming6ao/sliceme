@@ -17,7 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN = REPO_ROOT / "bin" / "sliceme"
 
 sys.path.insert(0, str(REPO_ROOT))
-from sliceme import surface  # noqa: E402
+from sliceme import campaign, surface  # noqa: E402
+from sliceme.util import write_json  # noqa: E402
 
 
 def run_cli(args, cwd):
@@ -156,7 +157,7 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(wt_status.stdout.strip(), "")
 
-    def test_cwd_native_status_and_lifecycle(self):
+    def test_cwd_native_start_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
@@ -174,31 +175,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(out.stdout.strip(), "alpha")
 
-            (worktree / "a.txt").write_text("changed\n")
-            # `commit` commits and registers a prepared candidate in one call.
-            out = run_cli(["--json", "commit", "-m", "change"], worktree)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(json.loads(out.stdout)["candidate"]["status"], "prepared")
-
-            # The coordinator delivers the verified candidate to the feature branch.
-            out = run_cli(["--json", "deliver"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(json.loads(out.stdout)["results"][0]["status"], "landed")
-            self.assertEqual(
-                subprocess.run(
-                    ["git", "show", "feat/x:a.txt"], cwd=tmp, capture_output=True, text=True
-                ).stdout,
-                "changed\n",
-            )
-
-    def test_campaign_no_unit_integrate_and_report(self):
+    def test_campaign_wave_record_approve_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
             subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
             subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
             (root / "a.txt").write_text("hi\n")
-            (root / "b.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
@@ -210,29 +193,42 @@ class CliTests(unittest.TestCase):
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
-            boot = json.loads(out.stdout)
-            self.assertIsNone(boot["unit"])
+            self.assertIsNone(json.loads(out.stdout)["unit"])
 
             # A plain `status` has no units and reports the feature branch.
             out = run_cli(["status", "--json"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
             status = json.loads(out.stdout)
             self.assertEqual(status["feature_branch"], "feat/x")
             self.assertEqual(status["units"], [])
 
-            # Build two candidates through the CLI, base = feature branch.
-            for name, rel in (("w1", "a.txt"), ("w2", "b.txt")):
-                out = run_cli(["--json", "start", "--name", name, "--base", "feat/x"], root)
-                self.assertEqual(out.returncode, 0, out.stderr)
-                worktree = Path(json.loads(out.stdout)["worktree"])
-                (worktree / rel).write_text(f"{name}\n")
-                out = run_cli(["--json", "commit", "-m", name], worktree)
-                self.assertEqual(out.returncode, 0, out.stderr)
+            write_json(
+                campaign.dag_path(root, "feat/x"),
+                {
+                    "campaign": "cli",
+                    "feature_branch": "feat/x",
+                    "base": "main",
+                    "nodes": [
+                        {"id": "w1", "owns": ["dir:."], "depends_on": []}
+                    ],
+                },
+            )
+            out = run_cli(["--json", "wave", "--open"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            worktree = Path(json.loads(out.stdout)["unit"]["worktree"])
+            (worktree / "a.txt").write_text("w1\n")
+            out = run_cli(["--json", "wave", "--record", "--wave", "0"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            candidate = json.loads(out.stdout)["candidates"][0]
 
+            out = run_cli(
+                ["--json", "review", "--decision", "approve", "--commit", candidate["head_commit"]],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
             out = run_cli(["--json", "deliver"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             results = json.loads(out.stdout)["results"]
-            self.assertEqual([r["status"] for r in results], ["landed", "landed"])
+            self.assertEqual([r["status"] for r in results], ["landed"])
             self.assertEqual(
                 subprocess.run(
                     ["git", "show", "feat/x:a.txt"], cwd=tmp, capture_output=True, text=True
@@ -240,15 +236,17 @@ class CliTests(unittest.TestCase):
                 "w1\n",
             )
 
-            # Re-running deliver is a no-op.
+            # Re-running deliver is an idempotent no-op.
             out = run_cli(["--json", "deliver"], root)
-            self.assertEqual(json.loads(out.stdout)["results"], [])
+            rerun = json.loads(out.stdout)["results"]
+            self.assertEqual([r["status"] for r in rerun], ["landed"])
+            self.assertTrue(rerun[0]["already_up_to_date"])
 
-            out = run_cli(["--json", "report", "--narrative", "landed both"], root)
+            out = run_cli(["--json", "review", "--report", "--narrative", "landed"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             report = json.loads(out.stdout)
-            self.assertTrue(Path(report["path"]).name == "feat--x.report.md")
-            self.assertIn("landed both", report["content"])
+            self.assertEqual(Path(report["path"]).name, "feat--x.report.md")
+            self.assertIn("landed", report["content"])
 
     def test_cli_resume_sessions_and_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -289,13 +287,13 @@ class CliTests(unittest.TestCase):
                 )
             )
 
-            out = run_cli(["--json", "resume", "--plan-only"], root)
+            out = run_cli(["--json", "status", "--resume", "--plan-only"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             plan = json.loads(out.stdout)
             self.assertEqual(plan["feature_branch"], "feat/x")
             self.assertIn("w1", plan["nodes"])
 
-            out = run_cli(["--json", "sessions"], root)
+            out = run_cli(["--json", "status", "--sessions"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             entries = json.loads(out.stdout)["sessions"]
             self.assertEqual(entries[0]["feature_branch"], "feat/x")

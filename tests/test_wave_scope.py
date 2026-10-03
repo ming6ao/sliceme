@@ -69,6 +69,9 @@ class WaveScopeCase(unittest.TestCase):
     def file_on(self, branch, rel):
         return run("git", "show", f"{branch}:{rel}", cwd=self.root).stdout
 
+    def approve(self):
+        return self.svc.review_decision(action="approve", all_commits=True, actor="test")
+
 
 class RecordTests(WaveScopeCase):
     def test_shared_worktree_records_per_node_commits(self):
@@ -81,7 +84,7 @@ class RecordTests(WaveScopeCase):
         result = self.svc.record_wave(0, message="wave work")
         nodes = [c["node"] for c in result["candidates"]]
         self.assertEqual(nodes, ["w1", "w2"])
-        self.assertTrue(all(c["branch"] == unit["branch"] for c in result["candidates"]))
+        self.assertTrue(all(c["unit_branch"] == unit["branch"] for c in result["candidates"]))
         # One commit per node on the shared campaign branch.
         log = run("git", "log", "--format=%s", f"feat/x..{unit['branch']}", cwd=self.root)
         self.assertEqual(log.stdout.count("w1:"), 1)
@@ -121,6 +124,7 @@ class WaveIntegrationTests(WaveScopeCase):
         self.svc.record_wave(0)
         # Nothing lands on the target branch until delivery.
         self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
+        self.approve()
         delivered = self.svc.deliver()
         statuses = [r["status"] for r in delivered["results"]]
         self.assertEqual(statuses, ["landed"])
@@ -146,6 +150,7 @@ class WaveIntegrationTests(WaveScopeCase):
 
         # Still nothing on the target until delivery.
         self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
+        self.approve()
         self.svc.deliver()
         self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 2\n")
         self.assertEqual(self.file_on("feat/x", "src/c/z.py"), "c = 2\n")
@@ -178,6 +183,7 @@ class WaveIntegrationTests(WaveScopeCase):
         run("git", "commit", "-qm", "target change", cwd=self.root)
         target_head = run("git", "rev-parse", target, cwd=self.root).stdout.strip()
 
+        self.approve()
         delivered = self.svc.deliver()
         self.assertEqual(delivered["results"][0]["status"], "failed")
         self.assertIn("conflict", delivered["results"][0]["detail"])
@@ -200,6 +206,7 @@ class WaveIntegrationTests(WaveScopeCase):
         target = self.svc.config["target_branch"]
         target_head = run("git", "rev-parse", target, cwd=self.root).stdout.strip()
 
+        self.approve()
         delivered = self.svc.deliver()
         self.assertEqual(delivered["results"][0]["status"], "failed")
         self.assertIn("checks failed", delivered["results"][0]["detail"])
@@ -233,12 +240,12 @@ class WaveCliTests(WaveScopeCase):
         )
 
     def test_cli_open_and_record(self):
-        opened = self.run_cli(["--json", "exec", "--open", "--wave", "0"])
+        opened = self.run_cli(["--json", "wave", "--open"])
         self.assertEqual(opened.returncode, 0, opened.stderr)
         worktree = json.loads(opened.stdout)["unit"]["worktree"]
         self.edit(worktree, "src/a/x.py", "a = 3\n")
 
-        recorded = self.run_cli(["--json", "exec", "--record", "--wave", "0", "--message", "cli"])
+        recorded = self.run_cli(["--json", "wave", "--record", "--wave", "0", "--message", "cli"])
         self.assertEqual(recorded.returncode, 0, recorded.stderr)
         payload = json.loads(recorded.stdout)
         self.assertEqual([c["node"] for c in payload["candidates"]], ["w1"])

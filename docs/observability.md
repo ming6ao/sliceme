@@ -26,8 +26,7 @@ It is grounded in the current engine and adapter:
 - `sliceme/ownership.py` already projects the DAG into waves
   (`plan_dag_waves`, `DagWave`).
 - `sliceme/store.py` already persists `units`, `candidates`,
-  `fingerprints`, `verifications`, and `jobs`, including `jobs.duration`, plus
-  the landed `attempts` and `campaign_sessions` tables.
+  `jobs`, including `jobs.duration`, plus the landed `attempts` table.
 - `sliceme/executor.py` already exposes the single runner's queue
   (`Executor.status`, `Store.job_counts`).
 - `integrations/pi/common.ts::runSubagent` already streams each subagent's
@@ -106,7 +105,7 @@ names the layer that owns the feature.
   `DagWave(index, members, conflicts)`, surfaced by `status` as `dag_waves` and
   reconciled into `state.waves` by `reconcileWaves`.
 - **Some timing is already persisted.** `units.created_at`/`updated_at`,
-  `candidates.created_at`/`updated_at`, `verifications.duration`, and the
+  `candidates.created_at`/`updated_at`, `jobs.duration`, and the
   `jobs` table (`requested_at`, `started_at`, `finished_at`, `duration`,
   `exit_code`).
 - **Attempt fidelity is persisted.** `attempts` records one planner, worker, or
@@ -332,7 +331,7 @@ sliceme progress [--node ID]
 
 The CLI's global `--json` flag selects the machine-readable form. It would join
 the DAG wave projection, `state.json`, the `attempts` table, existing
-`units`/`candidates`/`verifications`/`jobs` rows, and the heartbeat files.
+`units`/`candidates`/`jobs` rows, and the heartbeat files.
 Output shape (abridged):
 
 ```json
@@ -344,7 +343,7 @@ Output shape (abridged):
     "waves": 4, "current_wave": 1, "elapsed": 3600.0,
     "worker_seconds": 4210.0, "turns": 40, "tool_calls": 210,
     "tokens_in": 123456, "tokens_out": 7890, "cost": 1.23,
-    "attempts": 6, "verifications": 5,
+    "attempts": 6, "jobs": 5,
     "verification_pass_rate": 0.8, "queue_wait_seconds": 42.0
   },
   "waves": [
@@ -435,7 +434,7 @@ with `renderProgress` is part of Priority 0.
 - **Work-unit wall clock:** `attempt.started_at` to `finished_at`, or `now` for
   a running attempt.
 - **Queue wait:** `job.started_at - job.requested_at`.
-- **Verification time:** `verifications.duration`.
+- **Verification time:** `jobs.duration`.
 - **Node lead time:** the first attempt's start to when the candidate lands
   (`candidates.updated_at` when the status becomes `landed`).
 - **Wave duration:** the first member attempt's start to the last member's
@@ -479,8 +478,8 @@ expose them together is proposed.
 |---|---|---|
 | Wave | total waves, current wave, per-wave status and duration | `plan_dag_waves` + `state.json` + `attempts` |
 | Work unit | status, wave, attempts, wall clock, lead time | `state.json`, `attempts`, `units` |
-| Executor | queued/running counts, queue wait, check duration, cache hits | `jobs`, `verifications` |
-| Verification | pass count, pass rate, duration | `verifications` |
+| Executor | queued/running counts, queue wait, check duration, cache hits | `jobs` |
+| Verification | pass count, pass rate, duration | `jobs` |
 | Agent | turns, tool calls, tool histogram, tokens in/out, cost, last tool | `attempts`, heartbeats |
 | Campaign | elapsed, total worker seconds, total tokens, total cost, ETA | rollup of the above |
 

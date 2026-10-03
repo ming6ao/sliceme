@@ -9,7 +9,7 @@ Every adapter (CLI, pi extension) calls these functions.  This mirrors the
 from __future__ import annotations
 
 import os
-import re
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,6 @@ from . import campaign, gitutil, integrate, sandbox
 from .ownership import (
     DEFAULT_WAVE_SIZE,
     node_owns,
-    parse_owns,
     path_within_owns,
     plan_dag_waves,
     validate_dag,
@@ -32,13 +31,11 @@ from .util import (
     worktrees_dir,
     write_json,
 )
-DEFAULT_ATTACHMENT = "terminal"
-
 
 class Service:
-    def __init__(self, root: Path, store: Store | None = None):
+    def __init__(self, root: Path, store: Store | None = None, *, migrate: bool = True):
         self.root = root
-        self.store = store or Store(root)
+        self.store = store or Store(root, migrate=migrate)
 
     def close(self) -> None:
         self.store.close()
@@ -162,7 +159,6 @@ class Service:
         path: str | os.PathLike[str] | None = None,
         *,
         name: str | None = None,
-        session: str | None = None,
         base: str | None = None,
         kind: str = "worker",
         main_branch: str | None = None,
@@ -246,12 +242,7 @@ class Service:
             while unit_name in existing:
                 unit_name = f"{base_name}-{counter}"
                 counter += 1
-            unit = service.create_workspace(
-                unit_name,
-                session=session,
-                kind=kind,
-                base=base,
-            )
+            unit = service.create_workspace(unit_name, kind=kind, base=base)
             created = True
         finally:
             service.close()
@@ -266,43 +257,24 @@ class Service:
         }
 
     # ------------------------------------------------------------------
-    # Sessions / units
+    # Units
     # ------------------------------------------------------------------
-    def create_session(
-        self, name: str, *, task: str | None = None, attachment: str = DEFAULT_ATTACHMENT
-    ) -> dict[str, Any]:
-        existing = self.store.get_session(name)
-        if existing is not None:
-            return existing
-        session_id = self.store.create_session(name, task, attachment)
-        self.store.conn.commit()
-        return self.store.get_session(session_id)  # type: ignore[return-value]
-
     def create_workspace(
         self,
         name: str,
         *,
-        session: str | None = None,
         kind: str = "worker",
         base: str | None = None,
-        task: str | None = None,
     ) -> dict[str, Any]:
         config = self.config
-        session_name = session or name
-        sess = self.store.get_session(session_name)
-        if sess is None:
-            sess = self.create_session(session_name, task=task)
-        session_id = int(sess["id"])
-
         base_ref = base or config.get("base") or config.get("main_branch") or "main"
         base_commit = gitutil.rev_parse(self.root, base_ref)
 
-        branch = _unique_branch(self.root, session_name, name)
-        worktree = _unique_worktree(worktrees_dir(self.root), session_name, name)
+        branch = _unique_branch(self.root, name)
+        worktree = _unique_worktree(worktrees_dir(self.root), name)
         gitutil.add_worktree(self.root, worktree, branch=branch, base=base_commit)
         try:
             unit_id = self.store.create_unit(
-                session_id=session_id,
                 name=name,
                 kind=kind,
                 worktree=str(worktree),
@@ -355,62 +327,9 @@ class Service:
         )
 
     # ------------------------------------------------------------------
-    # Work / candidates / verification
-    # ------------------------------------------------------------------
-    def commit(self, unit_ref: str | int, message: str) -> dict[str, Any]:
-        unit = self.store.require_unit(unit_ref)
-        worktree = Path(unit["worktree"])
-        if not worktree.exists():
-            raise SlicemeError(f"worktree missing: {worktree}")
-        result = gitutil.commit_all(worktree, message)
-        if not result.ok:
-            raise SlicemeError(result.stderr.strip() or result.stdout.strip() or "git commit failed")
-        return {"unit": unit["name"], "commit": gitutil.head_commit(worktree)}
-
-    def finish(
-        self, unit_ref: str | int, *, summary: str | None = None
-    ) -> dict[str, Any]:
-        unit = self.store.require_unit(unit_ref)
-        worktree = Path(unit["worktree"])
-        if not gitutil.is_clean(worktree):
-            raise SlicemeError(
-                "worktree has uncommitted changes; commit them (`sliceme commit`) before finishing"
-            )
-        head = gitutil.head_commit(worktree)
-        violations = self._conformance_violations(unit, head)
-        if violations:
-            listing = ", ".join(sorted(violations)[:10])
-            raise SlicemeError(
-                f"commit touches paths outside unit '{unit['name']}' owned directories: "
-                f"{listing}; the coordinator must widen `owns` or add a `depends_on` edge "
-                "in dag.json (waves replan on the next status/spawn)"
-            )
-        existing = self.store.list_candidates()
-        candidate = next(
-            (c for c in existing if int(c["unit_id"]) == int(unit["id"]) and c["status"] in {"prepared", "failed", "blocked"}),
-            None,
-        )
-        if candidate is not None:
-            self.store.update_candidate(int(candidate["id"]), head_commit=head, status="prepared")
-            cid = int(candidate["id"])
-        else:
-            cid = self.store.create_candidate(
-                unit_id=int(unit["id"]),
-                branch=unit["branch"],
-                head_commit=head,
-                base_commit=unit.get("base_commit") or "",
-                priority=0,
-                summary=summary,
-            )
-        self.store.conn.commit()
-        return self.store.get_candidate(cid)  # type: ignore[return-value]
-
-    # ------------------------------------------------------------------
     # Campaign scope: one worktree for the whole campaign
     # ------------------------------------------------------------------
-    def create_campaign_workspace(
-        self, *, base: str | None = None, session: str | None = None
-    ) -> dict[str, Any]:
+    def create_campaign_workspace(self, *, base: str | None = None) -> dict[str, Any]:
         """Create (or reuse) the single campaign worktree.
 
         Every wave commits onto this one branch.  It is never recreated and
@@ -442,11 +361,6 @@ class Service:
             raise SlicemeError(
                 f"refusing to use the default branch '{branch}' as the campaign worktree"
             )
-        session_name = session or name
-        sess = self.store.get_session(session_name)
-        if sess is None:
-            sess = self.create_session(session_name)
-        session_id = int(sess["id"])
         worktree = worktrees_dir(self.root) / "campaign"
         gitutil.cleanup_worktree(self.root, worktree)
         if gitutil.branch_exists(self.root, branch):
@@ -457,7 +371,6 @@ class Service:
             gitutil.add_worktree(self.root, worktree, branch=branch, base=base_commit)
         try:
             unit_id = self.store.create_unit(
-                session_id=session_id,
                 name=name,
                 kind="campaign",
                 worktree=str(worktree),
@@ -495,10 +408,10 @@ class Service:
         return self.store.get_unit("campaign")  # type: ignore[return-value]
 
     def create_wave_workspace(
-        self, wave_index: int, *, base: str | None = None, session: str | None = None
+        self, wave_index: int, *, base: str | None = None
     ) -> dict[str, Any]:
         """Compatibility alias: every wave shares the one campaign worktree."""
-        return self.create_campaign_workspace(base=base, session=session)
+        return self.create_campaign_workspace(base=base)
 
     def wave_unit(self, wave_index: int) -> dict[str, Any] | None:
         return self.store.get_unit("campaign")
@@ -529,7 +442,7 @@ class Service:
         unit = self.wave_unit(wave_index)
         if unit is None:
             raise SlicemeError(
-                f"wave {wave_index} has no workspace; run `exec --open --wave {wave_index}` first"
+                f"wave {wave_index} has no workspace; run `sliceme wave --open` first"
             )
         by_id = {str(node["id"]): node for node in dag["nodes"]}
         members = [by_id[node_id] for node_id in wave.members if node_id in by_id]
@@ -549,7 +462,6 @@ class Service:
         worktree = Path(unit["worktree"])
         if not worktree.exists():
             raise SlicemeError(f"wave worktree missing: {worktree}")
-        base = unit.get("base_commit") or gitutil.rev_parse(self.root, unit["branch"])
         gitutil.git(worktree, "add", "-A", check=False)
         # Diff against the current HEAD, not the fork point, so an earlier
         # wave's committed changes are not re-attributed to this wave.  The
@@ -594,10 +506,7 @@ class Service:
             head = gitutil.head_commit(worktree)
             cid = self.store.create_candidate(
                 unit_id=int(unit["id"]),
-                branch=unit["branch"],
                 head_commit=head,
-                base_commit=base,
-                priority=0,
                 summary=summary,
                 node=node_id,
             )
@@ -611,38 +520,6 @@ class Service:
             "candidates": created,
             "changed": [path for _, path, _ in entries],
         }
-
-    # ------------------------------------------------------------------
-    # Plan conformance
-    # ------------------------------------------------------------------
-    def owned_dirs(self, unit_name: str) -> list[str] | None:
-        """The DAG node's owned directories, or ``None`` on a non-campaign plane.
-
-        Re-spawned units are named ``<node>-a<attempt>``; the suffix is stripped
-        so conformance still resolves the original node.
-        """
-        branch = self.config.get("main_branch")
-        if not branch:
-            return None
-        dag = campaign.load_dag(self.root, branch)
-        if not dag or not dag.get("nodes"):
-            return None
-        names = {unit_name}
-        stripped = re.sub(r"-a\d+$", "", unit_name)
-        names.add(stripped)
-        for node in dag["nodes"]:
-            if str(node.get("id")) in names:
-                return parse_owns(node.get("owns") or [])
-        return None
-
-    def _conformance_violations(self, unit: dict[str, Any], head: str) -> list[str]:
-        """Changed paths outside the node's owned directories (empty when fine)."""
-        owns = self.owned_dirs(str(unit["name"]))
-        base = unit.get("base_commit") or ""
-        if owns is None or not base:
-            return []
-        changed = gitutil.changed_files(self.root, base, head)
-        return [path for path in changed if not path_within_owns(path, owns)]
 
     def simulation(self, *, run_checks_flag: bool = True) -> dict[str, Any]:
         return integrate.simulate(
@@ -711,7 +588,7 @@ class Service:
 
         Git and ``state.db`` always win over the adapter-written descriptor and
         ``state.json``.  The plan is a pure computation; unless *plan_only* the
-        ``campaign_sessions`` projection is refreshed as a side effect.
+        The plan is a pure computation over git plus ``state.db``.
         """
         config = self.config
         branch = (
@@ -789,8 +666,6 @@ class Service:
             "resume_plan": plan,
             "descriptor": descriptor or None,
         }
-        if not plan_only:
-            self._sync_campaign_sessions()
         return result
 
     @staticmethod
@@ -831,39 +706,8 @@ class Service:
                 return int(wave.get("index", 0))
         return None
 
-    def _sync_campaign_sessions(self) -> list[dict[str, Any]]:
-        """Project the adapter-written descriptors into ``campaign_sessions``."""
-        branch = (
-            self.config.get("target_branch")
-            or self.config.get("main_branch")
-            or "main"
-        )
-        rows: list[dict[str, Any]] = []
-        for key, descriptor in campaign.list_sessions(self.root):
-            feature_branch = str(descriptor.get("feature_branch") or key)
-            state = campaign.load_state(self.root, feature_branch)
-            wave = state.get("current_wave")
-            if wave is None:
-                wave = descriptor.get("current_wave")
-            rows.append(
-                self.store.upsert_campaign_session(
-                    feature_branch=feature_branch,
-                    pi_session_id=(descriptor.get("pi") or {}).get("session_id"),
-                    session_file=(descriptor.get("pi") or {}).get("session_file"),
-                    label=descriptor.get("label"),
-                    status=descriptor.get("status") or "suspended",
-                    reason=descriptor.get("reason"),
-                    wave=wave,
-                    suspended_at=descriptor.get("suspended_at"),
-                )
-            )
-        self.store.conn.commit()
-        return rows
-
-    def sessions(self, *, rebuild: bool = False) -> dict[str, Any]:
-        """List every registered campaign from its descriptor and projection."""
-        if rebuild:
-            self._sync_campaign_sessions()
+    def sessions(self) -> dict[str, Any]:
+        """List every registered campaign from its descriptor files."""
         branch = (
             self.config.get("target_branch")
             or self.config.get("main_branch")
@@ -899,8 +743,6 @@ class Service:
                     "descriptor": str(campaign.session_path(self.root, feature_branch)),
                 }
             )
-        if rebuild:
-            self.store.conn.commit()
         return {"root": str(self.root), "sessions": entries}
 
     # ------------------------------------------------------------------
@@ -937,6 +779,221 @@ class Service:
     ) -> dict[str, Any]:
         return {"attempts": self.store.list_attempts(node=node, statuses=statuses)}
 
+    # ------------------------------------------------------------------
+    # Local review (docs/review.md)
+    # ------------------------------------------------------------------
+    def review_snapshot(self, *, commit: str | None = None) -> dict[str, Any]:
+        from .review import packet
+
+        return packet.build_packet(self, commit=commit)
+
+    def review_diff(self, commit: str | None, path: str) -> dict[str, Any]:
+        from .review import packet
+
+        return packet.file_lines(self, commit, path)
+
+    def review_comment(
+        self,
+        *,
+        body: str,
+        commit: str | None = None,
+        file: str | None = None,
+        side: str | None = None,
+        line: int | None = None,
+        line_end: int | None = None,
+        node: str | None = None,
+    ) -> dict[str, Any]:
+        """Record one comment against a commit (or the report), file, and line."""
+        from .review import packet
+
+        if not (body or "").strip():
+            raise SlicemeError("a comment needs a body")
+        if side and side not in {"old", "new"}:
+            raise SlicemeError("comment side must be one of: old, new")
+        comment = self.store.add_comment(
+            branch_key=packet.campaign_branch_key(self),
+            body=body.strip(),
+            commit_hash=commit,
+            file=file,
+            side=side,
+            line=line,
+            line_end=line_end,
+            node=node,
+        )
+        self.store.conn.commit()
+        self._log_review_event(
+            "comment",
+            {"comment": int(comment["id"]), "commit": commit, "file": file},
+        )
+        return comment
+
+    def review_decision(
+        self,
+        *,
+        action: str,
+        commit: str | None = None,
+        all_commits: bool = False,
+        actor: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one decision for one commit, or approve every commit at once."""
+        from .review import packet
+
+        if action not in {"approve", "request_changes", "override"}:
+            raise SlicemeError(
+                "decision must be one of: approve, request_changes, override"
+            )
+        branch_key = packet.campaign_branch_key(self)
+        if all_commits:
+            if action != "approve":
+                raise SlicemeError("only approve can apply to all commits")
+            return self._approve_all(branch_key, actor=actor, note=note)
+        if commit is None and action != "override":
+            raise SlicemeError("a decision needs --commit <sha>, --all, or an override")
+        if action == "request_changes":
+            open_comments = self.store.list_comments(
+                branch_key=branch_key, statuses=["open"]
+            )
+            if not (note or "").strip() and not open_comments:
+                raise SlicemeError(
+                    "request_changes needs a note or at least one open comment"
+                )
+        if action == "override" and not (note or "").strip():
+            raise SlicemeError("override needs a note")
+        decision = self.store.add_review_decision(
+            branch_key=branch_key,
+            commit_hash=commit,
+            action=action,
+            actor=actor,
+            note=note,
+        )
+        self.store.conn.commit()
+        self._log_review_event(
+            "decision",
+            {"decision": int(decision["id"]), "action": action, "commit": commit},
+        )
+        return decision
+
+    def _approve_all(
+        self, branch_key: str, *, actor: str | None, note: str | None
+    ) -> dict[str, Any]:
+        approved = [
+            self.store.add_review_decision(
+                branch_key=branch_key,
+                commit_hash=commit,
+                action="approve",
+                actor=actor,
+                note=note,
+            )
+            for commit in self.unapproved_commits()
+        ]
+        self.store.conn.commit()
+        self._log_review_event(
+            "decision", {"action": "approve", "all": True, "count": len(approved)}
+        )
+        return {"action": "approve", "all": True, "approved": len(approved)}
+
+    def review_poll(self) -> dict[str, Any]:
+        """Open comments plus the approval state, for the pi relay."""
+        from .review import packet
+
+        branch_key = packet.campaign_branch_key(self)
+        unapproved = self.unapproved_commits()
+        return {
+            "branch_key": branch_key,
+            "comments": self.store.list_comments(
+                branch_key=branch_key, statuses=["open"]
+            ),
+            "unapproved": unapproved,
+            "all_approved": not unapproved,
+        }
+
+    def review_ack(self, comment_id: int) -> dict[str, Any]:
+        """Mark one comment delivered to the coordinator session."""
+        comment = self.store.get_comment(int(comment_id))
+        if comment is None:
+            raise SlicemeError(f"unknown comment: {comment_id}")
+        updated = self.store.set_comment_status(int(comment_id), "delivered")
+        self.store.conn.commit()
+        return updated  # type: ignore[return-value]
+
+    def unapproved_commits(self) -> list[str]:
+        """Campaign commits with no valid, unconsumed approval."""
+        from .review import packet
+
+        branch_key = packet.campaign_branch_key(self)
+        decisions = self.store.latest_decisions_by_commit(branch_key)
+        return [
+            commit
+            for commit in packet.review_commits(self)
+            if not self._is_approved(decisions.get(commit))
+        ]
+
+    @staticmethod
+    def _is_approved(decision: dict[str, Any] | None) -> bool:
+        return bool(
+            decision
+            and decision.get("action") == "approve"
+            and decision.get("consumed_at") is None
+        )
+
+    def require_all_approved(
+        self, commits: list[str] | None = None
+    ) -> dict[str, Any] | None:
+        """Refuse delivery unless every commit is approved (or an override).
+
+        Returns the override decision when one admitted delivery, else ``None``.
+        """
+        from .review import packet
+
+        branch_key = packet.campaign_branch_key(self)
+        commits = commits if commits is not None else packet.campaign_commits(self)
+        decisions = self.store.latest_decisions_by_commit(branch_key)
+        unapproved = [c for c in commits if not self._is_approved(decisions.get(c))]
+        if not unapproved:
+            return None
+        override = self.store.latest_review_decision(branch_key, None)
+        if (
+            override
+            and override.get("action") == "override"
+            and (override.get("note") or "").strip()
+        ):
+            return override
+        listing = ", ".join(commit[:7] for commit in unapproved)
+        raise SlicemeError(
+            f"not-approved: {listing} not approved; open `sliceme review` and approve them"
+        )
+
+    def consume_approvals(self, commits: list[str] | None = None) -> None:
+        """Mark the approvals for *commits* consumed after a landed merge."""
+        from .review import packet
+
+        branch_key = packet.campaign_branch_key(self)
+        commits = commits if commits is not None else packet.campaign_commits(self)
+        decisions = self.store.latest_decisions_by_commit(branch_key)
+        ids = [
+            int(decisions[commit]["id"])
+            for commit in commits
+            if commit in decisions and self._is_approved(decisions[commit])
+        ]
+        self.store.consume_review_decisions(ids)
+        self.store.conn.commit()
+
+    def _log_review_event(self, kind: str, data: dict[str, Any]) -> None:
+        """Append one review audit line to ``.sliceme/<branch-key>.events.jsonl``."""
+        import json
+
+        from .util import state_dir
+
+        branch = self.config.get("target_branch") or self.config.get("main_branch") or "main"
+        path = state_dir(self.root) / f"{campaign.branch_key(branch)}.events.jsonl"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"kind": f"review.{kind}", "data": data}) + "\n")
+        except OSError:
+            pass
+
     def _dag_waves(self, branch: str | None) -> tuple[list[dict[str, Any]], str | None]:
         """Compute the scheduler's wave projection of the campaign DAG.
 
@@ -961,8 +1018,8 @@ class Service:
         """Add the campaign columns the dashboard needs (§6.3).
 
         ``node``/``log`` come from the campaign layout; ``candidate`` and
-        ``verification`` are the unit's latest candidate row and its latest
-        recorded verdict.
+        ``verification`` are the unit's latest candidate row and the newest
+        check job for its commit.
         """
         projected = dict(unit)
         unit_id = int(unit["id"])
@@ -971,7 +1028,9 @@ class Service:
         ]
         latest = candidates[-1] if candidates else None
         verification = (
-            self.store.latest_verification(int(latest["id"])) if latest is not None else None
+            self.store.latest_job_for_commit(str(latest["head_commit"]))
+            if latest is not None
+            else None
         )
         projected["node"] = unit["name"]
         projected["log"] = str(
@@ -980,44 +1039,6 @@ class Service:
         projected["candidate"] = int(latest["id"]) if latest is not None else None
         projected["verification"] = verification
         return projected
-
-    def integrate(
-        self,
-        *,
-        node: str | None = None,
-        acceptance: list[str] | None = None,
-        gpu: str = "none",
-        check_only: bool = False,
-        cleanup: str = "none",
-        run_checks_flag: bool = True,
-    ) -> dict[str, Any]:
-        """Merge prepared candidates onto the feature branch (agent-callable)."""
-        if cleanup not in {"none", "worktrees", "all"}:
-            raise SlicemeError("cleanup must be one of: none, worktrees, all")
-        results = integrate.integrate(
-            self.store,
-            self.root,
-            self.config,
-            node=node,
-            acceptance=acceptance,
-            gpu=gpu,
-            check_only=check_only,
-            run_checks_flag=run_checks_flag,
-        )
-        cleanup_result: dict[str, Any] | None = None
-        artifacts_removed: list[str] = []
-        if cleanup in {"worktrees", "all"}:
-            cleanup_result = self.gc()
-        if cleanup == "all":
-            artifacts_removed = self.remove_campaign_artifacts(keep_report=True)
-        return {
-            "main_branch": self.config.get("main_branch"),
-            "node": node,
-            "check_only": check_only,
-            "results": [r.to_dict() for r in results],
-            "cleanup": cleanup_result,
-            "artifacts_removed": artifacts_removed,
-        }
 
     def deliver(
         self,
@@ -1035,15 +1056,27 @@ class Service:
         """
         if cleanup not in {"none", "worktrees", "all"}:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
-        results = integrate.deliver(
-            self.store,
-            self.root,
-            self.config,
-            target=target,
-            source=source,
-            no_ff=no_ff,
-            run_checks_flag=run_checks_flag,
-        )
+        from .review import packet
+
+        target_branch = target or self.config.get("target_branch") or self.config.get("main_branch")
+        source_branch = source or self.config.get("worktree_branch")
+        commits = packet.campaign_commits(self)
+        with _delivery_lock(self.root):
+            override = self.require_all_approved(commits)
+            results = integrate.deliver(
+                self.store,
+                self.root,
+                self.config,
+                target=target,
+                source=source,
+                no_ff=no_ff,
+                run_checks_flag=run_checks_flag,
+            )
+            if results and all(result.status == "landed" for result in results):
+                self.consume_approvals(commits)
+                if override:
+                    self.store.consume_review_decisions([int(override["id"])])
+                    self.store.conn.commit()
         cleanup_result: dict[str, Any] | None = None
         artifacts_removed: list[str] = []
         if cleanup in {"worktrees", "all"}:
@@ -1051,10 +1084,8 @@ class Service:
         if cleanup == "all":
             artifacts_removed = self.remove_campaign_artifacts(keep_report=True)
         return {
-            "target_branch": target
-            or self.config.get("target_branch")
-            or self.config.get("main_branch"),
-            "source": source or self.config.get("worktree_branch"),
+            "target_branch": target_branch,
+            "source": source_branch,
             "results": [r.to_dict() for r in results],
             "cleanup": cleanup_result,
             "artifacts_removed": artifacts_removed,
@@ -1123,13 +1154,55 @@ class Service:
 
         scratch = self.root / ".sliceme" / "scratch"
         rmtree(scratch)
+        pruned_reviews = self._prune_reviews()
         self.store.conn.commit()
-        return {"removed_worktrees": removed, "pruned_branches": pruned_branches}
+        return {
+            "removed_worktrees": removed,
+            "pruned_branches": pruned_branches,
+            "pruned_reviews": pruned_reviews,
+        }
+
+    def _prune_reviews(self) -> dict[str, int]:
+        """Prune old review rows for campaigns that are gone and unregistered.
+
+        A campaign with a descriptor file and the current campaign are never
+        pruned, so an active review is never lost to a retention sweep.
+        """
+        policy = self.config.get("policy") or {}
+        days = float(policy.get("review_retention_days") or 30)
+        keep = {
+            campaign.branch_key(str(descriptor.get("feature_branch") or key))
+            for key, descriptor in campaign.list_sessions(self.root)
+        }
+        branch = (
+            self.config.get("target_branch")
+            or self.config.get("main_branch")
+            or "main"
+        )
+        keep.add(campaign.branch_key(str(branch)))
+        return self.store.prune_reviews(keep_branch_keys=keep, keep_after=now() - days * 86400)
 
 
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
+@contextmanager
+def _delivery_lock(root: Path):
+    """The plane delivery lock, separate from ``executor.lock`` (POSIX only)."""
+    import fcntl
+
+    from .util import state_dir
+
+    path = state_dir(root) / "review.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _owners_of(path: str, owners: dict[str, list[str]]) -> list[str]:
     return [node_id for node_id, owns in owners.items() if path_within_owns(path, owns)]
 
@@ -1221,23 +1294,8 @@ def _default_worktree_branch(root: Path, target: str) -> str:
     return branch
 
 
-def _session_unit_slugs(session: str, name: str) -> tuple[str, str]:
-    """Slug the session and unit, collapsing the default ``session == name``.
-
-    ``create_workspace`` defaults the session to the unit name, so without this
-    a plain ``start`` produced ``<name>-<name>`` worktree directories and
-    ``sliceme/<name>/<name>`` branches.
-    """
-    session_slug = slugify(session, 24)
-    name_slug = slugify(name, 32)
-    if session_slug == name_slug:
-        return session_slug, session_slug
-    return session_slug, name_slug
-
-
-def _unique_branch(root: Path, session: str, name: str) -> str:
-    session_slug, name_slug = _session_unit_slugs(session, name)
-    base = f"sliceme/{session_slug}/{name_slug}" if session_slug != name_slug else f"sliceme/{name_slug}"
+def _unique_branch(root: Path, name: str) -> str:
+    base = f"sliceme/{slugify(name, 32)}"
     branch = base
     counter = 2
     while gitutil.branch_exists(root, branch):
@@ -1246,10 +1304,8 @@ def _unique_branch(root: Path, session: str, name: str) -> str:
     return branch
 
 
-def _unique_worktree(base_dir: Path, session: str, name: str) -> Path:
-    session_slug, name_slug = _session_unit_slugs(session, name)
-    combined = f"{session_slug}-{name_slug}" if session_slug != name_slug else name_slug
-    candidate = base_dir / combined
+def _unique_worktree(base_dir: Path, name: str) -> Path:
+    candidate = base_dir / slugify(name, 32)
     path = candidate
     counter = 2
     while path.exists():

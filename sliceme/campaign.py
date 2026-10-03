@@ -200,7 +200,9 @@ def build_skeleton(
             latest = rows[-1] if rows else None
             unit = units_by_id.get(int(latest["unit_id"])) if latest is not None else None
             verification = (
-                store.latest_verification(int(latest["id"])) if latest is not None else None
+                store.latest_job_for_commit(str(latest["head_commit"]))
+                if latest is not None
+                else None
             )
             per_node.append(
                 {
@@ -224,7 +226,9 @@ def build_skeleton(
             unit_candidates = [c for c in candidates if int(c["unit_id"]) == int(unit["id"])]
             latest = unit_candidates[-1] if unit_candidates else None
             verification = (
-                store.latest_verification(int(latest["id"])) if latest is not None else None
+                store.latest_job_for_commit(str(latest["head_commit"]))
+                if latest is not None
+                else None
             )
             per_node.append(
                 {

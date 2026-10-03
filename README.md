@@ -13,10 +13,11 @@ parallel agents never author the same files.
   branch; it is never recreated or rebased between waves, and files persist.
 - **One executor** — a single serialized, sandboxed runner drains a check queue,
   so verifiers judge recorded evidence instead of each running the suite.
-- **Approved delivery** — nothing is merged per wave; when every wave is done,
-  the user approves one `--no-ff` merge into the target feature branch. The
-  default branch (`main`, `master`, or the repository default) is refused with
-  no override.
+- **Approved delivery** — nothing is merged per wave. Commits accumulate, and a
+  human approves each commit in the local review client. When every wave is done
+  and every commit is approved, the coordinator runs one `--no-ff` merge into the
+  target feature branch. The default branch (`main`, `master`, or the repository
+  default) is refused with no override.
 
 ## Install
 
@@ -40,8 +41,9 @@ sliceme ready               current-wave nodes whose dependencies are done
 sliceme spawn <node>        one-shot pure editor in the campaign worktree
 sliceme record               commit the current wave onto the campaign worktree
 sliceme verify <node>       executor runs checks; a read-only verifier judges
-sliceme deliver             after all waves: ask approval, then merge to target
-sliceme report              deterministic report
+sliceme review --serve      local review client (per-commit approval)
+sliceme deliver             merge to target once every commit is approved
+sliceme review --report     deterministic report
 ```
 
 ## Docs
@@ -53,6 +55,7 @@ sliceme report              deterministic report
 - [Database](./docs/database.md) — the local plane's SQLite schema and lifecycle.
 - [Observability](./docs/observability.md) — proposed design for run visibility and timing/agent metrics.
 - [Sessions](./docs/sessions.md) — proposed design for suspending and resuming sessions and campaign progress.
+- [Local review](./docs/review.md) — the local review client, server, and per-commit approval gate.
 - [Publishing](./docs/publishing.md) — packaging and release.
 
 ## Develop

@@ -92,17 +92,18 @@ There is deliberately no fuzzy matching: concurrency is explainable from the
 
 ### Conformance: the runtime guarantee
 
-Because there are no leases, the guarantee is enforced after the worker commits:
+Because there are no leases, the guarantee is enforced when the coordinator
+records the wave:
 
 ```text
-changed = git diff --name-only <unit.base_commit> <head>
-violations = [p for p in changed if p not in the subtree of any owned dir]
+changed = git diff --name-status HEAD   (in the campaign worktree)
+violations = [p for p in changed if p maps to no single wave node]
 ```
 
-Any violation raises an error and the candidate is not registered. The
-coordinator then widens the node's `owns` or adds a `depends_on` edge and
-re-spawns. This keeps "no two same-wave units touch the same directory"
-auditable without runtime locking.
+Any violation raises an error and no commit is created. The coordinator then
+widens the node's `owns` or adds a `depends_on` edge and re-spawns. This keeps
+"no two same-wave units touch the same directory" auditable without runtime
+locking.
 
 ### Authoring guidance
 
@@ -212,7 +213,7 @@ wave N ready ──► spawn (<= concurrency) ──► workers edit the campaig
 all nodes done
         │
         ▼
-deliver (ask approval once) ──► merge campaign worktree -> target ──► report
+review (approve every commit) ──► deliver ──► merge campaign worktree -> target
 ```
 
 1. **`start`** asks the user for the **target branch** — the current branch, a
@@ -229,11 +230,15 @@ deliver (ask approval once) ──► merge campaign worktree -> target ──�
 5. **`verify`** runs the read-only verifier on the node's recorded commit.  The
    verifier submits the node's acceptance vector to the executor (§6) and the
    coordinator marks the node `done` from the verdict.
-6. **`deliver`** (only when every wave is done) asks the user once for approval,
-   then merges the campaign worktree into the target branch with the trusted
-   checks.  The target is never the default branch.
-7. **`report`** writes the deterministic skeleton plus the coordinator's
-   narrative.
+6. **`review`** (`--serve`) opens the local review client.  Commits accumulate
+   as waves land, and the human approves individual commits or all of them at
+   any time.  The packet also shows the generated report.
+7. **`review --report`** writes the deterministic skeleton plus the
+   coordinator's narrative.  The coordinator runs it before delivery so the
+   report is reviewable.
+8. **`deliver`** runs automatically once every wave is done and every commit is
+   approved.  It merges the campaign worktree into the target branch with the
+   trusted checks.  The target is never the default branch.
 
 The coordinator may re-invoke the planner or edit `dag.json` after a failure. A
 coordinator-added `depends_on` edge (or a widened `owns`) changes the DAG
@@ -242,13 +247,11 @@ fingerprint, so the next `status`/`ready`/`spawn` reprojects the waves.
 ### Cleanup
 
 Cleanup is destructive, so the agent cannot silently choose it, and there is no
-per-wave cleanup: files are never removed between waves.  As part of the
-end-of-campaign delivery approval, the coordinator offers one campaign-wide
-cleanup.  Accepting it runs `deliver --cleanup worktrees`, which removes the
-campaign worktree, drops the already-merged campaign branch, and clears scratch;
-the report and the `dag.json`/`state.json` record are kept.  `cleanup: all`
-additionally removes the `dag.json`/`state.json` files and the worker logs (the
-report is still kept).
+per-wave cleanup: files are never removed between waves.  The `deliver` action
+takes `--cleanup worktrees`, which removes the campaign worktree, drops the
+already-merged campaign branch, and clears scratch; the report and the
+`dag.json`/`state.json` record are kept.  `cleanup: all` additionally removes
+the `dag.json`/`state.json` files and the worker logs (the report is still kept).
 
 ### GPU arbitration
 
@@ -266,7 +269,7 @@ retryable failure rather than a code failure.
 | A wave record changes a path outside every node's `owns` | The record is rejected; the coordinator widens `owns` or adds a `depends_on` edge and re-spawns. |
 | Merge conflict at `deliver` | Merge aborted; findings surfaced. The target branch is never left half-merged. |
 | Orchestrator crash | Workers are child processes of the coordinator and are not detached, so a crash kills them. On resume, any node left `running` is reset to `pending` and re-spawned; the campaign worktree is reused, not recreated. Git and `state.db` win over `state.json`. |
-| User suspends (`/suspend`) | The pause flag stops new spawns/records/verifies and the adapter aborts the in-flight turn, killing the current worker and any executor subprocess within seconds; the interrupted node is marked `paused` and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree becomes `paused`, the wave is re-recorded, and unchanged candidates re-verify from cache. |
+| User suspends (`/suspend`) | The pause flag stops new spawns/records/verifies and the adapter aborts the in-flight turn, killing the current worker and any executor subprocess within seconds; the interrupted node is marked `paused` and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme status --resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree becomes `paused`, the wave is re-recorded, and unchanged candidates re-verify from cache. |
 
 Caps: `concurrency`, max attempts per node, and a wall-clock budget bound the
 cost of each spawn.
@@ -362,11 +365,12 @@ a file collision.  All waves share **one campaign worktree** on a separate
 branch, so the worktree is both the isolation and the accumulation unit:
 
 ```text
-exec --open             -> ONE campaign branch sliceme/<slug> + worktree off the target
-exec --record --wave N  -> conformance-by-ownership -> per-node commits (serialized)
+wave --open             -> ONE campaign branch sliceme/<slug> + worktree off the target
+wave --record --wave N  -> conformance-by-ownership -> per-node commits (serialized)
 verify                  -> the single executor runs each node's check vector
 (no merge per wave)     -> nodes marked done; open N+1 in the same worktree
-deliver                 -> after approval, merge the campaign worktree into the target
+review --serve          -> the human approves accumulated commits at any time
+deliver                 -> merge the campaign worktree once every commit is approved
 ```
 
 The recorder (`Service.record_wave`) stages the worktree, attributes every
@@ -430,4 +434,4 @@ verifier gets no Sliceme tool at all.
 Start a campaign with `/sliceme [DESIGN.md]` in pi, then use the
 `sliceme` tool — or drive the CLI directly: `start --no-unit --target <branch>`,
 then `spawn`/`record`/`verify` per ready wave, and a single `deliver` once every
-wave is done and the user approves.
+wave is done and every accumulated commit is approved.

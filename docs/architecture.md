@@ -31,7 +31,7 @@ it.
 | **One engine, many adapters.** | `sliceme/surface.py` is the single action registry. `sliceme/cli.py` is generated from it; the pi tools forward to the CLI. A "surface parity" test asserts the pi action list equals `surface.ACTIONS`. |
 | **The engine owns state.** | `Service` is the only owner of plane state; adapters parse arguments and render results. The pi extension never writes the database or the DAG. |
 | **The DAG is the only schedule.** | `phase` is a display label. Waves are derived from `owns` + `depends_on` + `concurrency` by `ownership.plan_dag_waves`. |
-| **Ownership is plan-time and directory-based.** | A node declares the deepest directories it will touch (`owns`). Subtree overlap serializes nodes into different waves. `commit` enforces this at runtime (plan conformance). |
+| **Ownership is plan-time and directory-based.** | A node declares the deepest directories it will touch (`owns`). Subtree overlap serializes nodes into different waves. `wave --record` enforces this at runtime (plan conformance). |
 | **One executor.** | All checks go through one runner behind a `flock`, so shared resources (and the GPU) are serialized. Verifiers judge recorded evidence; they do not run commands. |
 | **Verification is pinned to content.** | A verdict is valid only for an exact `(tree, command vector, toolchain, policy, sandbox, executor, source)` fingerprint. |
 | **Git and SQLite win over caches.** | `state.json` is a rebuildable cache. On conflict, git and `state.db` are authoritative. |
@@ -95,7 +95,7 @@ flowchart TB
   CO -->|"engine verbs"| SU
   CO -->|"spawn / verify"| SA
   SA -.->|"sliceme-unit"| UN
-  UN -->|"commit"| SU
+  UN -->|"status"| SU
   SU --> SE
   SE --> OW
   SE --> CA
@@ -125,22 +125,23 @@ adapter owns state.
 |---|---|
 | `sliceme/surface.py` | **Single source of truth**: the action registry, parameter validation, and dispatch. |
 | `sliceme/cli.py` | Generated `argparse` CLI; human and `--json` output. |
-| `sliceme/service.py` | **Single owner of state**: sessions, units, candidates, conformance, integration entry points, wave workspace. |
+| `sliceme/service.py` | **Single owner of state**: sessions, units, candidates, wave conformance, delivery, and review. |
 | `sliceme/store.py` | SQLite (WAL) persistence; additive migrations. |
-| `sliceme/gitutil.py` | Git plumbing: worktree, commit, merge, merge-tree, branch, changed files. |
+| `sliceme/gitutil.py` | Git plumbing: worktree, merge, merge-tree, branch, head. |
 | `sliceme/ownership.py` | Directory ownership normalization and the DAG wave projection. |
 | `sliceme/verifier.py` | Fingerprints and the sandboxed trusted-check runner. |
 | `sliceme/sandbox.py` | Isolation profiles, project manifests, the gate, and command wrapping. |
 | `sliceme/executor.py` | The single sandboxed executor queue (submit/run/wait/cancel, dedupe, leases). |
-| `sliceme/integrate.py` | Target-branch guard, final delivery, candidate wave ordering, combined-tree simulation. |
+| `sliceme/integrate.py` | Target-branch guard, final delivery, and combined-tree simulation. |
 | `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; deterministic report. |
 | `integrations/pi/*.ts` | pi adapter: `runSliceme`, `runSubagent`, the two tools, agent allowlists. |
 | `integrations/pi/agents/*.md` | Planner, worker, and verifier prompts plus their `tools:` scoping. |
 
 ## 5. The action surface and the request path
 
-Six engine actions exist; the pi coordinator adds three orchestration verbs
-(`ready`, `spawn`, `verify`) that drive the engine rather than adding actions.
+The engine owns the actions in `surface.ACTIONS`; the pi coordinator adds three
+orchestration verbs (`ready`, `spawn`, `verify`) that drive the engine rather
+than adding actions.
 
 ```mermaid
 flowchart LR
@@ -160,11 +161,12 @@ flowchart LR
 | Action | Purpose |
 |---|---|
 | `start` (alias `init`) | Bootstrap the plane and a unit for the current directory (idempotent). |
-| `status` | Units, candidates, waves, health, simulation. |
-| `commit` | Commit a unit worktree, enforce plan conformance, register the candidate. |
-| `deliver` | Merge the campaign worktree into the target feature branch after approval. |
-| `report` | Write the deterministic report plus an optional narrative. |
+| `status` | Units, candidates, waves, health, simulation; `--sessions` and `--resume` cover the campaign registry and resume plan. |
+| `deliver` | Merge the campaign worktree into the target feature branch when every commit is approved. |
 | `exec` | The single sandboxed executor queue. |
+| `wave` | The campaign worktree: `--open` or `--record --wave N`. |
+| `attempt` | Record one subagent attempt's begin/end and metrics. |
+| `review` | Local review: serve the browser client, read a snapshot, poll comments, approve/reject commits, or write the report. |
 
 To add an action: define it once in `surface.ACTIONS`, implement a handler and a
 `Service` method, and add the name to `integrations/pi/unit.ts::SLICEME_ACTIONS`.
@@ -186,7 +188,7 @@ sequenceDiagram
 
   U->>C: /sliceme DESIGN.md
   C->>E: start --no-unit --target feature-branch
-  C->>E: exec --open (campaign worktree)
+  C->>E: wave --open (campaign worktree)
   C->>P: start (planner subagent)
   P->>P: writes the campaign dag.json (Write tool)
   C->>E: status (projects dag_waves)
@@ -194,15 +196,15 @@ sequenceDiagram
     C->>W: spawn node (pure editor, campaign worktree)
     W->>G: edit owned dirs only
   end
-  C->>E: exec --record --wave N (per-node commits, conformance)
+  C->>E: wave --record --wave N (per-node commits, conformance)
   C->>X: verify node (submit acceptance at the node commit, run, wait)
   X->>X: run sandboxed checks in scratch worktree
   C->>V: verify against recorded evidence
   V-->>C: VERDICT: PASS / FAIL
   C->>C: mark node done (no merge); open wave N+1 in the same worktree
-  C->>U: after all waves, ask approval to merge
-  C->>E: deliver (merge campaign worktree --no-ff into the target)
+  U->>E: review --decision approve --commit SHA (per commit, any time)
   C->>E: report (deterministic skeleton + narrative)
+  C->>E: deliver when every commit is approved (merge --no-ff into the target)
 ```
 
 The coordinator is **not** a unit: the plane is bootstrapped with `--no-unit`, so
@@ -320,7 +322,8 @@ sequenceDiagram
   participant D as Store
   participant G as Git
 
-  C->>E: deliver (after all waves and user approval)
+  C->>E: deliver (when every wave is done and every commit is approved)
+  E->>E: require a newest unconsumed approve for every accumulated commit
   E->>E: refuse if target is main, master, or the default branch
   E->>G: resolve the campaign worktree branch (source)
   alt target already contains the source
@@ -358,54 +361,55 @@ files.
 
 ```mermaid
 erDiagram
-  sessions ||--o{ units : "groups"
   units ||--o{ candidates : "offers"
-  candidates ||--o{ fingerprints : "pinned to"
-  candidates ||--o{ verifications : "records"
-  fingerprints ||--o{ verifications : "judged by"
   jobs }o..o{ candidates : "decoupled by text fingerprint"
-
-  sessions {
+  review_decisions {
     int id PK
-    text name UK
-    text task
-    real created_at
+    text branch_key
+    text commit_hash
+    text action
+    real consumed_at
   }
+  comments {
+    int id PK
+    text branch_key
+    text commit_hash
+    text file
+    text side
+    int line
+    text status
+  }
+  attempts {
+    int id PK
+    text node
+    int attempt
+    text status
+    int tokens_in
+    int tokens_out
+    real cost
+  }
+
   units {
     int id PK
-    int session_id FK
-    text name
+    text name UK
     text kind
     text worktree
     text branch
+    text base_commit
     text state
   }
   candidates {
     int id PK
     int unit_id FK
-    text branch
     text head_commit
     text status
     text node
-  }
-  fingerprints {
-    int id PK
-    int candidate_id FK
-    text fingerprint
-    text tree
-    text source
-  }
-  verifications {
-    int id PK
-    int candidate_id FK
-    int fingerprint_id FK
-    text status
-    real duration
   }
   jobs {
     int id PK
     text source
     text commit_ref
+    text fingerprint
     text status
     text gpu
     real duration
@@ -417,8 +421,9 @@ erDiagram
 ```text
 .sliceme/
   config.json                      # version, target_branch, worktree_branch, base, default_branch, checks, policy
-  state.db                         # SQLite WAL: sessions, units, candidates, fingerprints, verifications, jobs
+  state.db                         # SQLite WAL: units, candidates, jobs, attempts, review_decisions, comments
   executor.lock                    # exclusive lock held by the single executor runner
+  review.lock                      # plane delivery lock (separate from executor.lock)
   <branch-key>.dag.json            # canonical plan (never committed)
   <branch-key>.state.json          # coordinator cache: node -> status, waves, sandbox digest (rebuildable)
   <branch-key>.report.md           # deterministic report (kept on cleanup)
@@ -431,9 +436,9 @@ erDiagram
 `<branch-key>` replaces `/` with `--` (`feat/x` → `feat--x`), so one campaign's
 files form a single glob and campaigns cannot collide. `state.json` holds only
 what git and `state.db` cannot express quickly; on conflict, git and `state.db`
-win. The proposed `attempts` and `campaign_sessions` tables in
-[observability.md](./observability.md) and [sessions.md](./sessions.md) are not
-implemented yet.
+win. The `attempts` table from [observability.md](./observability.md), and the
+`review_decisions` and `comments` tables from [review.md](./review.md), are
+implemented. The suspend/resume descriptor is a file, not a table.
 
 ## 11. Concurrency, failure, and recovery
 
@@ -441,7 +446,7 @@ implemented yet.
 stateDiagram-v2
   [*] --> pending
   pending --> running: spawn (current wave, deps done)
-  running --> recorded: exec --record --wave N committed the node
+  running --> recorded: wave --record --wave N committed the node
   running --> failed: worker error or exit != 0
   recorded --> done: verifier PASS
   recorded --> failed: verifier FAIL
@@ -513,4 +518,5 @@ campaign".
 - [database.md](./database.md) — the SQLite schema and row lifecycle.
 - [observability.md](./observability.md) — proposed live progress and metrics.
 - [sessions.md](./sessions.md) — proposed suspend/resume and checkpoints.
+- [review.md](./review.md) — the local review client, server, and per-commit approval gate.
 - [publishing.md](./publishing.md) — packaging and release.

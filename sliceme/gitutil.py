@@ -102,16 +102,6 @@ def head_commit(worktree: str | os.PathLike[str]) -> str:
     return git(worktree, "rev-parse", "HEAD", check=True).stdout.strip()
 
 
-def changed_files(repo: str | os.PathLike[str], base: str, head: str) -> list[str]:
-    """Repo-relative paths changed between *base* and *head* (empty on error)."""
-    if not base or not head:
-        return []
-    res = git(repo, "diff", "--name-only", base, head, check=False)
-    if not res.ok:
-        return []
-    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
-
-
 @dataclass
 class WorktreeEntry:
     path: Path
@@ -292,16 +282,6 @@ def merge_abort(worktree: str | os.PathLike[str]) -> None:
 
 def reset_hard(worktree: str | os.PathLike[str], commit: str = "HEAD") -> GitResult:
     return git(worktree, "reset", "--hard", commit, check=False)
-
-
-def commit_all(
-    worktree: str | os.PathLike[str], message: str, *, allow_empty: bool = False
-) -> GitResult:
-    git(worktree, "add", "-A", check=True)
-    args = ["commit", "-m", message]
-    if allow_empty:
-        args.append("--allow-empty")
-    return git(worktree, *args, check=False)
 
 
 def detect_toolchain_files(repo: str | os.PathLike[str], commit: str) -> dict[str, str]:

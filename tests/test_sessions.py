@@ -116,6 +116,9 @@ class SessionsCase(unittest.TestCase):
         result = self.svc.record_wave(0)
         return next(c for c in result["candidates"] if c["node"] == "w1")
 
+    def approve(self):
+        return self.svc.review_decision(action="approve", all_commits=True, actor="test")
+
 
 class DescriptorTests(SessionsCase):
     def test_descriptor_round_trip_and_listing(self):
@@ -242,24 +245,19 @@ class RegistryTests(SessionsCase):
         self.write_state({"w1": {"status": "done"}, "w2": {"status": "pending"}})
         campaign.write_session(self.root, "feat/x", self.descriptor())
 
-        result = self.svc.sessions(rebuild=True)
+        result = self.svc.sessions()
         entry = next(s for s in result["sessions"] if s["feature_branch"] == "feat/x")
         self.assertTrue(entry["is_current"])
         self.assertEqual(entry["session_file"], "/tmp/sess-1.jsonl")
         self.assertEqual(entry["total"], 3)
         self.assertEqual(entry["done"], 1)
 
-        rows = self.svc.store.list_campaign_sessions()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["pi_session_id"], "sess-1")
-        self.assertEqual(rows[0]["feature_branch"], "feat/x")
-
-    def test_resume_refreshes_the_projection_unless_plan_only(self):
+    def test_resume_is_a_pure_plan(self):
         campaign.write_session(self.root, "feat/x", self.descriptor())
-        self.svc.resume(plan_only=True)
-        self.assertEqual(self.svc.store.list_campaign_sessions(), [])
-        self.svc.resume()
-        self.assertEqual(len(self.svc.store.list_campaign_sessions()), 1)
+        plan = self.svc.resume(plan_only=True)
+        self.assertEqual(plan["feature_branch"], "feat/x")
+        # The descriptor file remains the only registry; resume writes no rows.
+        self.assertEqual(campaign.load_session(self.root, "feat/x")["pi"]["session_id"], "sess-1")
 
 
 class DeliveryCleanupTests(SessionsCase):
@@ -283,6 +281,7 @@ class DeliveryCleanupTests(SessionsCase):
         self.assertTrue(worktree.exists())
         self.assertTrue(self.branch_exists(branch))
 
+        self.approve()
         delivered = self.svc.deliver(cleanup="worktrees")
 
         self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
@@ -295,6 +294,7 @@ class DeliveryCleanupTests(SessionsCase):
     def test_default_delivery_keeps_the_campaign_worktree(self):
         self.record_w1()
         unit = self.svc.store.get_unit("campaign")
+        self.approve()
         self.svc.deliver()
         # Cleanup is opt-in: the default keeps the worktree for inspection.
         self.assertTrue(Path(unit["worktree"]).exists())
@@ -354,8 +354,9 @@ class MigrationTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-            self.assertIn("campaign_sessions", tables)
             self.assertIn("attempts", tables)
+            self.assertIn("review_decisions", tables)
+            self.assertIn("comments", tables)
             store.close()
 
 

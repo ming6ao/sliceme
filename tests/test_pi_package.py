@@ -155,21 +155,25 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("docs/", files)
 
     def test_retired_actions_are_gone(self):
-        # The single-agent path (`handoff`, human `review`), the old
-        # `submit`/`verify` verbs, and the per-wave `integrate` landing action
-        # are retired; `deliver` is the end-of-campaign merge.
+        # The single-agent path (`handoff`), the old `submit`/`verify` verbs, and
+        # the per-wave `integrate` landing action, and the plain-plane `commit`
+        # action are retired; `deliver` is the end-of-campaign merge and `review`
+        # is the local review surface.
         names = {a.name for a in surface.ACTIONS}
-        for gone in ("submit", "verify", "handoff", "review", "declare", "integrate"):
+        for gone in ("submit", "verify", "handoff", "declare", "integrate", "commit"):
             self.assertNotIn(gone, names)
         self.assertIn("deliver", names)
+        self.assertIn("review", names)
+        self.assertIn("wave", names)
         text = PI_UNIT.read_text(encoding="utf-8")
-        for gone in ("submit", "verify", "handoff", "review", "declare", "integrate"):
+        for gone in ("submit", "verify", "handoff", "declare", "integrate", "commit"):
             self.assertNotIn(f'"{gone}"', text)
 
     def test_campaign_actions_are_in_lockstep(self):
         names = [a.name for a in surface.ACTIONS]
         self.assertIn("deliver", names)
-        self.assertIn("report", names)
+        self.assertIn("wave", names)
+        self.assertIn("review", names)
         text = PI_UNIT.read_text(encoding="utf-8")
         match = re.search(r"SLICEME_ACTIONS\s*=\s*\[(.*?)\]\s*as const", text, re.DOTALL)
         self.assertIsNotNone(match)
@@ -177,7 +181,8 @@ class PiPackageTests(unittest.TestCase):
         # The workflow doc documents the campaign additions.
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("`deliver`", workflow)
-        self.assertIn("`report`", workflow)
+        self.assertIn("`wave`", workflow)
+        self.assertIn("`review`", workflow)
         self.assertIn("--no-unit", workflow)
 
     def test_campaign_scheduler_is_wave_aware(self):
@@ -294,13 +299,12 @@ class PiPackageTests(unittest.TestCase):
 
     def test_docs_document_the_session_actions(self):
         names = {a.name for a in surface.ACTIONS}
-        for name in ("resume", "sessions", "attempt"):
-            self.assertIn(name, names)
+        self.assertIn("attempt", names)
+        self.assertIn("status", names)
         reference = (REPO_ROOT / "docs" / "reference.md").read_text(encoding="utf-8")
-        for name in ("`resume`", "`sessions`", "`attempt`"):
-            self.assertIn(name, reference)
+        for needle in ("`attempt`", "--resume", "--sessions"):
+            self.assertIn(needle, reference)
         database = (REPO_ROOT / "docs" / "database.md").read_text(encoding="utf-8")
-        self.assertIn("campaign_sessions", database)
         self.assertIn("attempts", database)
 
 

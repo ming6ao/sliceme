@@ -74,14 +74,42 @@ export const CAMPAIGN_ACTIONS = [
 	"deliver",
 	"report",
 	"exec",
+	"wave",
+	"review",
+] as const;
+
+/** Parameter names the `review` action forwards to the engine verb. */
+const REVIEW_KEYS = [
+	"serve",
+	"plane",
+	"host",
+	"port",
+	"poll",
+	"ack",
+	"state",
+	"diff",
+	"comment",
+	"decision",
+	"all",
+	"report",
+	"narrative",
+	"design",
+	"comment_id",
+	"target",
+	"commit",
+	"file",
+	"side",
+	"line",
+	"line_end",
+	"body",
+	"note",
+	"actor",
 ] as const;
 
 /** Parameter names the `exec` action forwards to the engine verb. */
 const EXEC_KEYS = [
 	"validate",
 	"gpu_required",
-	"open",
-	"record",
 	"run",
 	"submit",
 	"wait",
@@ -97,9 +125,28 @@ const EXEC_KEYS = [
 	"wave",
 	"requester",
 	"limit",
-	"message",
-	"summary",
 ] as const;
+
+/** Parameter names the `wave` action forwards to the engine verb. */
+const WAVE_KEYS = ["open", "record", "wave", "message", "summary"] as const;
+
+/** Render one engine verb plus its selected params as CLI arguments. */
+function engineArgs(action: string, keys: readonly string[], params: any): string[] {
+	const args = [action];
+	for (const key of keys) {
+		const value = params[key];
+		if (value === undefined || value === null) continue;
+		const flag = `--${key.replace(/_/g, "-")}`;
+		if (typeof value === "boolean") {
+			if (value) args.push(flag);
+		} else if (Array.isArray(value)) {
+			for (const item of value) args.push(flag, String(item));
+		} else {
+			args.push(flag, String(value));
+		}
+	}
+	return args;
+}
 
 interface CampaignNode {
 	id: string;
@@ -494,7 +541,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	 */
 	async function fetchResumePlan(ctx: ExtensionContext, branch: string): Promise<any | null> {
 		try {
-			return (await sliceme(ctx, ["resume", "--plan-only"])).json;
+			return (await sliceme(ctx, ["status", "--resume", "--plan-only"])).json;
 		} catch {
 			return null;
 		}
@@ -520,6 +567,70 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			(rp.verify?.length ?? 0) > 0 ||
 			(rp.record_wave !== undefined && rp.record_wave !== null)
 		);
+	}
+
+	// ------------------------------------------------------------------
+	// Review relay (docs/review.md)
+	// ------------------------------------------------------------------
+	// A comment is delivered at least once: the ack is best-effort, so a crash
+	// repeats a comment rather than losing it.  The in-process set only avoids a
+	// duplicate inside one session.
+	const relayedComments = new Set<number>();
+	let reviewTimer: ReturnType<typeof setInterval> | undefined;
+	let reviewCtx: ExtensionContext | undefined;
+
+	async function relayReviewComments(
+		ctx: ExtensionContext,
+		branch: string,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (!ctx.isIdle()) return;
+		let payload: any;
+		try {
+			payload = (await sliceme(ctx, ["review", "--poll"], signal)).json;
+		} catch {
+			return;
+		}
+		const comments: any[] = payload?.comments ?? [];
+		for (const comment of comments) {
+			const id = Number(comment.id);
+			if (!id || relayedComments.has(id)) continue;
+			relayedComments.add(id);
+			const where = [
+				comment.commit_hash ? String(comment.commit_hash).slice(0, 7) : null,
+				comment.file,
+				comment.line,
+			]
+				.filter((value) => value !== null && value !== undefined)
+				.join(" ");
+			pi.sendUserMessage(
+				`Review comment${where ? ` on ${where}` : ""}: ${String(comment.body ?? "")}`,
+			);
+			try {
+				await sliceme(ctx, ["review", "--ack", "--comment-id", String(id)], signal);
+			} catch {
+				/* at-least-once: a failed ack repeats the comment, never loses it */
+			}
+		}
+		// When every commit is approved and every wave is done, proceed
+		// automatically; the human approval is the trigger, not a prompt.
+		if (payload?.all_approved && ctx.isIdle()) {
+			const stateFile = statePath(ctx.cwd, branch);
+			const state: any = readJson(stateFile, { nodes: {} });
+			if (allWavesDone(state) && !state.delivered) {
+				await tryDelivery(ctx, branch, state, stateFile, signal);
+			}
+		}
+	}
+
+	function startReviewTimer(): void {
+		if (reviewTimer) return;
+		reviewTimer = setInterval(() => {
+			if (!reviewCtx) return;
+			const branch = configuredBranch(reviewCtx.cwd) ?? "";
+			if (!branch) return;
+			void relayReviewComments(reviewCtx, branch);
+		}, 15000);
 	}
 
 	/**
@@ -803,7 +914,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		signal?: AbortSignal,
 	): Promise<any> {
-		const opened = await sliceme(ctx, ["exec", "--open"], signal);
+		const opened = await sliceme(ctx, ["wave", "--open"], signal);
 		const unit = opened.json?.unit ?? {};
 		if (!unit.worktree) throw new Error("sliceme: could not create the campaign worktree");
 		return unit;
@@ -900,7 +1011,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					try {
 						// Read the plan before --open recreates a hand-deleted worktree,
 						// so a lost worktree still maps to a fresh spawn, not a pause.
-						resumePlan = (await sliceme(ctx, ["resume", "--plan-only"], signal)).json;
+						resumePlan = (await sliceme(ctx, ["status", "--resume", "--plan-only"], signal)).json;
 					} catch {
 						resumePlan = null;
 					}
@@ -951,7 +1062,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					try {
 						await sliceme(
 							ctx,
-							["exec", "--record", "--wave", String(pendingWave)],
+							["wave", "--record", "--wave", String(pendingWave)],
 							signal,
 						);
 						logEvent(ctx.cwd, branch, "wave.record_on_resume", { wave: pendingWave });
@@ -1187,7 +1298,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		if (!wave) throw new Error("record: no open wave to record");
 		const recorded = await sliceme(
 			ctx,
-			["exec", "--record", "--wave", String(wave.index)],
+			["wave", "--record", "--wave", String(wave.index)],
 			signal,
 		);
 		const candidates: any[] = recorded.json?.candidates ?? [];
@@ -1215,6 +1326,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const summary = candidates.length
 			? `wave ${wave.index} recorded: ${candidates.map((c: any) => c.node).join(", ")}`
 			: `wave ${wave.index} recorded no changes`;
+		// Between waves, deliver any review comments the human wrote.
+		void relayReviewComments(ctx, branch);
 		return { content: [{ type: "text" as const, text: summary }], details: recorded.json ?? {} };
 	}
 
@@ -1310,11 +1423,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			completed_waves: completed.map((w) => w.index),
 		});
 
-		// Nothing is merged per wave.  Only when every wave is done do we ask the
-		// user once for approval to merge the campaign worktree into the target.
+		// Nothing is merged per wave.  When every wave is done, try the merge; the
+		// engine refuses until the human approves every commit in the review client.
 		let delivery: any = null;
 		if (passed && allWavesDone(state)) {
-			delivery = await offerDelivery(ctx, branch, state, stateFile, signal);
+			delivery = await tryDelivery(ctx, branch, state, stateFile, signal);
 		}
 		return {
 			content: [
@@ -1334,11 +1447,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * The one approval gate: when every wave is done, ask the user whether to merge
-	 * the campaign worktree into the target branch, then run `deliver`.  In
-	 * non-interactive modes this records `ready_to_deliver` for a later `deliver`.
+	 * Merge the campaign worktree once every wave is done and every commit is
+	 * approved.  The human approves commits in the review client; the engine
+	 * refuses a merge until then.  A refusal is not an error: the review relay
+	 * retries after the next approval.
 	 */
-	async function offerDelivery(
+	async function tryDelivery(
 		ctx: ExtensionContext,
 		branch: string,
 		state: any,
@@ -1346,36 +1460,29 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		signal?: AbortSignal,
 		cleanupOverride?: string,
 	): Promise<any> {
-		if (state.delivered) return null;
+		if (state.delivered || !allWavesDone(state)) return null;
 		const target = String(state.target_branch ?? branch);
 		const source = String(state.worktree_branch ?? "");
-		if (!ctx.hasUI) {
-			state.ready_to_deliver = true;
-			writeJson(stateFile, state);
-			return null;
+		// Generate the report so the reviewer can read it before approving.
+		try {
+			await sliceme(ctx, ["review", "--report"], signal);
+		} catch {
+			/* the report is evidence for the reviewer, never a merge gate */
 		}
-		const ok = await ctx.ui.confirm(
-			`All waves are done. Merge the campaign worktree into '${target}'?`,
-			`Source branch: ${source || "(campaign worktree)"}. This runs the trusted checks ` +
-				`and merges with --no-ff. The target is never the default branch.`,
-		);
-		if (!ok) {
-			state.ready_to_deliver = true;
-			writeJson(stateFile, state);
-			return null;
-		}
-		let cleanup = cleanupOverride !== undefined ? String(cleanupOverride) : "none";
-		if (cleanupOverride === undefined && ctx.hasUI) {
-			const remove = await ctx.ui.confirm(
-				"Remove the campaign worktree after merging?",
-				`Deletes the campaign worktree, drops the already-merged branch ` +
-					`'${source || "(campaign worktree)"}', and clears scratch. The report is kept.`,
-			);
-			if (remove) cleanup = "worktrees";
-		}
+		const cleanup = cleanupOverride !== undefined ? String(cleanupOverride) : "none";
 		const args = ["deliver", "--target", target];
 		if (cleanup !== "none") args.push("--cleanup", cleanup);
-		const delivered = await sliceme(ctx, args, signal);
+		let delivered: any;
+		try {
+			delivered = await sliceme(ctx, args, signal);
+		} catch (error) {
+			const message = String((error as Error)?.message ?? error);
+			if (!message.includes("not-approved")) throw error;
+			// Not approved yet: stay ready for the next review poll.
+			state.ready_to_deliver = true;
+			writeJson(stateFile, state);
+			return null;
+		}
 		const failed = (delivered.json?.results ?? []).some((r: any) => r.status === "failed");
 		state.ready_to_deliver = false;
 		if (!failed) {
@@ -1409,7 +1516,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const branch = await featureBranch(ctx);
 		const stateFile = statePath(ctx.cwd, branch);
 		const state: any = readJson(stateFile, { nodes: {} });
-		const delivered = await offerDelivery(ctx, branch, state, stateFile, signal, params.cleanup);
+		const delivered = await tryDelivery(ctx, branch, state, stateFile, signal, params.cleanup);
 		if (!delivered) {
 			return {
 				content: [
@@ -1456,10 +1563,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"node's owns (or add a depends_on edge) in dag.json; the next status/ready/spawn replans.",
 			"Only the single executor runs checks (and only it may use the GPU); verifiers " +
 				"judge the executor's recorded evidence. The sandbox gate must pass before verifying.",
-			"Use `exec` for the sandbox gate (--validate), the campaign worktree (--open), and " +
-				"the check queue (--submit/--run/--wait).",
-			"Do NOT merge to the target per wave. Only when every wave is done does `deliver` " +
-				"ask the user once for approval, then merge the campaign worktree with --no-ff.",
+			"Use `exec` for the sandbox gate (--validate) and the check queue " +
+				"(--submit/--run/--wait); use `wave` for the campaign worktree (--open) and " +
+				"recording a wave (--record).",
+			"Do NOT merge to the target per wave. `deliver` runs automatically once every wave " +
+				"is done and every commit is approved in the review client.",
 		],
 		// Inactive until `/sliceme` activates it, so a plain session never
 		// advertises the campaign workflow or injects its guidelines.
@@ -1491,10 +1599,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				Type.Boolean({ description: "exec: with validate, require a GPU runner" }),
 			),
 			open: Type.Optional(
-				Type.Boolean({ description: "exec: create/reuse the campaign worktree" }),
+				Type.Boolean({ description: "wave: create or reuse the campaign worktree" }),
 			),
 			record: Type.Optional(
-				Type.Boolean({ description: "exec: record a wave (conformance + per-node commits)" }),
+				Type.Boolean({ description: "wave: record a wave (conformance + per-node commits)" }),
 			),
 			run: Type.Optional(Type.Boolean({ description: "exec: drain the executor queue" })),
 			submit: Type.Optional(Type.Boolean({ description: "exec: enqueue a check job" })),
@@ -1529,8 +1637,35 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			wave: Type.Optional(Type.Number({ description: "exec: wave index" })),
 			requester: Type.Optional(Type.String({ description: "exec: verifier id" })),
 			limit: Type.Optional(Type.Number({ description: "exec: max jobs to drain" })),
-			message: Type.Optional(Type.String({ description: "exec record: commit message" })),
-			summary: Type.Optional(Type.String({ description: "exec record: candidate summary" })),
+			message: Type.Optional(Type.String({ description: "wave record: commit message" })),
+			summary: Type.Optional(Type.String({ description: "wave record: candidate summary" })),
+			serve: Type.Optional(
+				Type.Boolean({ description: "review: start the foreground loopback server" }),
+			),
+			plane: Type.Optional(
+				Type.Array(Type.String(), { description: "review: plane root to serve (repeatable)" }),
+			),
+			poll: Type.Optional(
+				Type.Boolean({ description: "review: print open comments and the newest decision" }),
+			),
+			ack: Type.Optional(Type.Boolean({ description: "review: acknowledge one comment" })),
+			comment: Type.Optional(Type.Boolean({ description: "review: record a comment" })),
+			decision: Type.Optional(
+				StringEnum(["approve", "request_changes", "override"] as const, {
+					description: "review: record a decision",
+				}),
+			),
+			all: Type.Optional(
+				Type.Boolean({ description: "review: with approve, approve every unapproved commit" }),
+			),
+			file: Type.Optional(Type.String({ description: "review: file path" })),
+			side: Type.Optional(StringEnum(["old", "new"] as const, { description: "review: comment side" })),
+			line: Type.Optional(Type.Number({ description: "review: line number" })),
+			line_end: Type.Optional(Type.Number({ description: "review: end line for a range" })),
+			body: Type.Optional(Type.String({ description: "review: comment body" })),
+			note: Type.Optional(Type.String({ description: "review: decision note" })),
+			actor: Type.Optional(Type.String({ description: "review: who recorded the decision" })),
+			comment_id: Type.Optional(Type.Number({ description: "review: comment id for --ack" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			switch (params.action as (typeof CAMPAIGN_ACTIONS)[number]) {
@@ -1575,27 +1710,26 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				case "report": {
 					const branch = await featureBranch(ctx);
 					const { dag } = load(ctx, branch);
-					const args = ["report"];
+					const args = ["review", "--report"];
 					if (params.narrative) args.push("--narrative", String(params.narrative));
 					if (dag.design) args.push("--design", dag.design);
 					const { json, text } = await sliceme(ctx, args, signal);
 					return { content: [{ type: "text" as const, text }], details: json ?? {} };
 				}
-				case "exec": {
-					const args = ["exec"];
-					for (const key of EXEC_KEYS) {
-						const value = (params as Record<string, unknown>)[key];
-						if (value === undefined || value === null) continue;
-						const flag = `--${key.replace(/_/g, "-")}`;
-						if (typeof value === "boolean") {
-							if (value) args.push(flag);
-						} else if (Array.isArray(value)) {
-							for (const item of value) args.push(flag, String(item));
-						} else {
-							args.push(flag, String(value));
-						}
-					}
-					const { json, text } = await sliceme(ctx, args, signal);
+				case "exec":
+				case "wave":
+				case "review": {
+					const keys =
+						params.action === "exec"
+							? EXEC_KEYS
+							: params.action === "wave"
+								? WAVE_KEYS
+								: REVIEW_KEYS;
+					const { json, text } = await sliceme(
+						ctx,
+						engineArgs(String(params.action), keys, params),
+						signal,
+					);
 					return { content: [{ type: "text" as const, text }], details: json ?? {} };
 				}
 				default:
@@ -1653,7 +1787,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			let sessions: any[] = [];
 			try {
-				sessions = (await sliceme(ctx, ["sessions"])).json?.sessions ?? [];
+				sessions = (await sliceme(ctx, ["status", "--sessions"])).json?.sessions ?? [];
 			} catch (error) {
 				ctx.ui.notify(`sliceme: ${String((error as Error)?.message ?? error)}`, "error");
 				return;
@@ -1684,6 +1818,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (event, ctx) => {
+		reviewCtx = ctx;
+		startReviewTimer();
 		try {
 			if (event.reason !== "resume" && event.reason !== "startup") return;
 			const branch = configuredBranch(ctx.cwd);
@@ -1732,11 +1868,19 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			}
 		} catch {
 			/* a resume hook must never break session startup */
+		} finally {
+			const branch = configuredBranch(ctx.cwd);
+			if (branch) void relayReviewComments(ctx, branch);
 		}
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
 		// Fast, idempotent, and subprocess-free: only the descriptor is written.
+		if (reviewTimer) {
+			clearInterval(reviewTimer);
+			reviewTimer = undefined;
+		}
+		reviewCtx = undefined;
 		try {
 			const branch = configuredBranch(ctx.cwd);
 			if (!branch || !fs.existsSync(dagPath(ctx.cwd, branch))) return;

@@ -43,7 +43,7 @@ COORDINATOR (this session)
   worktree, so it already sees the previous wave's files.
 - Workers are **pure editors**: they edit only their owned directories, never
   run `git`, and never run the test suite. The coordinator runs
-  `exec --record --wave N` to create one commit per node and enforce
+  `wave --record --wave N` to create one commit per node and enforce
   conformance-by-ownership.
 - Only the executor runs checks and only the executor may use the GPU. Verifiers
   delegate to the executor and judge its recorded evidence.
@@ -59,12 +59,14 @@ COORDINATOR (this session)
   by resolved path; a project may override the GPU invocation through its
   sandbox manifest. The target repository owns *how to run tests in isolation*,
   not sliceme's GPU locking policy.
-- Nothing is merged per wave. When every wave is done, `deliver` asks the user
-  once for approval, then merges the campaign worktree into the target branch
-  with the trusted checks. Cleanup is offered once, after delivery.
-- `commit` enforces **plan conformance**: a worker whose commit changes a path
-  outside its node's owned directories is rejected, and the coordinator widens
-  `owns` or adds a `depends_on` edge (the DAG fingerprint changes, so the next
+- Nothing is merged per wave. Commits accumulate on the campaign worktree. A
+  human approves individual commits, or all of them, in the local review client
+  (`docs/review.md`), before or after the last wave. When every wave is done and
+  every commit is approved, the coordinator runs `deliver` automatically and
+  merges with the trusted checks.
+- `wave --record` enforces **plan conformance**: a changed path outside its
+  node's owned directories is rejected, and the coordinator widens `owns` or
+  adds a `depends_on` edge (the DAG fingerprint changes, so the next
   `status`/`ready`/`spawn` replans).
 - Everything is reconstructable from `.sliceme/` + git after a crash.
 
@@ -80,7 +82,7 @@ a worker gets `sliceme-unit` but never `sliceme`, and the verifier gets neither.
 1. **Workers run inside the one campaign worktree.** They edit only their
    owned directories and never touch the main working tree.
 2. **Edit only your node's owned directories.** Ownership is declared in
-   `dag.json` and enforced by the wave recorder (`exec --record --wave N`); a
+   `dag.json` and enforced by the wave recorder (`wave --record --wave N`); a
    rejection means the planner under-declared, not that you should widen your
    own scope.
 3. **Finish without landing.** Workers are pure editors: edit only your owned
@@ -108,8 +110,9 @@ sliceme status              waves + DAG + live child state
 sliceme spawn <node>        one-shot pure editor in the campaign worktree
 sliceme record              commit the current wave onto the campaign worktree
 sliceme verify <node>       executor runs checks; a read-only verifier judges
-sliceme deliver             after all waves: ask approval, then merge to target
-sliceme report              deterministic report (`--narrative` appends the summary)
+sliceme review --serve      local review client (per-commit approval)
+sliceme deliver             merge to target once every commit is approved
+sliceme review --report     deterministic report (`--narrative` appends the summary)
 ```
 
 The coordinator also registers two commands and two lifecycle hooks
@@ -130,8 +133,9 @@ and the next `status`/`ready`/`spawn` automatically replans the waves.
 The coordinator's own checkout is **not** an Sliceme unit; `sliceme start`
 bootstraps the plane with `--no-unit` and records the chosen target branch. The
 campaign work commits to a separate worktree branch, and `deliver` merges it
-into the target only after every wave is done and the user approves. `main`,
-`master`, and the default branch are refused at both steps.
+into the target only after every wave is done and every accumulated commit is
+approved in the review client. `main`, `master`, and the default branch are
+refused at both steps.
 
 ## Unit actions (the `sliceme-unit` tool)
 
@@ -139,13 +143,13 @@ into the target only after every wave is done and the user approves. `main`,
 |---|---|
 | `start` | bootstrap the plane; `no_unit: true` for the coordinator's checkout; `target`/`target_mode` chooses the feature branch; `name` + `base` creates a worker unit |
 | `status` | units, candidates, waves; `short`, `unit`, `simulate`, `health`, `gc` |
-| `commit` | commit a unit worktree, enforce plan conformance, and register the candidate |
 | `deliver` | merge the campaign worktree into the target feature branch; `target`, `source`, `cleanup`, `no_checks` |
-| `report` | write the deterministic campaign report; `narrative` appends the coordinator's summary |
-| `resume` | reconcile a suspended campaign from git plus `state.db` and return the resume plan |
-| `sessions` | list registered campaigns (`--rebuild` refreshes the projection) |
+| `status` | `--sessions` lists registered campaigns; `--resume` reconciles a suspended campaign from git plus `state.db` |
+| `review` | local review and the deterministic report (`--report --narrative`) |
 | `attempt` | persist a subagent attempt's `--begin`/`--end` and metrics |
-| `exec` | the sandboxed executor: `--validate` (sandbox gate), `--open` (campaign worktree), `--record --wave N` (per-node commits), `--submit`/`--run`/`--wait`/`--cancel` check jobs |
+| `review` | local review: `--serve`, `--state`, `--diff`, `--poll`, `--ack`, `--comment`, `--decision` (`--commit` or `--all`) |
+| `wave` | the campaign worktree: `--open` (create/reuse it), `--record --wave N` (per-node commits, conformance) |
+| `exec` | the sandboxed executor: `--validate` (sandbox gate), `--submit`/`--run`/`--wait`/`--cancel` check jobs |
 
 ## Worker workflow
 
@@ -157,10 +161,11 @@ A spawned worker edits the shared campaign worktree and does nothing else:
 ```
 
 Workers are pure editors: they edit only their owned directories and stop — the
-coordinator runs `exec --record --wave N` to enforce conformance, create
+coordinator runs `wave --record --wave N` to enforce conformance, create
 per-node commits, and run the checks through the single executor. A worker never
 runs the suite, never runs `git`, and never touches the GPU. Nothing is merged
-to the target branch until the coordinator's single `deliver` step.
+to the target branch until every commit is approved and the coordinator runs
+its single `deliver` step.
 
 Ownership syntax is `dir:PATH` (a bare path is also accepted), always a
 directory at the deepest level that contains the paths the node touches:
@@ -168,7 +173,7 @@ directory at the deepest level that contains the paths the node touches:
 spec (`file:`, `symbol:`, ...) is rejected when the DAG is projected, so a
 campaign cannot start with file-level ownership.
 
-If `commit` rejects a path outside the owned directories, report it and stop.
+If the wave recorder rejects a path outside the owned directories, report it and stop.
 The coordinator widens the node's `owns` (or adds a `depends_on` edge) in
 `dag.json`; the next `status`/`ready`/`spawn` replans the waves.
 
