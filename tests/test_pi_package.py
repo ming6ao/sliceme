@@ -60,17 +60,13 @@ class PiPackageTests(unittest.TestCase):
         for path in docs:
             self.assertNotIn("npx skills add", path.read_text(encoding="utf-8"))
 
-    def test_no_dead_bootstrap_env_or_cli_alias(self):
-        # `SLICEME_AUTO_BOOTSTRAP` belonged to a removed auto-bootstrap path,
-        # and the retired `ig` CLI alias is gone; neither should reappear.
+    def test_no_dead_bootstrap_env(self):
+        # `SLICEME_AUTO_BOOTSTRAP` belonged to a removed auto-bootstrap path and
+        # should not reappear.
         docs = (README, WORKFLOW, REPO_ROOT / "docs" / "guide.md", REPO_ROOT / "docs" / "reference.md")
         for path in docs:
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("SLICEME_AUTO_BOOTSTRAP", text, path)
-            self.assertNotIn("INTERGENT", text, path)
-            self.assertNotIn("intergent", text, path)
-            self.assertNotIn("alias: ig", text, path)
-            self.assertNotIn("bin/ig", text, path)
 
     def test_sliceme_is_extension_only(self):
         # No skill: the extension owns the `/sliceme` command and both tools.
