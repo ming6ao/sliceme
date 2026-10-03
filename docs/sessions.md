@@ -120,7 +120,11 @@ yet.
   the prompt is sent or offered, re-activate the campaign tools: pi does not
   restore the active set from the transcript when a session is resumed, so the
   `sliceme` tool (registered `defaultActive: false`) would otherwise not be
-  declared and the injected prompt would name an uncallable tool.
+  declared and the injected prompt would name an uncallable tool. The prompt
+  itself reports the progress from the engine's resume plan — the open wave, the
+  wave count, each wave's members and node statuses, and the pending
+  record/continue/re-verify/respawn work — so neither the user nor the model has
+  to run `status` first.
 - `session_before_switch` (cancellable, reason `"new" | "resume"`) is an
   optional guard: write or verify the descriptor before allowing a switch.
 - `agent_settled` (final, notification-only) is an optional turn-boundary
@@ -161,7 +165,7 @@ CREATE TABLE IF NOT EXISTS campaign_sessions (
   pi_session_id TEXT,
   session_file TEXT,
   label TEXT,
-  status TEXT NOT NULL DEFAULT 'active',   -- active | suspended | completed | failed
+  status TEXT NOT NULL DEFAULT 'active',   -- active | suspended | ready | completed | failed
   reason TEXT,                             -- user | crash | budget | error
   wave INTEGER,
   created_at REAL NOT NULL,
@@ -228,7 +232,7 @@ There is no engine `suspend`; the adapter writes the descriptor.
     "cwd": "/repo"
   },
   "label": "nanochat-cpp",
-  "status": "suspended",           // suspended | completed | failed
+  "status": "suspended",           // active | suspended | ready | completed
   "reason": "user",                // user | crash | budget | error
   "suspended_at": 1733234400.0,
   "current_wave": 1,
@@ -258,6 +262,18 @@ The descriptor deliberately does **not** duplicate `state.json`'s per-node
 status; it records the node's status at suspend time plus the recorded commit,
 so resume can detect drift. There is no per-node worktree or branch: the one
 campaign worktree is shared by every node in a wave.
+
+The descriptor status is terminal once the campaign is finished.  A successful
+`deliver` writes `completed` immediately, not only from `session_shutdown`, so a
+crash after the merge cannot leave a `suspended` descriptor behind.  When every
+wave is done but delivery has not happened, `session_shutdown` writes `ready`
+rather than `suspended`, because there is no wave left to continue.  As a
+backstop, `session_start` re-derives the plan from the engine
+(`resume --plan-only`) before offering or injecting a resume; if the plane shows
+no remaining work it rewrites the descriptor to `completed` (delivered) or
+`ready` (undelivered) and stays silent.  This keeps a stale `suspended`
+descriptor — from a crash, a CLI delivery, or a hand-edited plane — from
+re-offering a finished campaign on every launch.
 
 ### 4.3 Node states and reconciliation
 

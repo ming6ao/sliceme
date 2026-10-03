@@ -262,6 +262,44 @@ class RegistryTests(SessionsCase):
         self.assertEqual(len(self.svc.store.list_campaign_sessions()), 1)
 
 
+class DeliveryCleanupTests(SessionsCase):
+    def branch_exists(self, branch):
+        return (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", branch],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+            ).returncode
+            == 0
+        )
+
+    def test_approved_delivery_removes_the_campaign_worktree_and_branch(self):
+        self.record_w1()
+        unit = self.svc.store.get_unit("campaign")
+        worktree = Path(unit["worktree"])
+        branch = unit["branch"]
+        # The campaign worktree and its branch exist before delivery.
+        self.assertTrue(worktree.exists())
+        self.assertTrue(self.branch_exists(branch))
+
+        delivered = self.svc.deliver(cleanup="worktrees")
+
+        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+        # The approved merge landed on the target...
+        self.assertEqual((self.root / "src" / "a" / "x.py").read_text(), "a = 2\n")
+        # ...and the worktree and its disposable branch are gone.
+        self.assertFalse(worktree.exists())
+        self.assertFalse(self.branch_exists(branch))
+
+    def test_default_delivery_keeps_the_campaign_worktree(self):
+        self.record_w1()
+        unit = self.svc.store.get_unit("campaign")
+        self.svc.deliver()
+        # Cleanup is opt-in: the default keeps the worktree for inspection.
+        self.assertTrue(Path(unit["worktree"]).exists())
+
+
 class AttemptTests(SessionsCase):
     def test_attempt_begin_and_end_record_metrics(self):
         started = self.svc.begin_attempt(node="w1", unit="campaign", attempt=1)

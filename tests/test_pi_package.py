@@ -258,6 +258,22 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn('"--end"', coordinator)
         self.assertIn("switchSession", coordinator)
 
+    def test_resume_prompt_reports_progress(self):
+        # Resuming explains the progress (open wave, wave count, per-node status)
+        # from the engine's resume plan, instead of telling the model to run
+        # `status` to find out.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn("async function fetchResumePlan", coordinator)
+        self.assertIn("function planHasWork", coordinator)
+        self.assertIn(
+            "function resumePrompt(branch: string, descriptor: any, plan: any)", coordinator
+        )
+        self.assertIn("Progress: wave", coordinator)
+        self.assertIn('lines.push("Waves:")', coordinator)
+        self.assertIn("Resume plan:", coordinator)
+        self.assertIn("resumePrompt(branch, descriptor, plan)", coordinator)
+        self.assertNotIn('action "status" to see the plan', coordinator)
+
     def test_typescript_extensions_type_check(self):
         # `npm run typecheck` must pass on the pi extensions. It resolves the pi
         # type declarations from the running pi runtime and exits 3 when neither

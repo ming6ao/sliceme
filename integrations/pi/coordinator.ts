@@ -437,8 +437,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		branch: string,
 		over: { status?: string; reason?: string; label?: string } = {},
+		stateOverride?: any,
 	): any {
-		const { dag, state } = load(ctx, branch);
+		const { dag, state: loaded } = load(ctx, branch);
+		const state = stateOverride ?? loaded;
 		let sessionId: string | undefined;
 		let sessionFile: string | undefined;
 		try {
@@ -479,24 +481,105 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		branch: string,
 		over: { status?: string; reason?: string; label?: string } = {},
+		stateOverride?: any,
 	): any {
-		const descriptor = buildSessionDescriptor(ctx, branch, over);
+		const descriptor = buildSessionDescriptor(ctx, branch, over, stateOverride);
 		writeJson(sessionPath(ctx.cwd, branch), descriptor);
 		return descriptor;
 	}
 
-	function resumePrompt(branch: string, descriptor: any): string {
-		const campaign = descriptor?.campaign ?? branch;
-		const recordWave = descriptor?.resume_plan?.record_wave;
+	/**
+	 * Fetch the engine's resume plan (git plus ``state.db`` win over the
+	 * descriptor).  Returns ``null`` when the engine cannot answer.
+	 */
+	async function fetchResumePlan(ctx: ExtensionContext, branch: string): Promise<any | null> {
+		try {
+			return (await sliceme(ctx, ["resume", "--plan-only"])).json;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Whether the plane still has campaign work for a resume to do.
+	 *
+	 * A ``suspended`` descriptor can outlive a finished campaign (crash, delivery
+	 * from the CLI, or a done-but-undelivered plane).  A node is work when its
+	 * resume status is not ``done``, or the plan asks for a record/verify/spawn.
+	 * A null plan (engine unavailable) fails open so a real suspension is never
+	 * hidden.
+	 */
+	function planHasWork(plan: any): boolean {
+		if (!plan) return true;
+		const statuses = Object.values(plan.nodes ?? {}) as string[];
+		if (statuses.some((status) => status !== "done")) return true;
+		const rp = plan.resume_plan ?? {};
 		return (
-			`Resume the suspended Sliceme campaign "${campaign}" on branch "${branch}". ` +
-			`Use the sliceme tool: action "status" to see the plan, then continue the ` +
-			`current wave (spawn ready nodes, record, verify). ` +
-			(recordWave !== undefined && recordWave !== null
-				? `A wave record is pending: run exec --record --wave ${recordWave} first. `
-				: "") +
-			`Do not restart completed nodes.`
+			(rp.resume?.length ?? 0) > 0 ||
+			(rp.respawn?.length ?? 0) > 0 ||
+			(rp.verify?.length ?? 0) > 0 ||
+			(rp.record_wave !== undefined && rp.record_wave !== null)
 		);
+	}
+
+	/**
+	 * The continuation prompt.  It states the progress (open wave, wave count, and
+	 * per-node status) from the engine's plan instead of telling the model to look
+	 * it up with `status`.
+	 */
+	function resumePrompt(branch: string, descriptor: any, plan: any): string {
+		const campaign = descriptor?.campaign ?? plan?.campaign ?? branch;
+		const waves: any[] = descriptor?.waves ?? [];
+		const statuses: Record<string, string> = plan?.nodes
+			? plan.nodes
+			: Object.fromEntries(
+					Object.entries(descriptor?.nodes ?? {}).map(([id, node]: [string, any]) => [
+						id,
+						String(node?.status ?? "pending"),
+					]),
+				);
+		const totalWaves = waves.length;
+		const current =
+			plan?.current_wave ??
+			descriptor?.current_wave ??
+			(waves.find((wave) => wave.status !== "done")?.index ?? totalWaves);
+		const nodeIds = Object.keys(statuses);
+		const done = Object.values(statuses).filter((status) => status === "done").length;
+
+		const lines = [
+			`Resume the suspended Sliceme campaign "${campaign}" on branch "${branch}".`,
+			"",
+			totalWaves
+				? `Progress: wave ${Math.min(Number(current) + 1, totalWaves)} of ${totalWaves}; ` +
+					`${done}/${nodeIds.length} nodes done.`
+				: `Progress: ${done}/${nodeIds.length} nodes done.`,
+		];
+		if (totalWaves) {
+			lines.push("Waves:");
+			for (const wave of waves) {
+				const members = (wave.members ?? []).map(String);
+				const detail = members
+					.map((id: string) => `${id} (${statuses[id] ?? "pending"})`)
+					.join(", ");
+				const marker = Number(wave.index) === Number(current) ? " <- next" : "";
+				lines.push(`  wave ${wave.index} [${wave.status}]${marker}: ${detail}`);
+			}
+		}
+		const rp = plan?.resume_plan ?? {};
+		const remaining: string[] = [];
+		if (rp.record_wave !== undefined && rp.record_wave !== null) {
+			remaining.push(`record wave ${rp.record_wave} first`);
+		}
+		if (rp.resume?.length) remaining.push(`continue (edits preserved): ${rp.resume.join(", ")}`);
+		if (rp.verify?.length) remaining.push(`re-verify: ${rp.verify.join(", ")}`);
+		if (rp.respawn?.length) remaining.push(`respawn: ${rp.respawn.join(", ")}`);
+		if (rp.blocked?.length) remaining.push(`blocked: ${rp.blocked.join(", ")}`);
+		if (remaining.length) lines.push(`Resume plan: ${remaining.join("; ")}.`);
+		lines.push(
+			"Use the sliceme tool to continue (spawn ready nodes, record, verify). " +
+				"Do not restart completed nodes.",
+		);
+		return lines.join("\n");
 	}
 
 	/** Run a subagent with attempt bookkeeping and a per-node heartbeat. */
@@ -1261,6 +1344,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		state: any,
 		stateFile: string,
 		signal?: AbortSignal,
+		cleanupOverride?: string,
 	): Promise<any> {
 		if (state.delivered) return null;
 		const target = String(state.target_branch ?? branch);
@@ -1280,11 +1364,35 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			writeJson(stateFile, state);
 			return null;
 		}
-		const delivered = await sliceme(ctx, ["deliver", "--target", target], signal);
+		let cleanup = cleanupOverride !== undefined ? String(cleanupOverride) : "none";
+		if (cleanupOverride === undefined && ctx.hasUI) {
+			const remove = await ctx.ui.confirm(
+				"Remove the campaign worktree after merging?",
+				`Deletes the campaign worktree, drops the already-merged branch ` +
+					`'${source || "(campaign worktree)"}', and clears scratch. The report is kept.`,
+			);
+			if (remove) cleanup = "worktrees";
+		}
+		const args = ["deliver", "--target", target];
+		if (cleanup !== "none") args.push("--cleanup", cleanup);
+		const delivered = await sliceme(ctx, args, signal);
 		const failed = (delivered.json?.results ?? []).some((r: any) => r.status === "failed");
 		state.ready_to_deliver = false;
-		if (!failed) state.delivered = true;
-		writeJson(stateFile, state);
+		if (!failed) {
+			state.delivered = true;
+			// `cleanup: all` removes state.json; do not resurrect it.
+			if (cleanup !== "all") writeJson(stateFile, state);
+			// Terminal immediately: a crash before `session_shutdown` must not leave a
+			// `suspended` descriptor that re-offers a finished campaign on startup.
+			writeSessionDescriptor(
+				ctx,
+				branch,
+				{ status: "completed", reason: "delivered" },
+				state,
+			);
+		} else {
+			writeJson(stateFile, state);
+		}
 		logEvent(ctx.cwd, branch, failed ? "campaign.deliver_failed" : "campaign.delivered", {
 			target,
 			source,
@@ -1301,7 +1409,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const branch = await featureBranch(ctx);
 		const stateFile = statePath(ctx.cwd, branch);
 		const state: any = readJson(stateFile, { nodes: {} });
-		const delivered = await offerDelivery(ctx, branch, state, stateFile, signal);
+		const delivered = await offerDelivery(ctx, branch, state, stateFile, signal, params.cleanup);
 		if (!delivered) {
 			return {
 				content: [
@@ -1410,6 +1518,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			),
 			ff: Type.Optional(
 				Type.Boolean({ description: "deliver: allow a fast-forward instead of a merge commit" }),
+			),
+			cleanup: Type.Optional(
+				StringEnum(["none", "worktrees", "all"] as const, {
+					description: "deliver: post-merge cleanup (default: ask in interactive mode)",
+				}),
 			),
 			priority: Type.Optional(Type.Number({ description: "exec: higher runs first" })),
 			timeout: Type.Optional(Type.Number({ description: "exec: timeout seconds" })),
@@ -1577,8 +1690,29 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (!branch) return;
 			const descriptor = readJson<any>(sessionPath(ctx.cwd, branch), undefined);
 			if (!descriptor || descriptor.status !== "suspended") return;
+			// Self-heal a stale descriptor: a `suspended` status can outlive the
+			// campaign (crash, CLI delivery, or a done-but-undelivered plane). Never
+			// offer to resume work the plane already shows as finished.
+			const plan = await fetchResumePlan(ctx, branch);
+			if (!planHasWork(plan)) {
+				const { state } = load(ctx, branch);
+				clearPause(ctx, branch);
+				writeJson(sessionPath(ctx.cwd, branch), {
+					...descriptor,
+					status: state.delivered ? "completed" : "ready",
+					completed_at: Date.now() / 1000,
+				});
+				if (event.reason === "startup" && ctx.hasUI && !state.delivered) {
+					ctx.ui.notify(
+						"sliceme: campaign is complete but not delivered; run the sliceme tool " +
+							"with action 'deliver'",
+						"info",
+					);
+				}
+				return;
+			}
 			clearPause(ctx, branch);
-			const text = resumePrompt(branch, descriptor);
+			const text = resumePrompt(branch, descriptor, plan);
 			// Mark it active so a reload/restart does not inject the prompt twice.
 			writeJson(sessionPath(ctx.cwd, branch), {
 				...descriptor,
@@ -1607,8 +1741,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			const branch = configuredBranch(ctx.cwd);
 			if (!branch || !fs.existsSync(dagPath(ctx.cwd, branch))) return;
 			const { state } = load(ctx, branch);
+			const waves = state.waves ?? [];
+			const allDone = waves.length > 0 && waves.every((w) => w.status === "done");
 			writeSessionDescriptor(ctx, branch, {
-				status: state.delivered ? "completed" : "suspended",
+				status: state.delivered ? "completed" : allDone ? "ready" : "suspended",
 				reason: event.reason === "reload" ? "reload" : "user",
 			});
 		} catch {

@@ -242,10 +242,13 @@ fingerprint, so the next `status`/`ready`/`spawn` reprojects the waves.
 ### Cleanup
 
 Cleanup is destructive, so the agent cannot silently choose it, and there is no
-per-wave cleanup: files are never removed between waves.  After a successful
-`deliver`, the coordinator may offer one campaign-wide cleanup that removes the
-campaign worktree, its branch, and the worker logs.  The report is kept unless
-the user explicitly asks to remove everything.
+per-wave cleanup: files are never removed between waves.  As part of the
+end-of-campaign delivery approval, the coordinator offers one campaign-wide
+cleanup.  Accepting it runs `deliver --cleanup worktrees`, which removes the
+campaign worktree, drops the already-merged campaign branch, and clears scratch;
+the report and the `dag.json`/`state.json` record are kept.  `cleanup: all`
+additionally removes the `dag.json`/`state.json` files and the worker logs (the
+report is still kept).
 
 ### GPU arbitration
 
