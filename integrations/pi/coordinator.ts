@@ -587,7 +587,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		if (heartbeat) {
 			parts.push(
 				`\nPrevious attempt: ${heartbeat.attempt ?? "?"}, turns ${heartbeat.turns ?? 0}, ` +
-					`tools ${heartbeat.toolCalls ?? 0}, last tool "${heartbeat.last_tool ?? "?"}".`,
+					`tools ${heartbeat.tool_calls ?? 0}, last tool "${heartbeat.last_tool ?? "?"}".`,
 			);
 			if (heartbeat.last_text) {
 				parts.push(`\nLast assistant text: ${String(heartbeat.last_text).slice(0, 280)}`);

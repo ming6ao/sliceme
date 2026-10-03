@@ -205,6 +205,11 @@ class PiPackageTests(unittest.TestCase):
             self.assertIn(needle, common)
         self.assertIn("heartbeat?: string", common)
 
+        # The on-disk heartbeat uses the `.sliceme/` snake_case convention that
+        # docs/observability.md documents, and the continuation reader matches.
+        self.assertIn("tool_calls: snapshot.toolCalls", common)
+        self.assertIn("heartbeat.tool_calls", coordinator)
+
         # Commands and lifecycle hooks.
         self.assertIn('pi.registerCommand("suspend"', coordinator)
         self.assertIn('pi.registerCommand("campaigns"', coordinator)

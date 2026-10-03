@@ -320,8 +320,28 @@ export async function runSubagent(options: {
 				tools: { ...progress.tools },
 				updatedAt: now,
 			};
+			// On disk the heartbeat uses the `.sliceme/` snake_case convention so the
+			// engine projection and the continuation prompt can read it.
+			const record = {
+				node: snapshot.node,
+				unit: snapshot.unit,
+				attempt: snapshot.attempt ?? 1,
+				agent: snapshot.agent,
+				pid: process.pid,
+				started_at: snapshot.startedAt,
+				updated_at: snapshot.updatedAt,
+				turns: snapshot.turns,
+				tool_calls: snapshot.toolCalls,
+				tools: snapshot.tools,
+				last_tool: snapshot.lastTool ?? null,
+				last_tool_args: snapshot.lastToolArgs ?? null,
+				last_text: snapshot.lastText ?? null,
+				tokens_in: snapshot.tokensIn,
+				tokens_out: snapshot.tokensOut,
+				cost: snapshot.cost,
+			};
 			try {
-				writeJson(options.heartbeat, snapshot);
+				writeJson(options.heartbeat, record);
 			} catch {
 				/* the heartbeat is best-effort; never fail the run for it */
 			}
