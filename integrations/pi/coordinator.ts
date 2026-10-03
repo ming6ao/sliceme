@@ -33,8 +33,10 @@
  * verifiers judge the executor's recorded evidence.
  *
  * The tools register inactive; `/sliceme [DESIGN.md]` activates them and nudges
- * the model to start a campaign (defaulting to ``DESIGN.md``).  There is no
- * separate skill.
+ * the model to start a campaign (defaulting to ``DESIGN.md``), and the
+ * `session_start` hook re-activates them when a suspended campaign is resumed
+ * (pi does not restore the active set from the transcript on resume).  There is
+ * no separate skill.
  *
  * Install as part of the `sliceme` pi package (`pi install ./` or
  * `pi install npm:sliceme`); shared helpers live in `./common.ts`.
@@ -293,9 +295,24 @@ function summarise(dag: Dag, state: CampaignState): string {
 }
 
 export default function coordinatorExtension(pi: ExtensionAPI) {
+	/**
+	 * Make the campaign tools callable for this session. The tools register
+	 * inactive (`defaultActive: false`), and pi does not restore the active set
+	 * from a transcript when a session is resumed, so both the `/sliceme` command
+	 * and the `session_start` resume hook must re-activate them. Idempotent: it
+	 * merges into whatever is already active.
+	 */
+	function activateCampaignTools(): void {
+		const active = new Set(pi.getActiveTools());
+		active.add("sliceme");
+		active.add("sliceme-unit");
+		pi.setActiveTools([...active]);
+	}
+
 	// Extension-only entry point. The tools register inactive; `/sliceme
-	// [DESIGN.md]` activates them and asks the model to start a campaign. No
-	// design document is required up front: `start` fails loudly if the path is
+	// [DESIGN.md]` activates them and asks the model to start a campaign, and the
+	// `session_start` hook re-activates them when a suspended campaign is resumed.
+	// No design document is required up front: `start` fails loudly if the path is
 	// wrong.
 	pi.registerCommand("sliceme", {
 		description: "Start a Sliceme campaign from a design document (default DESIGN.md)",
@@ -305,10 +322,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("sliceme: the agent is busy; finish the current turn first.", "warning");
 				return;
 			}
-			const active = new Set(pi.getActiveTools());
-			active.add("sliceme");
-			active.add("sliceme-unit");
-			pi.setActiveTools([...active]);
+			activateCampaignTools();
 			ctx.ui.notify(`sliceme: starting a campaign from ${design}`, "info");
 			pi.sendUserMessage(
 				`Start a Sliceme campaign for the design document "${design}". ` +
@@ -1572,12 +1586,16 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				resumed_at: Date.now() / 1000,
 			});
 			if (event.reason === "resume") {
+				activateCampaignTools();
 				pi.sendUserMessage(text);
 				return;
 			}
 			if (!ctx.hasUI || !ctx.isIdle()) return;
 			const ok = await ctx.ui.confirm("Resume Sliceme campaign?", text);
-			if (ok) pi.sendUserMessage(text);
+			if (ok) {
+				activateCampaignTools();
+				pi.sendUserMessage(text);
+			}
 		} catch {
 			/* a resume hook must never break session startup */
 		}

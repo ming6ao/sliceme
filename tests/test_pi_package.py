@@ -226,6 +226,19 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("isPaused", coordinator)
         self.assertIn('event.reason === "resume"', coordinator)
 
+        # Resume must re-activate the campaign tools. Pi does not restore the
+        # active set from the transcript on resume, so the injected prompt would
+        # otherwise tell the model to call a tool that is not declared. Both the
+        # `/sliceme` command and the `session_start` hook share one helper.
+        self.assertIn("function activateCampaignTools", coordinator)
+        start = coordinator.index('pi.on("session_start"')
+        end = coordinator.index('pi.on("session_shutdown"', start)
+        start_handler = coordinator[start:end]
+        self.assertIn("activateCampaignTools()", start_handler)
+        command_start = coordinator.index('pi.registerCommand("sliceme"')
+        command_end = coordinator.index('pi.registerCommand("suspend"', command_start)
+        self.assertIn("activateCampaignTools()", coordinator[command_start:command_end])
+
         # A signal-killed worker is reported as interrupted and mapped to a
         # paused node so resume continues its edits instead of respawning.
         self.assertIn("interrupted?: boolean", common)

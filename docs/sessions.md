@@ -116,7 +116,11 @@ yet.
   detects that the working directory is a suspended Sliceme plane with an open
   campaign for the current branch. Auto-inject the resume prompt only for
   `"resume"`; for `"startup"` offer it, never inject it, because a plain `pi`
-  launch in a campaign checkout should not silently take over the turn.
+  launch in a campaign checkout should not silently take over the turn. Before
+  the prompt is sent or offered, re-activate the campaign tools: pi does not
+  restore the active set from the transcript when a session is resumed, so the
+  `sliceme` tool (registered `defaultActive: false`) would otherwise not be
+  declared and the injected prompt would name an uncallable tool.
 - `session_before_switch` (cancellable, reason `"new" | "resume"`) is an
   optional guard: write or verify the descriptor before allowing a switch.
 - `agent_settled` (final, notification-only) is an optional turn-boundary

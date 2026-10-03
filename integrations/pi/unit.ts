@@ -17,9 +17,11 @@
  * `spawn`, or a human running `sliceme start`).  The tool resolves the unit from
  * `ctx.cwd`, so a worker launched inside its unit worktree needs no `--unit`.
  *
- * The tool registers inactive; `/sliceme` activates it for the session.  Workers
- * are scoped to it by their `tools:` allowlist (`pi --tools sliceme-unit`); the
- * coordinator session normally uses the `sliceme` tool instead.
+ * The tool registers inactive; `/sliceme` activates it for the session, and the
+ * coordinator's `session_start` hook re-activates it when a suspended campaign
+ * is resumed.  Workers are scoped to it by their `tools:` allowlist
+ * (`pi --tools sliceme-unit`); the coordinator session normally uses the
+ * `sliceme` tool instead.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
