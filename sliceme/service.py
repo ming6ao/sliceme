@@ -16,6 +16,7 @@ from typing import Any
 from . import campaign, gitutil, integrate, sandbox
 from .ownership import (
     DEFAULT_WAVE_SIZE,
+    merge_same_own_nodes,
     node_owns,
     path_within_owns,
     plan_dag_waves,
@@ -582,6 +583,11 @@ class Service:
 
     def status(self) -> dict[str, Any]:
         branch = self.config.get("target_branch") or self.config.get("main_branch")
+        # Normalization is required, so it runs before every projection.
+        try:
+            dag_merge = self.normalize_dag()
+        except SlicemeError as exc:
+            dag_merge = {"merged": {}, "error": str(exc)}
         units = [self._project_unit(u, branch) for u in self.list_units()]
         candidates = self.store.list_candidates()
         waves = integrate.plan_waves(
@@ -603,6 +609,7 @@ class Service:
             "waves": [w.to_dict() for w in waves],
             "dag_waves": dag_waves,
             "dag_waves_error": dag_waves_error,
+            "dag_merge": dag_merge,
             "executor": self.store.job_counts(),
             "sandbox": self.sandbox_info(),
         }
@@ -1020,6 +1027,49 @@ class Service:
                 fh.write(json.dumps({"kind": f"review.{kind}", "data": data}) + "\n")
         except OSError:
             pass
+
+    def normalize_dag(self) -> dict[str, Any]:
+        """Contract same-ownership DAG chains before the wave projection.
+
+        This runs before every projection, so a campaign never schedules an
+        un-normalized DAG.  A node with recorded progress stays separate.
+        """
+        branch = self.config.get("target_branch") or self.config.get("main_branch")
+        dag = campaign.load_dag(self.root, branch) if branch else None
+        if not dag or not dag.get("nodes"):
+            return {"merged": {}}
+
+        # Keep any node that already has progress out of the merge.
+        nodes = [dict(node) for node in dag["nodes"]]
+        statuses = campaign.load_state(self.root, branch).get("nodes") or {}
+        recorded = {str(c["node"]) for c in self.store.list_candidates() if c.get("node")}
+        for node in nodes:
+            nid = str(node.get("id"))
+            entry = statuses.get(nid)
+            progressed = isinstance(entry, dict) and entry.get("status") not in (
+                None,
+                "pending",
+            )
+            if nid in recorded or progressed:
+                node["no_merge"] = True
+
+        wave_size = int(dag.get("concurrency") or DEFAULT_WAVE_SIZE)
+        before_waves = plan_dag_waves(list(dag["nodes"]), wave_size=wave_size)
+        merged_nodes, merge_map = merge_same_own_nodes(nodes)
+        after_waves = plan_dag_waves(merged_nodes, wave_size=wave_size)
+        if merge_map:
+            write_json(
+                campaign.dag_path(self.root, branch), {**dag, "nodes": merged_nodes}
+            )
+        return {
+            "path": str(campaign.dag_path(self.root, branch)),
+            "merged": merge_map,
+            "before_nodes": len(nodes),
+            "after_nodes": len(merged_nodes),
+            "before_waves": len(before_waves),
+            "after_waves": len(after_waves),
+            "waves": [wave.to_dict() for wave in after_waves],
+        }
 
     def _dag_waves(self, branch: str | None) -> tuple[list[dict[str, Any]], str | None]:
         """Compute the scheduler's wave projection of the campaign DAG.

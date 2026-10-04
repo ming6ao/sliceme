@@ -34,6 +34,11 @@ COORDINATOR (this session)
   (default 3). `ready(n) := every d in n.depends_on is done` **and** `n` is in
   the current wave. `done` means verified **and recorded** onto the campaign
   worktree.
+- The planner **merges same-ownership chains**. Sliceme normalizes the DAG
+  automatically before every wave projection: when two nodes own the same
+  directory set and one depends on the other, it contracts them into one node.
+  One subagent then completes the whole directory change and the engine records
+  one commit. A node sets `no_merge` to stay separate.
 - A node owns **directories, not files**. For each path it will add, modify, or
   delete, it declares the deepest directory that contains it (`dir:src/api`).
   Sliceme serializes two nodes with overlapping owned directories (equal,

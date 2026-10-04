@@ -32,6 +32,11 @@ plan.
   explicit **aggregation node** that every touched part `depends_on`; that
   node owns the shared directory. Do not let ownership conflicts be the common
   path.
+- **Merge same-ownership chains.** When two nodes own exactly the same
+  directory set and one depends on the other, make them one node. One node
+  owns one directory and completes the whole cohesive change. Do not split one
+  directory across a chain of small nodes. Set `"no_merge": true` on a node
+  that must stay separate for its own gate.
 - Every node owns narrow directories and lists concrete `acceptance` commands.
 - `gpu` is `none`, `T1`, or `T2`; only the executor runs checks, and the
   executor composes the GPU broker, so acceptance commands stay plain.

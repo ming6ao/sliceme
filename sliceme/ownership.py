@@ -271,9 +271,125 @@ def plan_dag_waves(
     return waves
 
 
+# ---------------------------------------------------------------------------
+# DAG normalization: contract same-ownership chains
+# ---------------------------------------------------------------------------
+#: GPU tiers, weakest to strongest. A merged node needs the strongest tier.
+_GPU_RANK = {"none": 0, "T1": 1, "T2": 2}
+
+
+def _merged_node(by_id: dict[str, dict[str, Any]], members: list[str]) -> dict[str, Any]:
+    """Assemble one survivor node from an ordered, non-empty group of ids."""
+    survivor = members[0]
+    if len(members) == 1:
+        return dict(by_id[survivor])
+    sources = [by_id[member] for member in members]
+    return {
+        **by_id[survivor],
+        "id": survivor,
+        "label": " + ".join(
+            str(source.get("label") or _node_id(source)) for source in sources
+        ),
+        "goal": "\n\n".join(
+            f"[{_node_id(source)}] {str(source.get('goal') or '').strip()}".strip()
+            for source in sources
+        ),
+        "owns": [
+            f"dir:{directory}"
+            for directory in sorted({d for source in sources for d in node_owns(source)})
+        ],
+        "depends_on": list(
+            dict.fromkeys(
+                str(dep)
+                for source in sources
+                for dep in (source.get("depends_on") or [])
+                if str(dep) not in members
+            )
+        ),
+        "acceptance": list(
+            dict.fromkeys(
+                str(command)
+                for source in sources
+                for command in (source.get("acceptance") or [])
+            )
+        ),
+        "gpu": max(
+            (str(source.get("gpu") or "none") for source in sources),
+            key=lambda tier: _GPU_RANK.get(tier, 0),
+        ),
+        "merged_from": members[1:],
+    }
+
+
+def merge_same_own_nodes(
+    nodes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Contract same-ownership nodes that share a dependency edge.
+
+    Two nodes merge when a ``depends_on`` edge connects them, their owned
+    directories are equal, their phases match, and neither sets ``no_merge``.
+    The lowest topological index survives.  Returns the merged nodes and a map
+    from every absorbed id to its survivor.  The result is idempotent.
+    """
+    ordered = _topological_order(nodes)  # validates ids, deps, and cycles
+    by_id = {_node_id(node): node for node in ordered}
+    order = {_node_id(node): index for index, node in enumerate(ordered)}
+    for node in ordered:
+        node_owns(node)  # validate directory-only owns, even for lone nodes
+
+    parent = {nid: nid for nid in by_id}
+
+    def root(nid: str) -> str:
+        while parent[nid] != nid:
+            nid = parent[nid]
+        return nid
+
+    def mergeable(a: str, b: str) -> bool:
+        node_a, node_b = by_id[a], by_id[b]
+        if node_a.get("no_merge") or node_b.get("no_merge"):
+            return False
+        if str(node_a.get("phase") or "") != str(node_b.get("phase") or ""):
+            return False
+        owns_a, owns_b = node_owns(node_a), node_owns(node_b)
+        return bool(owns_a) and sorted(owns_a) == sorted(owns_b)
+
+    # Union every compatible edge. The lowest topological index wins.
+    for node in ordered:
+        nid = _node_id(node)
+        for dep in map(str, node.get("depends_on") or []):
+            if dep in by_id and mergeable(nid, dep):
+                left, right = root(nid), root(dep)
+                if left != right:
+                    if order[left] > order[right]:
+                        left, right = right, left
+                    parent[right] = left
+
+    groups: dict[str, list[str]] = {}
+    for nid in by_id:
+        groups.setdefault(root(nid), []).append(nid)
+
+    merge_map: dict[str, str] = {}
+    survivors: dict[str, dict[str, Any]] = {}
+    for members in groups.values():
+        members.sort(key=order.__getitem__)
+        merge_map.update(dict.fromkeys(members[1:], members[0]))
+        survivors[members[0]] = _merged_node(by_id, members)
+
+    # Rewrite every dependency that points at an absorbed node.
+    for node in survivors.values():
+        deps = dict.fromkeys(
+            merge_map.get(str(dep), str(dep)) for dep in node.get("depends_on") or []
+        )
+        node["depends_on"] = [dep for dep in deps if dep != node["id"]]
+
+    merged = [survivors[root] for root in sorted(survivors, key=order.__getitem__)]
+    return merged, merge_map
+
+
 __all__ = [
     "DEFAULT_WAVE_SIZE",
     "DagWave",
+    "merge_same_own_nodes",
     "node_owns",
     "normalize_dir",
     "owns_conflict",

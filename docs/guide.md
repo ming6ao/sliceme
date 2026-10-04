@@ -113,6 +113,9 @@ rule keeps a wave auditable without runtime locking.
 - Own the **deepest** directory that contains the work. A parent directory
   serializes its whole subtree.
 - Keep same-wave `owns` disjoint.
+- Merge nodes that own the same directory and sit on one dependency chain into
+  one node. One node owns one directory and completes the whole cohesive
+  change. Set `no_merge` when a node must stay separate for its own gate.
 - Route shared build files (`BUILD`, `Cargo.toml`, lockfiles) to an explicit
   **aggregation node**. Every touched part depends on that node, and the node
   owns the shared directory. Use `dir:.` for root files.

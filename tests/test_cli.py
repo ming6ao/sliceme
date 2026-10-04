@@ -251,6 +251,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(Path(report["path"]).name, "feat--x.report.md")
             self.assertIn("landed", report["content"])
 
+    def test_cli_status_normalizes_same_ownership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "a.txt").write_text("hi\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
+            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+            nodes = [
+                {"id": "a", "owns": ["dir:src/x"], "depends_on": []},
+                {"id": "b", "owns": ["dir:src/x"], "depends_on": ["a"]},
+            ]
+            write_json(
+                campaign.dag_path(root, "feat/x"),
+                {"campaign": "cli", "feature_branch": "feat/x", "base": "main", "nodes": nodes},
+            )
+
+            out = run_cli(["--json", "status"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            status = json.loads(out.stdout)
+            self.assertEqual(status["dag_merge"]["merged"], {"b": "a"})
+            self.assertEqual([w["members"] for w in status["dag_waves"]], [["a"]])
+            on_disk = campaign.load_dag(root, "feat/x")
+            self.assertEqual([n["id"] for n in on_disk["nodes"]], ["a"])
+
     def test_cli_resume_sessions_and_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

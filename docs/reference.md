@@ -74,6 +74,20 @@ effects.
 The default projection returns `dag_waves` (the scheduler's wave plan) plus
 per-unit campaign columns (`node`, `log`, `candidate`, `verification`).
 
+Every projection first **normalizes** `dag.json`. Sliceme contracts
+same-ownership nodes, then computes the waves. A campaign can never schedule an
+un-normalized DAG. Two nodes merge when they share an owned directory and one
+depends on the other. The survivor is the node with the lowest topological
+index.
+
+The merged node owns the union of the directories, waits on the union of the
+external dependencies, and concatenates the goals and the acceptance commands.
+Sliceme rewrites an absorbed id in any `depends_on` to the survivor. It records
+the absorbed ids in `merged_from`. Sliceme protects a node that has a recorded
+candidate or a status other than `pending`. Sliceme reports the result as
+`dag_merge` (`merged`, `before_nodes`, `after_nodes`, `before_waves`,
+`after_waves`).
+
 ### `deliver`
 
 ```bash
@@ -228,7 +242,7 @@ rejected.
 | `sliceme/service.py` | **single owner of state**: units, candidates, wave conformance, campaign worktree + recorder, review, and delivery |
 | `sliceme/store.py` | SQLite persistence (WAL) |
 | `sliceme/gitutil.py` | Git plumbing (`worktree`, `merge`, `merge-tree`, `commit`, `branch`, `changed_files`) |
-| `sliceme/ownership.py` | Directory ownership (normalization, `owns`, subtree conflicts) and the DAG wave projection |
+| `sliceme/ownership.py` | Directory ownership (normalization, `owns`, subtree conflicts), the DAG wave projection, and the same-ownership merge |
 | `sliceme/verifier.py` | Fingerprints (plane and node sources) and the sandboxed trusted-check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
 | `sliceme/executor.py` | The single sandboxed executor queue (submit/run/wait/cancel, dedupe, leases) |

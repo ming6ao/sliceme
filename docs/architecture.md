@@ -196,7 +196,7 @@ sequenceDiagram
   C->>E: wave --open (campaign worktree)
   C->>P: start (planner subagent)
   P->>P: writes the campaign dag.json (Write tool)
-  C->>E: status (projects dag_waves)
+  C->>E: status (normalizes the DAG, then projects dag_waves)
   loop each ready node in the current wave
     C->>W: spawn node (pure editor, campaign worktree)
     W->>G: edit owned dirs only
@@ -220,11 +220,14 @@ therefore kills them. On resume, a node left `running` resets and re-spawns.
 ## 7. From DAG to waves
 
 `dag.json` is canonical and is never committed. A wave is the largest set of
-nodes that may run concurrently without conflicting on owned directories.
+nodes that may run concurrently without conflicting on owned directories. The
+planner authors coarse nodes; the engine then contracts any remaining
+same-ownership chain into one node.
 
 ```mermaid
 flowchart TD
-  D["dag.json nodes"] --> VAL["validate_dag<br/>unique ids · known deps · acyclic · directory-only owns"]
+  D["dag.json nodes"] --> MERGE["merge_same_own_nodes<br/>contract same-owns chains<br/>keep recorded progress separate"]
+  MERGE --> VAL["validate_dag<br/>unique ids · known deps · acyclic · directory-only owns"]
   VAL --> TOPO["Kahn topological order<br/>stable by declaration order"]
   TOPO --> PICK{"earliest wave with:<br/>1. index at least max(wave(dep)+1)<br/>2. size under concurrency<br/>3. no subtree conflict"}
   PICK -- "placed" --> WAVE["append node to wave"]

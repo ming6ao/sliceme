@@ -1340,7 +1340,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			`node in a later wave, so keep same-wave owns disjoint; ` +
 			`"phase" is a display label only; ` +
 			`route shared build files (BUILD, Cargo.toml, lockfiles) to an explicit aggregation ` +
-			`node every touched component depends_on; each node lists its acceptance commands; ` +
+			`node every touched component depends_on; merge nodes that own the same directory and ` +
+			`sit on one dependency chain into a single node, because one node completes one ` +
+			`cohesive directory change; do not split one directory across a chain of small nodes; ` +
+			`each node lists its acceptance commands; ` +
 			`gpu is "none","T1","T2" and only the verifier may use it. ` +
 			`Project sandbox: look for sliceme.sandbox.json, .sliceme-sandbox.json, or ` +
 			`tools/sliceme-sandbox.json. If one exists, add "sandbox":{"path":"<relative ` +
@@ -1366,6 +1369,26 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				],
 				isError: true,
 			};
+		}
+		// The engine normalizes dag.json before every wave projection. Project
+		// once, then read the contracted DAG before seeding state.
+		let projection: any = null;
+		try {
+			projection = (await sliceme(ctx, ["status"], signal)).json;
+		} catch (error) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `sliceme: DAG projection failed: ${String((error as Error)?.message ?? error)}`,
+					},
+				],
+				isError: true,
+			};
+		}
+		const normalized = projection?.dag_merge;
+		if (normalized?.merged && Object.keys(normalized.merged).length) {
+			logEvent(ctx.cwd, branch, "dag.merged", normalized);
 		}
 		const dag = readJson<Dag>(dagFile, { nodes: [] });
 		if (!dag?.nodes?.length) {
@@ -1802,7 +1825,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"The target (feature) branch is chosen once at start and is never main, master, or " +
 				"the repository default branch. There is no override; refuse and re-choose instead.",
 			"The DAG in dag.json is the only authored schedule; waves are its deterministic " +
-				"projection (owns + depends_on, capped by concurrency).",
+				"projection (owns + depends_on, capped by concurrency). Merge nodes that share an " +
+				"owned directory and sit on one dependency chain into a single node.",
 			"Workers are pure editors in the one shared campaign worktree: they never run git.",
 			"Spawn nodes only from the current wave; a later wave starts after the previous wave " +
 				"is fully recorded and verified. Never recreate the worktree or rebase between waves.",
