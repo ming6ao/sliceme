@@ -179,7 +179,7 @@ interface Dag {
 }
 
 interface NodeState {
-	status: "pending" | "running" | "recorded" | "done" | "failed" | "stopped";
+	status: "pending" | "running" | "paused" | "recorded" | "done" | "failed" | "stopped";
 	attempts?: number;
 	verdict?: string;
 	lastError?: string;
@@ -278,21 +278,15 @@ function reconcileWaves(state: CampaignState, dagWaves: any[]): void {
 	state.waves = (dagWaves ?? []).map((dw: any) => {
 		const members: string[] = (dw.members ?? []).map((m: any) => String(m));
 		const prev = prior.get([...members].sort().join("|"));
-		const integrated = members.filter((id) => state.nodes[id]?.status === "done");
-		const running = members.some((id) => state.nodes[id]?.status === "running");
-		const status: WaveState["status"] =
-			members.length > 0 && integrated.length === members.length
-				? "done"
-				: running
-					? "running"
-					: "pending";
-		return {
+		const wave: WaveState = {
 			index: Number(dw.wave),
 			members,
-			status,
-			integrated,
+			status: "pending",
+			integrated: members.filter((id) => state.nodes[id]?.status === "done"),
 			cleanup_done: prev?.cleanup_done ?? false,
 		};
+		wave.status = deriveWaveStatus(state, wave);
+		return wave;
 	});
 	const byNode = new Map<string, number>();
 	for (const wave of state.waves) {
@@ -304,17 +298,38 @@ function reconcileWaves(state: CampaignState, dagWaves: any[]): void {
 	state.current_wave = firstNonDoneWave(state);
 }
 
-/** Mark any wave whose members are all done as done. */
-function advanceWaves(state: CampaignState): WaveState[] {
+/**
+ * A wave's status from its members' node statuses. `recorded` and `paused`
+ * count as active, because those waves are still in progress.
+ */
+function deriveWaveStatus(state: CampaignState, wave: WaveState): WaveState["status"] {
+	const members = wave.members ?? [];
+	if (!members.length) return "pending";
+	let integrated = 0;
+	let active = false;
+	for (const id of members) {
+		const status = state.nodes[id]?.status;
+		if (status === "done") integrated += 1;
+		else if (status === "running" || status === "recorded" || status === "paused") {
+			active = true;
+		}
+	}
+	if (integrated === members.length) return "done";
+	return active ? "running" : "pending";
+}
+
+/**
+ * Recompute every wave from the live node statuses. Returns the waves that
+ * changed from not-done to done in this pass. Call this after any node status
+ * change, so `state.json` never reports a running wave as pending.
+ */
+function refreshWaves(state: CampaignState): WaveState[] {
 	const completed: WaveState[] = [];
 	for (const wave of state.waves ?? []) {
 		wave.integrated = wave.members.filter((id) => state.nodes[id]?.status === "done");
-		const allDone =
-			wave.members.length > 0 && wave.integrated.length === wave.members.length;
-		if (allDone && wave.status !== "done") {
-			wave.status = "done";
-			completed.push(wave);
-		}
+		const status = deriveWaveStatus(state, wave);
+		if (status === "done" && wave.status !== "done") completed.push(wave);
+		wave.status = status;
 	}
 	state.current_wave = firstNonDoneWave(state);
 	return completed;
@@ -494,6 +509,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 
 	/** Cache the campaign projection for the next render. */
 	function liveCampaignFrom(dag: Dag, state: CampaignState): void {
+		// Refresh derived wave statuses so a just-started worker never shows as pending.
+		refreshWaves(state);
 		liveCampaign = {
 			campaign: dag.campaign ?? state.campaign,
 			currentWave: state.current_wave,
@@ -1241,6 +1258,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				state.target_branch = branch;
 				state.worktree_branch = worktreeBranch;
 				state.base = existing.base ?? params.base ?? branch;
+				refreshWaves(state);
 				store.save();
 				await ensureWaves(ctx, branch, existing, state);
 				const pendingWave = resumePlan?.resume_plan?.record_wave;
@@ -1421,6 +1439,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			worktree,
 			branch: String(unit.branch ?? state.worktree_branch ?? ""),
 		};
+		refreshWaves(state);
 		store.save();
 		logEvent(ctx.cwd, branch, "node.spawn", { node, unit: unit.name, attempt });
 		widget(ctx, dag, state);
@@ -1454,6 +1473,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			// the node paused so resume continues it instead of respawning from scratch.
 			// Its attempt is not consumed: the next spawn reuses the same attempt number.
 			state.nodes[node].status = "paused";
+			refreshWaves(state);
 			store.save();
 			logEvent(ctx.cwd, branch, "node.suspended", {
 				node,
@@ -1465,6 +1485,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		}
 		state.nodes[node].status = result.exitCode === 0 ? "pending" : "failed";
 		state.nodes[node].attempts = attempt;
+		refreshWaves(state);
 		store.save();
 		widget(ctx, dag, state);
 		return {
@@ -1514,6 +1535,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				worktree: recorded.json?.worktree,
 			};
 		}
+		refreshWaves(state);
 		store.save();
 		widget(ctx, dag, state);
 		logEvent(ctx.cwd, branch, "wave.recorded", {
@@ -1612,7 +1634,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			job: job?.id ?? null,
 			...(passed ? {} : { lastError: result.output || job?.output }),
 		};
-		const completed = advanceWaves(state);
+		const completed = refreshWaves(state);
 		store.save();
 		widget(ctx, dag, state);
 		logEvent(ctx.cwd, branch, "node.verdict", {

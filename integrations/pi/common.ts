@@ -672,6 +672,13 @@ export interface RenderProgressOptions {
 	color?: (name: string, text: string) => string;
 	/** Maximum agent rows to show (default 8). */
 	maxAgents?: number;
+	/**
+	 * Maximum total widget lines. Pi truncates a widget to the first ten lines
+	 * (`MAX_WIDGET_LINES`), so the default ten keeps the whole view visible.
+	 */
+	maxLines?: number;
+	/** Maximum wave rows in the window around the current wave (default 4). */
+	maxWaves?: number;
 	/** A running row is stale after this many seconds (default 5). */
 	stalledAfterSeconds?: number;
 	/** Override the clock for `renderAgentLine`. */
@@ -803,8 +810,46 @@ export function renderAgentLine(
 }
 
 /**
+ * A wave's display status. Derive it from the live node statuses, because the
+ * cached `wave.status` in `state.json` is only refreshed on a replan and lags
+ * a worker that just started.
+ */
+function waveStatus(wave: ProgressWave, nodes: ProgressNode[]): string {
+	const byId = new Map(nodes.map((node) => [node.id, node.status]));
+	const statuses = wave.members.map((id) => byId.get(id) ?? "pending");
+	if (!statuses.length) return wave.status || "pending";
+	if (statuses.every((status) => status === "done")) return "done";
+	if (statuses.some((status) => status === "failed")) return "failed";
+	const active = statuses.some(
+		(status) =>
+			status === "running" ||
+			status === "recorded" ||
+			status === "paused" ||
+			status === "interrupted",
+	);
+	return active ? "running" : "pending";
+}
+
+/** The window of waves around the current one, so the busy wave stays visible. */
+function waveWindow(
+	waves: ProgressWave[],
+	current: number,
+	maxWaves: number,
+): ProgressWave[] {
+	if (maxWaves <= 0) return [];
+	if (waves.length <= maxWaves) return waves;
+	const position = waves.findIndex((wave) => wave.index === current);
+	const currentPosition = position >= 0 ? position : 0;
+	const start = Math.max(0, Math.min(currentPosition, waves.length - maxWaves));
+	return waves.slice(start, start + maxWaves);
+}
+
+/**
  * Render the whole live view: a header, one aggregate line, one row per
- * subagent, then the wave projection. Pure and allocation-light.
+ * subagent, then a window of the wave projection. Pure and allocation-light.
+ *
+ * The result never exceeds `maxLines` (default 10, pi's widget limit), so the
+ * view is never truncated and the current wave is always one of the rows.
  */
 export function renderProgress(
 	snapshot: ProgressSnapshot,
@@ -818,16 +863,31 @@ export function renderProgress(
 		return [color("dim", "sliceme: no plan")];
 	}
 	const now = snapshot.now;
+	const maxLines = Math.max(3, options.maxLines ?? 10);
 	const running = agents.filter((agent) => agent.status === "running");
 	const finished = agents
 		.filter((agent) => agent.status !== "running")
 		.sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
-	const shown = [...running, ...finished].slice(0, options.maxAgents ?? 8);
+	const candidates = [...running, ...finished];
 
 	const total = nodes.length || agents.length;
 	const counted: Array<{ status: string }> = nodes.length ? nodes : agents;
 	const done = counted.filter((item) => item.status === "done").length;
 	const failed = counted.filter((item) => item.status === "failed").length;
+
+	// Reserve wave rows first: late in a long campaign the current wave is the
+	// most useful line, and pi would otherwise cut it off after the first ten.
+	const statuses = waves.map((wave) => waveStatus(wave, nodes));
+	const activeIndex = statuses.findIndex((status) => status !== "done");
+	const current =
+		snapshot.currentWave ?? (activeIndex >= 0 ? waves[activeIndex].index : waves.length);
+	const waveCap = Math.max(0, Math.min(options.maxWaves ?? 4, maxLines - 2));
+	const waveRows = waveWindow(waves, current, waveCap);
+	const agentSlots = Math.max(
+		0,
+		Math.min(options.maxAgents ?? 8, maxLines - 2 - waveRows.length),
+	);
+	const shown = candidates.slice(0, agentSlots);
 
 	const lines: string[] = [];
 	const header = `sliceme${snapshot.campaign ? ` · ${snapshot.campaign}` : ""}`;
@@ -840,8 +900,6 @@ export function renderProgress(
 	const elapsed = Number.isFinite(start) ? now - start : 0;
 	const summary: string[] = [];
 	if (waves.length) {
-		const current =
-			snapshot.currentWave ?? waves.find((wave) => wave.status !== "done")?.index ?? waves.length;
 		summary.push(`wave ${Math.min(current + 1, waves.length)}/${waves.length}`);
 	}
 	summary.push(`${done}/${total} done`);
@@ -851,21 +909,26 @@ export function renderProgress(
 	lines.push(color("muted", fit(summary.join(" · "), options)));
 
 	const rowWidth = options.width && options.width > 2 ? options.width - 2 : options.width;
-	for (const agent of shown) {
-		lines.push(`  ${renderAgentLine(agent, { ...options, width: rowWidth, now })}`);
+	const rows = shown.map(
+		(agent) => `  ${renderAgentLine(agent, { ...options, width: rowWidth, now })}`,
+	);
+	const hiddenAgents = candidates.length - shown.length;
+	// Replace a finished row with the marker; never hide a running worker, which
+	// always sorts first.
+	if (hiddenAgents > 0 && rows.length > running.length) {
+		rows[rows.length - 1] = color("dim", fit(`  … ${hiddenAgents + 1} more`, options));
 	}
-	if (agents.length > shown.length) {
-		lines.push(color("dim", fit(`  … ${agents.length - shown.length} more`, options)));
-	}
+	lines.push(...rows);
 
-	for (const wave of waves) {
+	const byId = new Map(nodes.map((node) => [node.id, node.status]));
+	for (const wave of waveRows) {
 		const members = wave.members
-			.map((id) => {
-				const node = nodes.find((candidate) => candidate.id === id);
-				return `${statusMarker(node?.status ?? "pending")} ${id}`;
-			})
+			.map((id) => `${statusMarker(byId.get(id) ?? "pending")} ${id}`)
 			.join("  ");
-		lines.push(color("dim", fit(`─ wave ${wave.index} [${wave.status}]  ${members}`, options)));
+		// Display waves one-based, the same as the aggregate line.
+		lines.push(
+			color("dim", fit(`─ wave ${wave.index + 1} [${waveStatus(wave, nodes)}]  ${members}`, options)),
+		);
 	}
 	return lines;
 }

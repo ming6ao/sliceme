@@ -82,7 +82,21 @@ assert.ok(row.includes("7 turns"), row);
 assert.ok(row.includes("23 tools"), row);
 assert.ok(row.includes("bash cargo test"), row);
 assert.ok(!row.includes("stalled"), row);
-assert.ok(lines.some((line) => line.includes("─ wave 1 [running]")), lines.join("\n"));
+assert.ok(lines.some((line) => line.includes("─ wave 2 [running]")), lines.join("\n"));
+
+// The wave status comes from the live node statuses, not the cached field that
+// only refreshes on a replan: a wave left "pending" while its worker runs must
+// display as running.
+const staleWave = renderProgress({
+	waves: [{ index: 0, status: "pending", members: ["a1"] }],
+	nodes: [{ id: "a1", status: "running" }],
+	agents: [agent({ node: "a1" })],
+	now: 1120,
+});
+assert.ok(
+	staleWave.some((line) => line.includes("─ wave 1 [running]")),
+	staleWave.join("\n"),
+);
 
 // A silent running agent is labeled stalled, not silently shown as busy.
 const stalled = renderProgress({
@@ -97,6 +111,30 @@ assert.equal(
 	renderAgentLine(agent({ status: "done", startedAt: 1000, finishedAt: 1060, now: 9999 })),
 	"✓ w1 worker  1m00s · 7 turns · 23 tools",
 );
+
+// The view stays within pi's ten-line widget limit and windows the waves, so
+// the current wave is visible instead of the first four.
+const manyWaves = [];
+const manyNodes = [];
+for (let index = 0; index < 13; index += 1) {
+	const status = index < 5 ? "done" : "pending";
+	manyWaves.push({ index, status, members: [`n${index}`] });
+	manyNodes.push({ id: `n${index}`, status });
+}
+const manyAgents = Array.from({ length: 12 }, (_, index) =>
+	agent({ node: `n${index}`, status: index < 3 ? "running" : "done", updatedAt: 1115 }),
+);
+const bounded = renderProgress({
+	campaign: "big",
+	waves: manyWaves,
+	nodes: manyNodes,
+	agents: manyAgents,
+	now: 1120,
+});
+assert.ok(bounded.length <= 10, `too many widget lines: ${bounded.length}`);
+assert.ok(bounded.some((line) => line.includes("─ wave 6 [pending]")), bounded.join("\n"));
+assert.ok(!bounded.some((line) => line.includes("─ wave 1 ")), bounded.join("\n"));
+assert.ok(bounded.some((line) => line.includes("more")), bounded.join("\n"));
 
 // Every line fits the requested width.
 for (const width of [12, 24, 40]) {

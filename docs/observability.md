@@ -219,6 +219,12 @@ Python process. It renders from in-process state. The proposed `progress` action
 is for durability, a second terminal, and the finished report. It reads the
 heartbeat files plus SQLite, never the live registry.
 
+The renderer keeps the view within pi's ten-line widget limit. It shows the
+running subagents first. It then shows a window of four waves around the current
+wave. In this way the first waves do not fill the view for the whole campaign.
+The wave line derives its status from the live node statuses. It does not use the
+cached `state.waves[].status`, which lags a replan.
+
 ## 8. The `progress` projection (proposed)
 
 Not implemented. To add it, extend `sliceme/surface.py` and implement it in

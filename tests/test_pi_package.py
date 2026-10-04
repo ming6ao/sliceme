@@ -198,7 +198,7 @@ class PiPackageTests(unittest.TestCase):
         # The coordinator projects the DAG into waves via the engine and gates
         # spawns on the current wave; the wave planner is a first-class module.
         coordinator_text = PI_COORDINATOR.read_text(encoding="utf-8")
-        for needle in ("dag_waves", "currentWave", "readyWaveNodes", "advanceWaves"):
+        for needle in ("dag_waves", "currentWave", "readyWaveNodes", "refreshWaves"):
             self.assertIn(needle, coordinator_text)
         self.assertTrue((REPO_ROOT / "sliceme" / "ownership.py").is_file())
         self.assertTrue((REPO_ROOT / "tests" / "test_waves.py").is_file())
