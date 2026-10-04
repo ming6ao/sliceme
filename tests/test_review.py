@@ -15,8 +15,10 @@ import json
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -34,6 +36,9 @@ from sliceme.review.server import build_server
 from sliceme.service import Service
 from sliceme.store import Store
 from sliceme.util import SlicemeError, db_path, write_json
+
+
+CLI = Path(__file__).resolve().parent.parent / "bin" / "sliceme"
 
 
 def run(*args, cwd):
@@ -375,10 +380,70 @@ class ServerTests(ReviewCase):
         # arrives before ``serve_forever`` (during the browser open) must still
         # remove the URL file.
         path = self.root / "review.url"
-        with mock.patch.object(review_server, "open_browser", side_effect=SystemExit(0)):
+        with (
+            mock.patch.object(review_server, "open_browser", side_effect=SystemExit(0)),
+            mock.patch.object(review_server, "_stdin_is_supervised", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             with self.assertRaises(SystemExit):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    review_server.run_server([self.root], browser=True, url_file=path)
+                review_server.run_server([self.root], browser=True, url_file=path)
+        self.assertFalse(path.exists())
+
+    def test_run_server_serves_when_the_browser_probe_hangs(self):
+        # On some hosts the browser helper (`xdg-settings`) never returns.  The
+        # server must still reach `serve_forever` and serve the URL.
+        path = self.root / "review.url"
+        served = threading.Event()
+
+        def stuck():
+            time.sleep(5)
+            raise webbrowser.Error
+
+        def fake_serve_forever(self, poll_interval=0.5):
+            served.set()
+
+        with (
+            mock.patch("sliceme.review.server.webbrowser.get", side_effect=stuck),
+            mock.patch.object(review_server, "BROWSER_OPEN_TIMEOUT", 0.1),
+            mock.patch.object(review_server, "_stdin_is_supervised", return_value=False),
+            mock.patch.object(review_server._Server, "serve_forever", fake_serve_forever),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            review_server.run_server([self.root], browser=True, url_file=path)
+        self.assertTrue(served.is_set())
+        self.assertFalse(path.exists())
+
+    def test_server_exits_when_the_parent_closes_stdin(self):
+        # The coordinator spawns the server with a pipe on standard input.  A
+        # parent exit must stop the server, so no orphan server survives.
+        path = self.root / "review.url"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(CLI),
+                "review",
+                "--serve",
+                "--no-browser",
+                "--url-file",
+                str(path),
+            ],
+            cwd=str(self.root),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not path.exists():
+                time.sleep(0.1)
+            self.assertTrue(path.exists(), "the server did not write its URL")
+            process.stdin.close()
+            process.wait(timeout=15)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+        self.assertIsNotNone(process.returncode)
         self.assertFalse(path.exists())
 
 
@@ -401,19 +466,53 @@ class BrowserAndUrlTests(unittest.TestCase):
             self.assertFalse(review_server.open_browser("http://127.0.0.1:1/#token=x"))
 
     def test_open_browser_reports_the_open_result(self):
-        with mock.patch("sliceme.review.server.webbrowser.get", return_value=object()):
-            with mock.patch(
+        with (
+            mock.patch("sliceme.review.server.webbrowser.get", return_value=object()),
+            mock.patch(
                 "sliceme.review.server.webbrowser.open", return_value=True
-            ) as opened:
-                self.assertTrue(review_server.open_browser("http://127.0.0.1:1/#token=x"))
+            ) as opened,
+        ):
+            self.assertTrue(review_server.open_browser("http://127.0.0.1:1/#token=x"))
         opened.assert_called_once()
 
     def test_open_browser_swallows_a_launch_error(self):
-        with mock.patch("sliceme.review.server.webbrowser.get", return_value=object()):
-            with mock.patch(
+        with (
+            mock.patch("sliceme.review.server.webbrowser.get", return_value=object()),
+            mock.patch(
                 "sliceme.review.server.webbrowser.open", side_effect=OSError("boom")
+            ),
+        ):
+            self.assertFalse(review_server.open_browser("http://127.0.0.1:1/#token=x"))
+
+    def test_open_browser_times_out_a_stuck_probe(self):
+        # `webbrowser.get` can block forever in `xdg-settings`.  The probe must
+        # return a bounded answer so the server can start serving.
+        def stuck():
+            time.sleep(5)
+            raise webbrowser.Error
+
+        start = time.monotonic()
+        with mock.patch("sliceme.review.server.webbrowser.get", side_effect=stuck):
+            result = review_server.open_browser(
+                "http://127.0.0.1:1/#token=x", timeout=0.1
+            )
+        elapsed = time.monotonic() - start
+        self.assertFalse(result)
+        self.assertLess(elapsed, 1.0)
+
+    def test_stdin_is_supervised_accepts_a_socket_pair(self):
+        # Node's stdio pipe is a socket pair, not a FIFO.  A TTY must stay open
+        # for a human who runs the foreground server.
+        for mode, expected in (
+            (stat.S_IFSOCK, True),
+            (stat.S_IFIFO, True),
+            (stat.S_IFCHR, False),
+        ):
+            with mock.patch(
+                "sliceme.review.server.os.fstat",
+                return_value=SimpleNamespace(st_mode=mode | 0o600),
             ):
-                self.assertFalse(review_server.open_browser("http://127.0.0.1:1/#token=x"))
+                self.assertEqual(review_server._stdin_is_supervised(), expected)
 
     def test_dispatch_forwards_browser_and_url_file(self):
         service = SimpleNamespace(root=Path("/tmp/plane"))

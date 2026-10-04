@@ -584,6 +584,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		branch: string,
 		signal?: AbortSignal,
 	): Promise<void> {
+		// Stop the review server when the campaign is delivered or no commits
+		// remain.  This catches a delivery from the review client or the CLI, not
+		// only the tool path.
+		const teardownState = readJson<CampaignState>(statePath(ctx.cwd, branch), { nodes: {} });
+		if (reviewServer && !reviewNeeded(teardownState)) stopReviewServer(ctx, branch);
 		if (!ctx.isIdle()) return;
 		let payload: any;
 		try {
@@ -639,6 +644,14 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	}
 
 	/**
+	 * Whether the review client is still needed. Delivery merges every approved
+	 * commit, so the review surface stops after a successful delivery.
+	 */
+	function reviewNeeded(state: CampaignState): boolean {
+		return hasRecordedCommits(state) && !state.delivered;
+	}
+
+	/**
 	 * Start the review server once when commits exist, and keep its URL in a
 	 * widget. The server runs as a background child, so the coordinator never
 	 * blocks. The engine opens the default browser when one is available.
@@ -663,16 +676,30 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	}
 
 	/** Stop the background review server and clear its widget. */
-	function stopReviewServer(ctx: ExtensionContext): void {
-		if (reviewServer) {
-			try {
-				reviewServer.child.kill("SIGTERM");
-			} catch {
-				/* ignore */
-			}
-			reviewServer = undefined;
-		}
+	function stopReviewServer(ctx: ExtensionContext, branch?: string): void {
+		const handle = reviewServer;
+		reviewServer = undefined;
 		if (ctx.hasUI) ctx.ui.setWidget("sliceme-review", undefined);
+		if (!handle) return;
+		const key = branch ?? configuredBranch(ctx.cwd);
+		try {
+			handle.child.kill("SIGTERM");
+		} catch {
+			/* the child may have exited already */
+		}
+		// Force-kill a child that ignores the terminate signal.  The parent-death
+		// watchdog covers a crash; this covers a hung server.
+		const force = setTimeout(() => {
+			if (handle.child.exitCode === null) {
+				try {
+					handle.child.kill("SIGKILL");
+				} catch {
+					/* ignore */
+				}
+			}
+		}, 3000);
+		handle.child.once("exit", () => clearTimeout(force));
+		if (key) logEvent(ctx.cwd, key, "review.stopped", {});
 	}
 
 	/**
@@ -1371,7 +1398,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		// Between waves, deliver any review comments the human wrote.
 		void relayReviewComments(ctx, branch);
 		// The first recorded commit makes the review client available.
-		if (candidates.length) void ensureReviewServer(ctx, branch);
+		if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
 		return { content: [{ type: "text" as const, text: summary }], details: recorded.json ?? {} };
 	}
 
@@ -1541,6 +1568,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				{ status: "completed", reason: "delivered" },
 				state,
 			);
+			// Delivery merges every approved commit; the review surface is done.
+			stopReviewServer(ctx, branch);
 		} else {
 			writeJson(stateFile, state);
 		}
@@ -1714,7 +1743,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					const { dag, state } = load(ctx, branch);
 					await ensureWaves(ctx, branch, dag, state);
 					widget(ctx, dag, state);
-					if (hasRecordedCommits(state)) void ensureReviewServer(ctx, branch);
+					if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
 					return {
 						content: [{ type: "text" as const, text: summarise(dag, state) }],
 						details: { dag, state },
@@ -1911,7 +1940,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			const branch = configuredBranch(ctx.cwd);
 			if (branch) {
 				const { state } = load(ctx, branch);
-				if (hasRecordedCommits(state)) void ensureReviewServer(ctx, branch);
+				if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
 				void relayReviewComments(ctx, branch);
 			}
 		}

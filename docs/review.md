@@ -55,9 +55,20 @@ The server calls `Service` in process. It does not call `bin/sliceme`. So
 no JSON contract to stay in sync. `Service` stays the only owner of state.
 
 The pi extension starts the server as a background child after the first
-recorded commit. The extension shows the URL in a widget and stops the child on
-session shutdown. The CLI starts the same server in the foreground. The engine
-opens the default browser when one is available.
+recorded commit. The extension shows the URL in a widget. The extension stops
+the child after a successful delivery and on session shutdown. The CLI starts
+the same server in the foreground. The engine opens the default browser when one
+is available.
+
+Server lifecycle:
+
+- The first recorded commit starts the server.
+- A successful delivery stops the server. Delivery merges every approved commit.
+- `session_shutdown` stops the server.
+- The server stops itself when the parent closes the pipe on standard input. A
+  crashed coordinator therefore cannot leave an orphan server.
+- The URL file name carries the coordinator process id. The file is
+  `.sliceme/review.<pid>.url`. Two sessions in one checkout do not collide.
 
 The relay is a queue in the database, not a mailbox. The server writes comments
 to SQLite. The extension asks the engine for work. So the extension never opens
@@ -358,6 +369,8 @@ terminal title to the loopback address, so the URL stays visible after the
 server prints more lines. The extension also keeps the URL in a widget.
 
 The design keeps no pid file. The write token normally rests in memory only.
+The URL file name carries the coordinator process id, so a stale file is easy to
+find. The parent-death watchdog stops a server when its coordinator exits.
 The optional `--url-file PATH` flag writes the URL, with the token, to `PATH`.
 The writer uses mode `0600`, and the server removes the file on exit. The
 coordinator uses this file to show the URL in a stable place.

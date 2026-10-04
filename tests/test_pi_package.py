@@ -279,6 +279,25 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("resumePrompt(branch, descriptor, plan)", coordinator)
         self.assertNotIn('action "status" to see the plan', coordinator)
 
+    def test_review_server_lifecycle_is_bounded(self):
+        # The review server starts after the first recorded commit and stops
+        # after delivery.  A delivered campaign must not restart it.  The URL
+        # file is per session, and a parent-death pipe stops an orphan server.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        common = PI_COMMON.read_text(encoding="utf-8")
+
+        self.assertIn("function reviewNeeded", coordinator)
+        self.assertIn("!state.delivered", coordinator)
+        self.assertIn("stopReviewServer(ctx, branch)", coordinator)
+        self.assertIn('"review.stopped"', coordinator)
+
+        self.assertIn("export function cleanStaleReviewUrls", common)
+        self.assertIn("review.${pid}.url", common)
+        self.assertIn('stdio: ["pipe", "ignore", err]', common)
+
+        review_doc = (REPO_ROOT / "docs" / "review.md").read_text(encoding="utf-8")
+        self.assertIn("Server lifecycle:", review_doc)
+
     def test_typescript_extensions_type_check(self):
         # `npm run typecheck` must pass on the pi extensions. It resolves the pi
         # type declarations from the running pi runtime and exits 3 when neither

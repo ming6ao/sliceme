@@ -108,8 +108,10 @@ export interface ReviewServerHandle {
  *
  * The server binds loopback and writes the URL to a private file with mode
  * `0600`. The child is not detached, so a coordinator crash stops the server.
- * The caller stops the child in `session_shutdown`. The server opens the
- * default browser by itself; the returned URL feeds the coordinator widget.
+ * The child also holds a pipe on standard input, so a crashed coordinator
+ * closes the pipe and the server stops itself. The caller stops the child in
+ * `session_shutdown`. The server opens the default browser by itself; the
+ * returned URL feeds the coordinator widget.
  */
 export async function spawnReviewServer(options: {
 	cwd: string;
@@ -119,6 +121,8 @@ export async function spawnReviewServer(options: {
 }): Promise<ReviewServerHandle> {
 	const invocation = resolveSlicemeInvocation();
 	fs.mkdirSync(path.dirname(options.logFile), { recursive: true });
+	// Remove URL files from earlier sessions that are no longer running.
+	cleanStaleReviewUrls(path.dirname(options.urlFile));
 	// A leftover URL file from an earlier run must not be read as the new URL.
 	fs.rmSync(options.urlFile, { force: true });
 	// Capture stderr only. The server prints the URL, which holds the write
@@ -128,7 +132,7 @@ export async function spawnReviewServer(options: {
 	const child = spawn(
 		invocation.command,
 		[...invocation.prefix, "review", "--serve", "--url-file", options.urlFile],
-		{ cwd: options.cwd, shell: false, detached: false, stdio: ["ignore", "ignore", err] },
+		{ cwd: options.cwd, shell: false, detached: false, stdio: ["pipe", "ignore", err] },
 	);
 	fs.closeSync(err);
 	const deadline = Date.now() + (options.waitMs ?? 5000);
@@ -195,9 +199,45 @@ export function heartbeatPath(cwd: string, branch: string, node: string): string
 	return path.join(stateDir(cwd), `${branchKey(branch)}.progress_${node}.json`);
 }
 
-/** The private file that holds the running review server URL (mode 0600). */
-export function reviewUrlPath(cwd: string): string {
-	return path.join(stateDir(cwd), "review.url");
+/**
+ * The private file that holds the running review server URL (mode 0600).  The
+ * name carries the coordinator process id, so two sessions in one checkout do
+ * not overwrite each other's URL.
+ */
+export function reviewUrlPath(cwd: string, pid: number = process.pid): string {
+	return path.join(stateDir(cwd), `review.${pid}.url`);
+}
+
+/** Whether a process with this id exists. */
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** Remove review URL files whose owning coordinator is gone. */
+export function cleanStaleReviewUrls(cwd: string): void {
+	const dir = stateDir(cwd);
+	let names: string[];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		const match = /^review\.(\d+)\.url$/.exec(name);
+		if (!match) continue;
+		const pid = Number(match[1]);
+		if (pid === process.pid || processAlive(pid)) continue;
+		try {
+			fs.rmSync(path.join(dir, name), { force: true });
+		} catch {
+			/* a concurrent cleanup may win the race */
+		}
+	}
 }
 
 /** The review server's standard output log. */

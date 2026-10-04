@@ -182,6 +182,8 @@ See `docs/review.md` for the local review surface.
 - `--serve` runs the foreground loopback server; the client is one static page.
 - `--serve` opens the browser when one is available. Use `--no-browser` to
   stop the open. Use `--url-file PATH` to write the URL to a private file.
+- The server stops after a successful delivery, on `session_shutdown`, and when
+  the parent closes the pipe on standard input.
 - `--state` prints one snapshot; `--diff` prints one file diff.
 - `--poll` prints the open comments and the approval state.
 - `--ack` marks one comment delivered; `--comment` records a comment.
@@ -246,6 +248,8 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
   state.db                         # units, candidates, jobs, attempts, review_decisions, comments (SQLite, WAL)
   executor.lock                    # exclusive lock held by the single executor runner
   review.lock                      # plane delivery lock (separate from executor.lock)
+  review.<pid>.url                 # loopback review URL with the write token (mode 0600, per session)
+  review.server.log                # review server stderr (shared, append-only)
   feat--x.dag.json                 # canonical plan (never committed)
   feat--x.state.json               # executor progress (node -> status)
   feat--x.report.md                # final report (kept on cleanup)

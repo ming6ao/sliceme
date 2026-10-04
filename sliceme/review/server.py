@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import sys
 import threading
 import webbrowser
@@ -47,21 +48,41 @@ CSP = (
     "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
+# A browser probe that exceeds this deadline is abandoned.  The server must
+# serve the URL even when the host browser helper never returns.
+BROWSER_OPEN_TIMEOUT = 3.0
 
-def open_browser(url: str) -> bool:
+
+def open_browser(url: str, timeout: float | None = None) -> bool:
     """Open ``url`` in the default browser.  Return False when none is available.
 
     The review server binds loopback and mints a write token, so the URL is a
     local secret.  A failed open is not an error: the caller prints the URL.
+
+    The probe runs in a daemon thread with a deadline.  On some hosts
+    ``webbrowser.get`` shells out to ``xdg-settings`` and never returns.  A
+    blocked probe must not stop the server from serving the URL.
     """
-    try:
-        webbrowser.get()
-    except webbrowser.Error:
-        return False
-    try:
-        return bool(webbrowser.open(url, new=2))
-    except Exception:  # pragma: no cover - browser launch is host-specific
-        return False
+    if timeout is None:
+        timeout = BROWSER_OPEN_TIMEOUT
+    outcome: bool | None = None
+
+    def probe() -> None:
+        nonlocal outcome
+        try:
+            webbrowser.get()
+        except webbrowser.Error:
+            outcome = False
+            return
+        try:
+            outcome = bool(webbrowser.open(url, new=2))
+        except Exception:  # pragma: no cover - browser launch is host-specific
+            outcome = False
+
+    thread = threading.Thread(target=probe, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    return outcome is True
 
 
 def write_url_file(path: Path | str, url: str) -> Path:
@@ -92,6 +113,35 @@ def set_terminal_title(title: str) -> None:
         sys.stdout.flush()
     except Exception:  # pragma: no cover - terminal specific
         pass
+
+
+def _stdin_is_supervised() -> bool:
+    """Whether a supervisor holds standard input through a pipe or a socket.
+
+    The pi coordinator spawns the server with a Node standard-input pipe.
+    Node uses a socket pair, so a FIFO-only check misses the real case.
+    """
+    try:
+        mode = os.fstat(0).st_mode
+    except OSError:  # pragma: no cover - no standard input
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
+def _watch_stdin(server: "_Server") -> None:
+    """Stop the server when the parent closes the pipe on standard input.
+
+    The pi coordinator spawns the server with a pipe on standard input.  When
+    the coordinator exits, the read end sees end of file.  The server then
+    stops, so a crashed coordinator cannot leave an orphan server behind.
+    """
+    try:
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        while stream.read(1):
+            pass
+    except Exception:  # pragma: no cover - closed or detached input
+        return
+    server.shutdown()
 
 
 def discover_planes(roots: list[Path]) -> list[Path]:
@@ -347,6 +397,12 @@ def run_server(
         print(f"  url:    {url}", flush=True)
         if url_path is not None:
             print(f"  file:   {url_path}", flush=True)
+        if _stdin_is_supervised():
+            # The parent holds the write end.  A parent exit closes it, and the
+            # watchdog stops the server.  A terminal keeps the server running.
+            threading.Thread(
+                target=_watch_stdin, args=(server,), daemon=True
+            ).start()
         opened = open_browser(url) if browser else False
         if browser and not opened:
             print("  note:   no browser found; open the url above", flush=True)
