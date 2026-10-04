@@ -203,6 +203,13 @@ class PiPackageTests(unittest.TestCase):
         self.assertTrue((REPO_ROOT / "sliceme" / "ownership.py").is_file())
         self.assertTrue((REPO_ROOT / "tests" / "test_waves.py").is_file())
 
+    def test_commit_subjects_are_descriptions(self):
+        # A wave commit subject is the human description, never a wave prefix.
+        # The coordinator captures the worker report and passes a per-node map.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        for needle in ("function workerDescription", "function nodeDescriptions", '"--messages"'):
+            self.assertIn(needle, coordinator)
+
     def test_session_suspend_resume_contract(self):
         # The adapter writes the descriptor, hard-aborts the in-flight turn to
         # suspend quickly, resumes on the pi session_start hook, and never shadows

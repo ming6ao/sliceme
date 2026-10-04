@@ -137,7 +137,7 @@ const EXEC_KEYS = [
 ] as const;
 
 /** Parameter names the `wave` action forwards to the engine verb. */
-const WAVE_KEYS = ["open", "record", "wave", "message", "summary"] as const;
+const WAVE_KEYS = ["open", "record", "wave", "messages", "summary"] as const;
 
 /** Render one engine verb plus its selected params as CLI arguments. */
 function engineArgs(action: string, keys: readonly string[], params: any): string[] {
@@ -183,6 +183,7 @@ interface NodeState {
 	attempts?: number;
 	verdict?: string;
 	lastError?: string;
+	description?: string;
 	unit?: string;
 	branch?: string;
 	worktree?: string;
@@ -363,6 +364,25 @@ function summarise(dag: Dag, state: CampaignState): string {
 		lines.push(`wave ${wave.index} [${wave.status}]: ${wave.members.join(", ")}`);
 	}
 	return lines.join("\n");
+}
+
+/** First non-empty line of a worker's final report, for the commit subject. */
+function workerDescription(output: string): string {
+	const line = String(output ?? "")
+		.split("\n")
+		.map((row) => row.replace(/^[\s#>*+-]+/, "").trim())
+		.find((row) => row.length > 0);
+	return (line ?? "").replace(/\s+/g, " ");
+}
+
+/** The descriptions the coordinator captured for a set of nodes. */
+function nodeDescriptions(state: any, members: string[]): Record<string, string> {
+	const messages: Record<string, string> = {};
+	for (const id of members) {
+		const description = state.nodes[id]?.description;
+		if (description) messages[id] = description;
+	}
+	return messages;
 }
 
 export default function coordinatorExtension(pi: ExtensionAPI) {
@@ -1268,11 +1288,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					resumePlan?.worktree_dirty
 				) {
 					try {
-						await sliceme(
-							ctx,
-							["wave", "--record", "--wave", String(pendingWave)],
-							signal,
+						const resumeWave = (state.waves ?? []).find(
+							(w: any) => Number(w.index) === Number(pendingWave),
 						);
+						const recordArgs = ["wave", "--record", "--wave", String(pendingWave)];
+						const messages = nodeDescriptions(state, resumeWave?.members ?? []);
+						if (Object.keys(messages).length) {
+							recordArgs.push("--messages", JSON.stringify(messages));
+						}
+						await sliceme(ctx, recordArgs, signal);
 						logEvent(ctx.cwd, branch, "wave.record_on_resume", { wave: pendingWave });
 					} catch {
 						/* unowned or ambiguous edits: leave the record for a human/CLI */
@@ -1485,6 +1509,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		}
 		state.nodes[node].status = result.exitCode === 0 ? "pending" : "failed";
 		state.nodes[node].attempts = attempt;
+		if (result.exitCode === 0) {
+			const description = workerDescription(result.output);
+			if (description) state.nodes[node].description = description;
+		}
 		refreshWaves(state);
 		store.save();
 		widget(ctx, dag, state);
@@ -1513,11 +1541,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		await ensureWaves(ctx, branch, dag, state);
 		const wave = currentWave(state);
 		if (!wave) throw new Error("record: no open wave to record");
-		const recorded = await sliceme(
-			ctx,
-			["wave", "--record", "--wave", String(wave.index)],
-			signal,
-		);
+		const recordArgs = ["wave", "--record", "--wave", String(wave.index)];
+		const messages = nodeDescriptions(state, wave.members);
+		if (Object.keys(messages).length) {
+			recordArgs.push("--messages", JSON.stringify(messages));
+		}
+		const recorded = await sliceme(ctx, recordArgs, signal);
 		const candidates: any[] = recorded.json?.candidates ?? [];
 		const byNode = new Map<string, any>(
 			candidates.map((c: any) => [String(c.node), c]),
@@ -1860,7 +1889,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			wave: Type.Optional(Type.Number({ description: "exec: wave index" })),
 			requester: Type.Optional(Type.String({ description: "exec: verifier id" })),
 			limit: Type.Optional(Type.Number({ description: "exec: max jobs to drain" })),
-			message: Type.Optional(Type.String({ description: "wave record: commit message" })),
+			messages: Type.Optional(
+				Type.String({ description: "wave record: JSON object of node id to description" }),
+			),
 			summary: Type.Optional(Type.String({ description: "wave record: candidate summary" })),
 			poll: Type.Optional(
 				Type.Boolean({ description: "review: print open comments and the newest decision" }),

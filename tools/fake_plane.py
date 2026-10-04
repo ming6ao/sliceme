@@ -291,11 +291,13 @@ def build_git_project(root: Path) -> None:
 def build_campaign(svc: Service) -> dict[str, str]:
     """Record every wave and return a node -> commit map."""
     commits: dict[str, str] = {}
-    messages = [
-        "add token verification and migrations",
-        "add the session flow and CLI flags",
-        "document usage and configuration",
-    ]
+    messages = {
+        "w1": "add token verification and migrations",
+        "w2": "add the migration runner",
+        "w3": "add the session flow and CLI flags",
+        "w4": "add the session resume flags",
+        "w5": "document usage and configuration",
+    }
     for wave in range(3):
         svc.create_campaign_workspace(base=FEATURE_BRANCH)
         members = (
@@ -304,7 +306,7 @@ def build_campaign(svc: Service) -> dict[str, str]:
         for node in members:
             for rel, text in NODE_EDITS[node].items():
                 write_text(Path(svc.store.get_unit("campaign")["worktree"]), rel, text)
-        result = svc.record_wave(wave, message=messages[wave])
+        result = svc.record_wave(wave, messages={node: messages[node] for node in members})
         for candidate in result["candidates"]:
             commits[str(candidate["node"])] = str(candidate["head_commit"])
     return commits

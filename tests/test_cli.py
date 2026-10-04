@@ -216,7 +216,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             worktree = Path(json.loads(out.stdout)["unit"]["worktree"])
             (worktree / "a.txt").write_text("w1\n")
-            out = run_cli(["--json", "wave", "--record", "--wave", "0"], root)
+            out = run_cli(
+                ["--json", "wave", "--record", "--wave", "0", "--messages", '{"w1": "test"}'],
+                root,
+            )
             self.assertEqual(out.returncode, 0, out.stderr)
             candidate = json.loads(out.stdout)["candidates"][0]
 

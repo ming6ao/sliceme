@@ -92,12 +92,12 @@ class ReviewCase(unittest.TestCase):
         unit = self.svc.create_campaign_workspace(base="feat/x")
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
-        return self.svc.record_wave(0)
+        return self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
 
     def record_wave1(self):
         unit = self.svc.create_campaign_workspace(base="feat/x")
         self.edit(unit["worktree"], "src/c/z.py", "c = 2\n")
-        return self.svc.record_wave(1)
+        return self.svc.record_wave(1, messages={"w3": "test"})
 
     def approve_all(self):
         return self.svc.review_decision(action="approve", all_commits=True, actor="test")

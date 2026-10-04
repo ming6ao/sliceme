@@ -60,6 +60,7 @@ def _add_action(sub: Any, action: surface.Action) -> None:
         help=action.summary,
         description=action.summary,
         aliases=list(action.aliases),
+        allow_abbrev=False,
     )
     for param in action.params:
         kwargs: dict[str, Any] = {"dest": param.name, "help": param.help, "default": None}
@@ -76,8 +77,6 @@ def _add_action(sub: Any, action: surface.Action) -> None:
         if param.required:
             kwargs["required"] = True
         names = [_flag(param)]
-        if param.name == "message":
-            names.append("-m")
         parser.add_argument(*names, **kwargs)
 
 
@@ -85,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sliceme",
         description="Local coordination for parallel coding agents.",
+        allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=f"sliceme {__version__}")
     parser.add_argument("--root", help="workspace root (defaults to nearest .sliceme)")

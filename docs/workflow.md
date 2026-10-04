@@ -45,7 +45,8 @@ COORDINATOR (this session)
 - Workers are **pure editors**: they edit only their owned directories, never
   run `git`, and never run the test suite. The coordinator runs
   `wave --record --wave N` to create one commit per node and enforce
-  conformance-by-ownership.
+  conformance-by-ownership. The commit subject is the node's human description;
+  the wave stays in the DAG and the state, not in the subject.
 - Only the executor runs checks and only the executor may use the GPU. Verifiers
   delegate to the executor and judge its recorded evidence.
 - The executor is a **single serialized runner** (`exec --run`/`--wait`) over a

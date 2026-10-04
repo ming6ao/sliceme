@@ -11,6 +11,7 @@ agent-callable; there are no human-only actions.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,7 +119,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("open", "boolean", "create or reuse the single campaign worktree"),
             Param("record", "boolean", "record a wave: conformance + per-node commits"),
             Param("wave", "int", "wave index to record"),
-            Param("message", "string", "record: commit message suffix"),
+            Param("messages", "string", "record: JSON object of node id to description"),
             Param("summary", "string", "record: candidate summary"),
         ),
     ),
@@ -335,10 +336,22 @@ def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
     if p.get("record"):
         if p.get("wave") is None:
             raise SlicemeError("wave --record requires --wave")
+        messages = p.get("messages")
+        if isinstance(messages, str):
+            try:
+                messages = json.loads(messages) if messages.strip() else None
+            except json.JSONDecodeError as exc:
+                raise SlicemeError(
+                    f"wave --record --messages is not valid JSON: {exc}"
+                ) from None
+        if messages is not None and not isinstance(messages, dict):
+            raise SlicemeError("wave --record --messages must be a JSON object")
         # Serialize git mutation with the single executor's check runs.
         with service.executor().lock():
             return service.record_wave(
-                int(p["wave"]), message=p.get("message"), summary=p.get("summary")
+                int(p["wave"]),
+                messages=messages,
+                summary=p.get("summary"),
             )
     raise SlicemeError("wave needs --open or --record")
 

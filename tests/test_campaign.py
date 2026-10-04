@@ -67,7 +67,9 @@ class CampaignCase(unittest.TestCase):
         unit = self.svc.create_campaign_workspace(base="feat/x")
         for rel, content in edits.items():
             (Path(unit["worktree"]) / rel).write_text(content)
-        return self.svc.record_wave(wave)
+        dag = campaign.load_dag(self.root, "feat/x")
+        messages = {str(node["id"]): "test" for node in dag["nodes"]}
+        return self.svc.record_wave(wave, messages=messages)
 
     def file_on(self, branch, rel):
         return run("git", "show", f"{branch}:{rel}", cwd=self.root).stdout
@@ -142,7 +144,7 @@ class RecordWaveTests(CampaignCase):
         (Path(unit["worktree"]) / "src" / "a.py").write_text("a = 2\n")
         (Path(unit["worktree"]) / "docs").mkdir(exist_ok=True)
         (Path(unit["worktree"]) / "docs" / "readme.md").write_text("docs\n")
-        result = self.svc.record_wave(0)
+        result = self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
         self.assertEqual([c["node"] for c in result["candidates"]], ["w1", "w2"])
         # The target branch is untouched until delivery.
         self.assertEqual(self.file_on("feat/x", "src/a.py"), "a = 1\n")

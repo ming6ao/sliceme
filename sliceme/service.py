@@ -32,6 +32,16 @@ from .util import (
     write_json,
 )
 
+
+def _subject_line(text: str | None) -> str:
+    """Return the first non-empty, whitespace-collapsed line of *text*."""
+    for line in str(text or "").splitlines():
+        collapsed = " ".join(line.split())
+        if collapsed:
+            return collapsed
+    return ""
+
+
 class Service:
     def __init__(self, root: Path, store: Store | None = None, *, migrate: bool = True):
         self.root = root
@@ -420,14 +430,16 @@ class Service:
         self,
         wave_index: int,
         *,
-        message: str | None = None,
+        messages: dict[str, str] | None = None,
         summary: str | None = None,
     ) -> dict[str, Any]:
         """Record a shared wave worktree: conformance, then per-node commits.
 
         Every changed path is attributed to exactly one same-wave node by its
         owned directories; each node gets one commit and a prepared candidate
-        on the shared wave branch.
+        on the shared wave branch.  The commit subject is the node's per-node
+        ``messages`` entry.  A node with changes and no description is an
+        error.
         """
         branch = self.config.get("main_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
@@ -447,7 +459,11 @@ class Service:
         by_id = {str(node["id"]): node for node in dag["nodes"]}
         members = [by_id[node_id] for node_id in wave.members if node_id in by_id]
         return self._record_wave_commits(
-            unit, int(wave_index), members, message=message, summary=summary
+            unit,
+            int(wave_index),
+            members,
+            messages=messages,
+            summary=summary,
         )
 
     def _record_wave_commits(
@@ -456,7 +472,7 @@ class Service:
         wave_index: int,
         members: list[dict[str, Any]],
         *,
-        message: str | None,
+        messages: dict[str, str] | None,
         summary: str | None,
     ) -> dict[str, Any]:
         worktree = Path(unit["worktree"])
@@ -489,14 +505,25 @@ class Service:
                 "wave conformance failed; every changed path must map to exactly one "
                 "wave node's owned directories: " + "; ".join(violations[:10])
             )
+        messages = messages or {}
         created: list[dict[str, Any]] = []
         for node in members:
             node_id = str(node["id"])
             paths = sorted(set(assignment.get(node_id) or []))
             if not paths:
                 continue
-            note = f"{node_id}: {message}" if message else f"{node_id}: wave {wave_index}"
-            result = gitutil.git(worktree, "commit", "-m", note, "--", *paths, check=False)
+            # The subject is the human description, never a wave prefix.  A
+            # node with changes must have its own description; Sliceme never
+            # invents one.
+            description = _subject_line(messages.get(node_id))
+            if not description:
+                raise SlicemeError(
+                    f"wave --record: node '{node_id}' has no description; "
+                    f"pass --messages '{{\"{node_id}\": \"...\"}}'"
+                )
+            result = gitutil.git(
+                worktree, "commit", "-m", description, "--", *paths, check=False
+            )
             if not result.ok:
                 raise SlicemeError(
                     result.stderr.strip()

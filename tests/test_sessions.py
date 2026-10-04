@@ -113,7 +113,7 @@ class SessionsCase(unittest.TestCase):
     def record_w1(self):
         unit = self.svc.create_campaign_workspace(base="feat/x")
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        result = self.svc.record_wave(0)
+        result = self.svc.record_wave(0, messages={"w1": "test"})
         return next(c for c in result["candidates"] if c["node"] == "w1")
 
     def approve(self):
@@ -230,7 +230,7 @@ class ResumePlanTests(SessionsCase):
         self.assertEqual(before["resume_plan"]["record_wave"], 0)
         self.assertIn("w1", before["resume_plan"]["resume"])
 
-        recorded = self.svc.record_wave(0)
+        recorded = self.svc.record_wave(0, messages={"w1": "test"})
         candidate = next(c for c in recorded["candidates"] if c["node"] == "w1")
         self.write_state({"w1": {"status": "recorded", "commit": candidate["head_commit"]}})
 

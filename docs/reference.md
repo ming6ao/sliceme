@@ -133,7 +133,7 @@ job whose lease expired.
 
 ```bash
 sliceme wave --open
-sliceme wave --record --wave N [--message M] [--summary S]
+sliceme wave --record --wave N [--messages JSON] [--summary S]
 ```
 
 The campaign worktree, split out of `exec` so the executor stays a pure check
@@ -150,6 +150,10 @@ a non-directory spec (`file:`, `symbol:`, …) when it projects the DAG.
   It diffs against the current `HEAD`, so it never re-attributes an earlier
   wave's committed changes. It holds the executor lock, so it serializes with
   check runs.
+- The commit subject is the node's human description. Sliceme uses the
+  per-node `--messages '{"w1": "..."}'` entry. A node with changes and no
+  description is an error. The subject never carries a wave prefix. The node
+  and the wave stay in `state.db` and the DAG.
 
 ### `attempt`
 
