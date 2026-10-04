@@ -168,7 +168,8 @@ newest running try for the node.
 ### `review`
 
 ```bash
-sliceme review [--serve [--plane DIR ...] [--host H] [--port N]]
+sliceme review [--serve [--plane DIR ...] [--host H] [--port N]
+               [--no-browser] [--url-file PATH]]
                [--state] [--diff --file PATH] [--poll] [--ack --comment-id N]
                [--comment --body TEXT] [--decision approve|request_changes|override]
                [--all] [--commit SHA] [--file PATH] [--side old|new]
@@ -179,6 +180,8 @@ sliceme review [--serve [--plane DIR ...] [--host H] [--port N]]
 See `docs/review.md` for the local review surface.
 
 - `--serve` runs the foreground loopback server; the client is one static page.
+- `--serve` opens the browser when one is available. Use `--no-browser` to
+  stop the open. Use `--url-file PATH` to write the URL to a private file.
 - `--state` prints one snapshot; `--diff` prints one file diff.
 - `--poll` prints the open comments and the approval state.
 - `--ack` marks one comment delivered; `--comment` records a comment.

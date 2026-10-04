@@ -118,8 +118,12 @@ def serve(
     *,
     host: str = "127.0.0.1",
     port: int = 0,
+    browser: bool = True,
+    url_file: Path | str | None = None,
 ) -> dict[str, Any]:
     """Run the foreground review server.  Blocks until Ctrl-C."""
     from .server import run_server
 
-    return run_server(plane_roots, host=host, port=port)
+    return run_server(
+        plane_roots, host=host, port=port, browser=browser, url_file=url_file
+    )

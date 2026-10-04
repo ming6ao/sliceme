@@ -36,10 +36,10 @@ const view = {
 	file: "",
 	report: false,
 	snapshot: null,
-	pinned: null,
+	tips: null,
 	anchor: null,
 	range: null,
-	stale: false,
+	refreshPending: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -113,9 +113,10 @@ function renderTopbar() {
 	els.approvalState.textContent = snapshot.all_approved
 		? "all commits approved"
 		: `${unapproved} unapproved`;
-	els.stale.hidden = !view.stale;
-	els.approveAll.disabled = view.stale || unapproved === 0;
-	els.deliver.hidden = !snapshot.all_approved || view.stale;
+	els.stale.hidden = !view.refreshPending;
+	els.stale.textContent = "new commits — refresh";
+	els.approveAll.disabled = unapproved === 0;
+	els.deliver.hidden = !snapshot.all_approved;
 }
 
 function renderCommits() {
@@ -446,32 +447,59 @@ async function deliver() {
 // ---------------------------------------------------------------------------
 // Polling
 // ---------------------------------------------------------------------------
+function tipsDiffer(a, b) {
+	return a.source_tip !== b.source_tip || a.target_tip !== b.target_tip;
+}
+
+/**
+ * Keep the selection when the new packet still holds it. A campaign only adds
+ * commits, so a selected commit normally stays. A vanished file falls back to
+ * the first file of the new packet. Return true when the selection changed.
+ */
+function reconcileSelection(snapshot) {
+	let changed = false;
+	const commits = snapshot.commits || [];
+	if (view.commit && !commits.some((commit) => commit.hash === view.commit)) {
+		view.commit = commits.length ? commits[commits.length - 1].hash : "";
+		view.anchor = null;
+		view.range = null;
+		changed = true;
+	}
+	if (view.report) return changed;
+	const files = snapshot.files || [];
+	if (view.file && files.some((file) => file.path === view.file)) return changed;
+	view.file = files.length ? files[0].path : "";
+	view.anchor = null;
+	view.range = null;
+	return true;
+}
+
+async function applySnapshot(snapshot) {
+	view.snapshot = snapshot;
+	view.tips = { source_tip: snapshot.source_tip, target_tip: snapshot.target_tip };
+	view.refreshPending = false;
+	if (reconcileSelection(snapshot)) writeHash();
+	render();
+	await loadDiff();
+}
+
 async function poll() {
 	try {
 		const snapshot = await apiGet("/api/state", { plane: view.plane, commit: view.commit });
-		view.snapshot = snapshot;
 		if (snapshot.plane) view.plane = snapshot.plane;
-		if (!view.pinned) {
-			view.pinned = { source_tip: snapshot.source_tip, target_tip: snapshot.target_tip };
+		const tipsChanged = view.tips ? tipsDiffer(view.tips, snapshot) : false;
+		if (tipsChanged && !els.commentForm.hidden) {
+			// A comment draft is open. Keep the diff and the anchor stable until
+			// the reviewer submits or cancels the comment.
+			view.refreshPending = true;
+			renderTopbar();
+			return;
 		}
-		view.stale =
-			view.pinned.source_tip !== snapshot.source_tip ||
-			view.pinned.target_tip !== snapshot.target_tip;
-		if (!view.file && !view.report && (snapshot.files || []).length) {
-			view.file = snapshot.files[0].path;
-			writeHash();
-		}
-		render();
-		await loadDiff();
+		await applySnapshot(snapshot);
+		if (tipsChanged) notice("new commits: refreshed");
 	} catch (error) {
 		notice(error.message, true);
 	}
-}
-
-function reloadPacket() {
-	view.pinned = null;
-	view.stale = false;
-	poll();
 }
 
 // ---------------------------------------------------------------------------
@@ -479,13 +507,13 @@ function reloadPacket() {
 // ---------------------------------------------------------------------------
 els.approveAll.addEventListener("click", approveAll);
 els.deliver.addEventListener("click", deliver);
-els.stale.addEventListener("click", reloadPacket);
 els.commentForm.addEventListener("submit", (event) => {
 	event.preventDefault();
 	submitComment();
 });
 els.commentCancel.addEventListener("click", () => {
 	els.commentForm.hidden = true;
+	if (view.refreshPending) void poll();
 });
 els.commentBody.addEventListener("keydown", (event) => {
 	if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -501,4 +529,4 @@ els.commentBody.addEventListener("keydown", (event) => {
 readHash();
 writeHash();
 poll();
-setInterval(poll, 5000);
+setInterval(poll, 3000);

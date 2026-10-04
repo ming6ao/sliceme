@@ -130,6 +130,8 @@ ACTIONS: tuple[Action, ...] = (
             Param("plane", "list", "plane root to serve (repeatable; default: this workspace)", flag="plane"),
             Param("host", "string", "bind host (loopback only)"),
             Param("port", "int", "bind port (0 chooses a free port)"),
+            Param("no_browser", "boolean", "serve: do not open a browser automatically"),
+            Param("url_file", "string", "serve: write the URL to this file (mode 0600)"),
             Param("poll", "boolean", "print open comments and the newest decision"),
             Param("ack", "boolean", "acknowledge one comment (requires --comment-id)"),
             Param("state", "boolean", "print one review snapshot"),
@@ -384,6 +386,8 @@ def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
             roots,
             host=p.get("host") or "127.0.0.1",
             port=int(p.get("port") or 0),
+            browser=not p.get("no_browser"),
+            url_file=p.get("url_file"),
         )
     if p.get("poll"):
         return review_api.poll(service, p)

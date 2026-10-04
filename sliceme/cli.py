@@ -166,6 +166,8 @@ def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
             roots,
             host=getattr(args, "host", None) or "127.0.0.1",
             port=int(getattr(args, "port", 0) or 0),
+            browser=not getattr(args, "no_browser", False),
+            url_file=getattr(args, "url_file", None),
         )
         _print(result, as_json)
         return 0

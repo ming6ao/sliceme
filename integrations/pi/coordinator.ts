@@ -55,14 +55,17 @@ import {
 	logEvent,
 	logPath,
 	readJson,
+	reviewLogPath,
+	reviewUrlPath,
 	runSliceme,
 	runSubagent,
 	sessionPath,
+	spawnReviewServer,
 	stateDir,
 	statePath,
 	writeJson,
 } from "./common.ts";
-import type { SubagentResult } from "./common.ts";
+import type { ReviewServerHandle, SubagentResult } from "./common.ts";
 
 export const CAMPAIGN_ACTIONS = [
 	"start",
@@ -80,10 +83,6 @@ export const CAMPAIGN_ACTIONS = [
 
 /** Parameter names the `review` action forwards to the engine verb. */
 const REVIEW_KEYS = [
-	"serve",
-	"plane",
-	"host",
-	"port",
 	"poll",
 	"ack",
 	"state",
@@ -578,6 +577,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	const relayedComments = new Set<number>();
 	let reviewTimer: ReturnType<typeof setInterval> | undefined;
 	let reviewCtx: ExtensionContext | undefined;
+	let reviewServer: ReviewServerHandle | undefined;
 
 	async function relayReviewComments(
 		ctx: ExtensionContext,
@@ -631,6 +631,48 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (!branch) return;
 			void relayReviewComments(reviewCtx, branch);
 		}, 15000);
+	}
+
+	/** Whether the campaign has a recorded commit for the review client. */
+	function hasRecordedCommits(state: CampaignState): boolean {
+		return Object.values(state.nodes ?? {}).some((node) => Boolean(node?.commit));
+	}
+
+	/**
+	 * Start the review server once when commits exist, and keep its URL in a
+	 * widget. The server runs as a background child, so the coordinator never
+	 * blocks. The engine opens the default browser when one is available.
+	 */
+	async function ensureReviewServer(ctx: ExtensionContext, branch: string): Promise<void> {
+		if (reviewServer && reviewServer.child.exitCode === null) return;
+		let handle: ReviewServerHandle;
+		try {
+			handle = await spawnReviewServer({
+				cwd: ctx.cwd,
+				urlFile: reviewUrlPath(ctx.cwd),
+				logFile: reviewLogPath(ctx.cwd),
+			});
+		} catch {
+			/* review is optional; the campaign must continue without it */
+			return;
+		}
+		reviewServer = handle;
+		if (ctx.hasUI) ctx.ui.setWidget("sliceme-review", [handle.url]);
+		// Log only the loopback origin; the fragment holds the write token.
+		logEvent(ctx.cwd, branch, "review.server", { url: handle.url.split("#")[0] });
+	}
+
+	/** Stop the background review server and clear its widget. */
+	function stopReviewServer(ctx: ExtensionContext): void {
+		if (reviewServer) {
+			try {
+				reviewServer.child.kill("SIGTERM");
+			} catch {
+				/* ignore */
+			}
+			reviewServer = undefined;
+		}
+		if (ctx.hasUI) ctx.ui.setWidget("sliceme-review", undefined);
 	}
 
 	/**
@@ -1328,6 +1370,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			: `wave ${wave.index} recorded no changes`;
 		// Between waves, deliver any review comments the human wrote.
 		void relayReviewComments(ctx, branch);
+		// The first recorded commit makes the review client available.
+		if (candidates.length) void ensureReviewServer(ctx, branch);
 		return { content: [{ type: "text" as const, text: summary }], details: recorded.json ?? {} };
 	}
 
@@ -1639,12 +1683,6 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "exec: max jobs to drain" })),
 			message: Type.Optional(Type.String({ description: "wave record: commit message" })),
 			summary: Type.Optional(Type.String({ description: "wave record: candidate summary" })),
-			serve: Type.Optional(
-				Type.Boolean({ description: "review: start the foreground loopback server" }),
-			),
-			plane: Type.Optional(
-				Type.Array(Type.String(), { description: "review: plane root to serve (repeatable)" }),
-			),
 			poll: Type.Optional(
 				Type.Boolean({ description: "review: print open comments and the newest decision" }),
 			),
@@ -1676,6 +1714,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					const { dag, state } = load(ctx, branch);
 					await ensureWaves(ctx, branch, dag, state);
 					widget(ctx, dag, state);
+					if (hasRecordedCommits(state)) void ensureReviewServer(ctx, branch);
 					return {
 						content: [{ type: "text" as const, text: summarise(dag, state) }],
 						details: { dag, state },
@@ -1870,17 +1909,22 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			/* a resume hook must never break session startup */
 		} finally {
 			const branch = configuredBranch(ctx.cwd);
-			if (branch) void relayReviewComments(ctx, branch);
+			if (branch) {
+				const { state } = load(ctx, branch);
+				if (hasRecordedCommits(state)) void ensureReviewServer(ctx, branch);
+				void relayReviewComments(ctx, branch);
+			}
 		}
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
-		// Fast, idempotent, and subprocess-free: only the descriptor is written.
+		// Fast and idempotent: stop the review child, then write the descriptor.
 		if (reviewTimer) {
 			clearInterval(reviewTimer);
 			reviewTimer = undefined;
 		}
 		reviewCtx = undefined;
+		stopReviewServer(ctx);
 		try {
 			const branch = configuredBranch(ctx.cwd);
 			if (!branch || !fs.existsSync(dagPath(ctx.cwd, branch))) return;

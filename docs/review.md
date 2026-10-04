@@ -54,6 +54,11 @@ The server calls `Service` in process. It does not call `bin/sliceme`. So
 `deliver`, the target guard, `run_checks`, the conflict reset, and cleanup need
 no JSON contract to stay in sync. `Service` stays the only owner of state.
 
+The pi extension starts the server as a background child after the first
+recorded commit. The extension shows the URL in a widget and stops the child on
+session shutdown. The CLI starts the same server in the foreground. The engine
+opens the default browser when one is available.
+
 The relay is a queue in the database, not a mailbox. The server writes comments
 to SQLite. The extension asks the engine for work. So the extension never opens
 the database.
@@ -253,11 +258,19 @@ The right pane shows the newest verification for the selected commit. It holds
 the status, the command vector, the duration, the fingerprint, and the output.
 A click on the fingerprint copies the full value.
 
-### 8.5 Staleness
+### 8.5 Refresh
 
-The client polls `/api/state` every few seconds. If the tips differ from the
-packet tips, the top bar shows **stale**. The client then disables the approval
-controls. The reviewer reloads the packet to continue.
+The client polls `/api/state` every three seconds. When the tips change, the
+client applies the new packet and keeps the current selection. The client keeps
+a selected commit, because a campaign only adds commits. A vanished file falls
+back to the first file. The client shows a short notice: `new commits:
+refreshed`.
+
+A refresh must not move the diff under an open comment. When a comment form is
+open, the client keeps the diff and the anchor stable. The top bar shows `new
+commits — refresh`. The client applies the packet after the reviewer submits or
+cancels the comment. The approval controls stay enabled, because an approval
+binds to one commit hash.
 
 ### 8.6 Rendering and accessibility
 
@@ -337,9 +350,17 @@ The server can invoke `deliver`, so the boundary is explicit:
 - Send a strict Content Security Policy. Serve only a fixed file list.
 - Use no cookies and no ambient credentials.
 
-The server runs in the foreground. The command prints the URL and stops with
-Ctrl-C. The design keeps no runtime file and no pid file, so the token never
-rests on disk.
+The CLI runs the server in the foreground. The command prints the URL and stops
+with Ctrl-C. The pi extension starts the server as a background child instead,
+so the agent session never blocks. The engine opens the default browser when one
+is available. The `--no-browser` flag stops the open. The server sets the
+terminal title to the loopback address, so the URL stays visible after the
+server prints more lines. The extension also keeps the URL in a widget.
+
+The design keeps no pid file. The write token normally rests in memory only.
+The optional `--url-file PATH` flag writes the URL, with the token, to `PATH`.
+The writer uses mode `0600`, and the server removes the file on exit. The
+coordinator uses this file to show the URL in a stable place.
 
 ## 12. Build order
 

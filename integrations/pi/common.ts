@@ -98,6 +98,60 @@ export async function runSliceme(
 	return { text: text || "ok", json: parseJson(result.stdout) };
 }
 
+export interface ReviewServerHandle {
+	child: import("node:child_process").ChildProcess;
+	url: string;
+}
+
+/**
+ * Start the review server as a background child and wait for its URL file.
+ *
+ * The server binds loopback and writes the URL to a private file with mode
+ * `0600`. The child is not detached, so a coordinator crash stops the server.
+ * The caller stops the child in `session_shutdown`. The server opens the
+ * default browser by itself; the returned URL feeds the coordinator widget.
+ */
+export async function spawnReviewServer(options: {
+	cwd: string;
+	urlFile: string;
+	logFile: string;
+	waitMs?: number;
+}): Promise<ReviewServerHandle> {
+	const invocation = resolveSlicemeInvocation();
+	fs.mkdirSync(path.dirname(options.logFile), { recursive: true });
+	// A leftover URL file from an earlier run must not be read as the new URL.
+	fs.rmSync(options.urlFile, { force: true });
+	// Capture stderr only. The server prints the URL, which holds the write
+	// token, on stdout, so the token never enters the log. Mode 0600 keeps the
+	// log private when the operating system creates it.
+	const err = fs.openSync(options.logFile, "a", 0o600);
+	const child = spawn(
+		invocation.command,
+		[...invocation.prefix, "review", "--serve", "--url-file", options.urlFile],
+		{ cwd: options.cwd, shell: false, detached: false, stdio: ["ignore", "ignore", err] },
+	);
+	fs.closeSync(err);
+	const deadline = Date.now() + (options.waitMs ?? 5000);
+	try {
+		while (Date.now() < deadline) {
+			if (child.exitCode !== null) {
+				throw new Error("the review server exited before it wrote a URL");
+			}
+			try {
+				const url = fs.readFileSync(options.urlFile, "utf8").trim();
+				if (url) return { child, url };
+			} catch {
+				/* the server has not written the file yet */
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		throw new Error("the review server did not write a URL in time");
+	} catch (error) {
+		child.kill("SIGTERM");
+		throw error;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Campaign state paths (`docs/reference.md` §3)
 // ---------------------------------------------------------------------------
@@ -139,6 +193,16 @@ export function controlPath(cwd: string, branch: string): string {
 /** The per-node progress heartbeat written while a subagent runs. */
 export function heartbeatPath(cwd: string, branch: string, node: string): string {
 	return path.join(stateDir(cwd), `${branchKey(branch)}.progress_${node}.json`);
+}
+
+/** The private file that holds the running review server URL (mode 0600). */
+export function reviewUrlPath(cwd: string): string {
+	return path.join(stateDir(cwd), "review.url");
+}
+
+/** The review server's standard output log. */
+export function reviewLogPath(cwd: string): string {
+	return path.join(stateDir(cwd), "review.server.log");
 }
 
 export function readJson<T>(file: string, fallback: T): T {

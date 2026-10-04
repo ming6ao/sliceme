@@ -159,13 +159,6 @@ export default function unitExtension(pi: ExtensionAPI) {
 			wave: Type.Optional(Type.Number({ description: "exec: campaign wave" })),
 			requester: Type.Optional(Type.String({ description: "exec: verifier id" })),
 			limit: Type.Optional(Type.Number({ description: "exec: max jobs to drain" })),
-			serve: Type.Optional(
-				Type.Boolean({ description: "review: start the foreground loopback server" }),
-			),
-			plane: Type.Optional(
-				Type.Array(Type.String(), { description: "review: plane root to serve (repeatable)" }),
-			),
-			port: Type.Optional(Type.Number({ description: "review: bind port" })),
 			poll: Type.Optional(
 				Type.Boolean({ description: "review: print open comments and the newest decision" }),
 			),

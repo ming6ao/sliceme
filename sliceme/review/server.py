@@ -9,7 +9,11 @@ so ``deliver`` reuses the engine's guard and never shells out to the CLI.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import sys
 import threading
+import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +31,7 @@ from .security import (
     mint_token,
 )
 
-__all__ = ["run_server"]
+__all__ = ["open_browser", "run_server", "write_url_file"]
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 STATIC_FILES = {
@@ -42,6 +46,52 @@ CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
     "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
+
+
+def open_browser(url: str) -> bool:
+    """Open ``url`` in the default browser.  Return False when none is available.
+
+    The review server binds loopback and mints a write token, so the URL is a
+    local secret.  A failed open is not an error: the caller prints the URL.
+    """
+    try:
+        webbrowser.get()
+    except webbrowser.Error:
+        return False
+    try:
+        return bool(webbrowser.open(url, new=2))
+    except Exception:  # pragma: no cover - browser launch is host-specific
+        return False
+
+
+def write_url_file(path: Path | str, url: str) -> Path:
+    """Write ``url`` to ``path`` with mode 0600, atomically.
+
+    The file holds the write token, so the mode keeps it private.  The writer
+    renames a same-directory temporary file, so a reader never sees a partial
+    line.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (url + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, target)
+    return target
+
+
+def set_terminal_title(title: str) -> None:
+    """Put ``title`` in the terminal title bar when stdout is a terminal."""
+    if not sys.stdout.isatty():
+        return
+    try:
+        sys.stdout.write(f"\033]0;{title}\007")
+        sys.stdout.flush()
+    except Exception:  # pragma: no cover - terminal specific
+        pass
 
 
 def discover_planes(roots: list[Path]) -> list[Path]:
@@ -267,20 +317,53 @@ def build_server(
 
 
 def run_server(
-    plane_roots: list[Path], *, host: str = "127.0.0.1", port: int = 0
+    plane_roots: list[Path],
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    browser: bool = True,
+    url_file: Path | str | None = None,
 ) -> dict[str, Any]:
     server = build_server(plane_roots, host=host, port=port)
     token = server.token
     actual_host, actual_port = server.server_address[:2]
     url = f"http://{actual_host}:{actual_port}/#token={token}"
-    print("sliceme review server", flush=True)
-    print(f"  planes: {', '.join(server.plane_keys)}", flush=True)
-    print(f"  url:    {url}", flush=True)
-    print("  press Ctrl-C to stop", flush=True)
+    previous_sigterm = None
+    url_path: Path | None = None
     try:
+        # A SIGTERM must clean the URL file like Ctrl-C does, because a
+        # supervisor stops the background server with a terminate signal.
+        # Install the handler before the URL file appears, so the file implies
+        # a live handler.  The whole body is inside the ``try`` so a signal
+        # during the browser open still runs the cleanup.
+        try:
+            previous_sigterm = signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        except (ValueError, AttributeError, OSError):  # pragma: no cover - not main thread
+            previous_sigterm = None
+        url_path = write_url_file(url_file, url) if url_file else None
+        set_terminal_title(f"sliceme review {actual_host}:{actual_port}")
+        print("sliceme review server", flush=True)
+        print(f"  planes: {', '.join(server.plane_keys)}", flush=True)
+        print(f"  url:    {url}", flush=True)
+        if url_path is not None:
+            print(f"  file:   {url_path}", flush=True)
+        opened = open_browser(url) if browser else False
+        if browser and not opened:
+            print("  note:   no browser found; open the url above", flush=True)
+        print("  press Ctrl-C to stop", flush=True)
         server.serve_forever()
     except KeyboardInterrupt:  # pragma: no cover - interactive
         pass
     finally:
         server.server_close()
+        if previous_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+            except (ValueError, OSError):  # pragma: no cover - not main thread
+                pass
+        if url_path is not None:
+            try:
+                url_path.unlink()
+            except FileNotFoundError:
+                pass
     return {"host": actual_host, "port": actual_port, "token": token, "url": url}

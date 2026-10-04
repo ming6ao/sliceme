@@ -9,19 +9,27 @@ These pin the contract from ``docs/review.md``:
 * the loopback server serves a snapshot and refuses an unauthenticated write.
 """
 
+import contextlib
+import io
 import json
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+import webbrowser
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from sliceme import campaign
+from sliceme import surface
 from sliceme.review import diff as review_diff
 from sliceme.review import security
+from sliceme.review import server as review_server
 from sliceme.review.server import build_server
 from sliceme.service import Service
 from sliceme.store import Store
@@ -361,6 +369,82 @@ class ServerTests(ReviewCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_run_server_removes_the_url_file_on_an_early_exit(self):
+        # A supervisor stops the server with a terminate signal. A signal that
+        # arrives before ``serve_forever`` (during the browser open) must still
+        # remove the URL file.
+        path = self.root / "review.url"
+        with mock.patch.object(review_server, "open_browser", side_effect=SystemExit(0)):
+            with self.assertRaises(SystemExit):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    review_server.run_server([self.root], browser=True, url_file=path)
+        self.assertFalse(path.exists())
+
+
+class BrowserAndUrlTests(unittest.TestCase):
+    def test_write_url_file_is_private_and_has_no_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nested" / "review.url"
+            result = review_server.write_url_file(path, "http://127.0.0.1:9/#token=abc")
+            self.assertEqual(result, path)
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), "http://127.0.0.1:9/#token=abc\n"
+            )
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual([p.name for p in path.parent.iterdir()], ["review.url"])
+
+    def test_open_browser_returns_false_without_a_browser(self):
+        with mock.patch(
+            "sliceme.review.server.webbrowser.get", side_effect=webbrowser.Error
+        ):
+            self.assertFalse(review_server.open_browser("http://127.0.0.1:1/#token=x"))
+
+    def test_open_browser_reports_the_open_result(self):
+        with mock.patch("sliceme.review.server.webbrowser.get", return_value=object()):
+            with mock.patch(
+                "sliceme.review.server.webbrowser.open", return_value=True
+            ) as opened:
+                self.assertTrue(review_server.open_browser("http://127.0.0.1:1/#token=x"))
+        opened.assert_called_once()
+
+    def test_open_browser_swallows_a_launch_error(self):
+        with mock.patch("sliceme.review.server.webbrowser.get", return_value=object()):
+            with mock.patch(
+                "sliceme.review.server.webbrowser.open", side_effect=OSError("boom")
+            ):
+                self.assertFalse(review_server.open_browser("http://127.0.0.1:1/#token=x"))
+
+    def test_dispatch_forwards_browser_and_url_file(self):
+        service = SimpleNamespace(root=Path("/tmp/plane"))
+        captured: dict = {}
+
+        def fake_serve(roots, **kwargs):
+            captured["roots"] = roots
+            captured.update(kwargs)
+            return {"url": "u"}
+
+        with mock.patch("sliceme.review.api.serve", side_effect=fake_serve):
+            result = surface._dispatch_review(
+                service, {"serve": True, "no_browser": True, "url_file": "/tmp/u"}
+            )
+        self.assertEqual(result, {"url": "u"})
+        self.assertEqual(captured["roots"], [Path("/tmp/plane")])
+        self.assertFalse(captured["browser"])
+        self.assertEqual(captured["url_file"], "/tmp/u")
+
+    def test_dispatch_opens_the_browser_by_default(self):
+        service = SimpleNamespace(root=Path("/tmp/plane"))
+        captured: dict = {}
+
+        def fake_serve(roots, **kwargs):
+            captured.update(kwargs)
+            return {}
+
+        with mock.patch("sliceme.review.api.serve", side_effect=fake_serve):
+            surface._dispatch_review(service, {"serve": True})
+        self.assertTrue(captured["browser"])
+        self.assertIsNone(captured["url_file"])
 
 
 if __name__ == "__main__":

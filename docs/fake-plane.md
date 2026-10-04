@@ -72,8 +72,17 @@ You can also use the bundled shim.
 ./bin/sliceme review --serve --plane /tmp/sliceme-fake-plane
 ```
 
-The server prints a URL. The URL holds a write token. Open the URL in a browser.
-The server binds to the loopback address only.
+The server prints a URL. The URL holds a write token. The server also opens the
+URL in the default browser when one is available. The server binds to the
+loopback address only.
+
+Use `--no-browser` on a machine with no browser. Use `--url-file` to write the
+URL to a private file.
+
+```bash
+python3 -m sliceme review --serve --plane /tmp/sliceme-fake-plane --no-browser
+python3 -m sliceme review --serve --plane /tmp/sliceme-fake-plane --url-file /tmp/review.url
+```
 
 To select a port, use `--port`.
 
