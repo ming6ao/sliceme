@@ -1,9 +1,9 @@
 # Publishing and releasing
 
 Sliceme ships as **one pi package** (npm) and, secondarily, as a Python wheel.
-The npm tarball is the real distribution unit: it bundles the TypeScript pi
+The npm tarball is the real distribution unit. It bundles the TypeScript pi
 tools, the `/sliceme` command, the GPU broker, and the entire dependency-free
-Python engine, so `pi install npm:sliceme` needs no `pip install` and no
+Python engine. So `pi install npm:sliceme` needs no `pip install` and no
 `sliceme` on `PATH`.
 
 ## What ships where
@@ -17,8 +17,8 @@ The `files` array in `package.json` is an allow-list with negations; keep the
 `!sliceme/__pycache__` / `!sliceme/**/*.pyc` entries so bytecode is not packed.
 
 The Python wheel is engine-only by design (there is no `[project.scripts]`).
-A pip-installed engine resolves its GPU broker from the package tree, so a
-wheel-only deployment must either provide `gpu.command` in a sandbox manifest
+A pip-installed engine resolves its GPU broker from the package tree. A
+wheel-only deployment must therefore provide `gpu.command` in a sandbox manifest,
 or put a `sliceme-gpu` broker on `PATH`.
 
 ## Versioning
@@ -92,7 +92,7 @@ SLICEME_BIN=/path/to/bin/sliceme pi
 
 ## Release checklist
 
-1. `npm test` is green.
+1. `npm test` passes.
 2. `package.json`, `pyproject.toml`, and `sliceme/__init__.py` versions match.
 3. `npm pack --dry-run` shows no `__pycache__`/`.pyc` and includes `bin/`,
    `tools/`, `sliceme/`, `docs/workflow.md`, and `integrations/pi/`.

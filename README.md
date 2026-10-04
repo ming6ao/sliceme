@@ -37,14 +37,15 @@ In pi, run `/sliceme DESIGN.md`. The coordinator then drives the campaign with
 the `sliceme` tool:
 
 ```text
-sliceme start <DESIGN.md>   choose target branch; planner -> dag.json + waves
+sliceme start <DESIGN.md>   choose the target branch; planner -> dag.json + waves
+sliceme status              waves, nodes, and live child state
 sliceme ready               current-wave nodes whose dependencies are done
 sliceme spawn <node>        one-shot pure editor in the campaign worktree
-sliceme record               commit the current wave onto the campaign worktree
-sliceme verify <node>       executor runs checks; a read-only verifier judges
+sliceme record              commit the current wave onto the campaign worktree
+sliceme verify <node>       the executor runs checks; a read-only verifier judges
 sliceme review --serve      local review client (per-commit approval)
-sliceme deliver             merge to target once every commit is approved
-sliceme review --report     deterministic report
+sliceme deliver             merge to the target once every commit is approved
+sliceme report              deterministic report plus the narrative
 ```
 
 ## Docs
@@ -54,8 +55,8 @@ sliceme review --report     deterministic report
 - [Reference](./docs/reference.md) — actions, modules, state, verification.
 - [Workflow](./docs/workflow.md) — the campaign loop and worker contract.
 - [Database](./docs/database.md) — the local plane's SQLite schema and lifecycle.
-- [Observability](./docs/observability.md) — proposed design for run visibility and timing/agent metrics.
-- [Sessions](./docs/sessions.md) — proposed design for suspending and resuming sessions and campaign progress.
+- [Observability](./docs/observability.md) — run visibility and timing/agent metrics (partly implemented).
+- [Sessions](./docs/sessions.md) — suspend and resume sessions and campaign progress.
 - [Local review](./docs/review.md) — the local review client, server, and per-commit approval gate.
 - [Fake plane](./docs/fake-plane.md) — build a fake plane for local review-client tests.
 - [Publishing](./docs/publishing.md) — packaging and release.

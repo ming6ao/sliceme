@@ -31,10 +31,11 @@ sliceme start [--name N] [--path DIR] [--kind worker]
                 [--force] [--no-unit]
 ```
 
-Idempotent bootstrap: writes `.sliceme/config.json` and `.sliceme/state.db`
-(and adds `.sliceme/` to the repo-local `.git/info/exclude`) when the plane is
-missing, then creates a unit for the directory unless it is already inside one.
-Re-running from a unit worktree is a no-op.
+Idempotent bootstrap: Sliceme writes `.sliceme/config.json` and
+`.sliceme/state.db` when the plane does not exist. It also adds `.sliceme/` to the
+repo-local `.git/info/exclude`. It then creates a unit for the directory unless
+the directory is already inside one. Re-running from a unit worktree is a
+no-op.
 
 - `--target BRANCH` with `--target-mode current|existing|new` chooses the
   campaign's **target (feature) branch** once and records it. `current` adopts
@@ -49,8 +50,8 @@ Re-running from a unit worktree is a no-op.
 - `--no-unit` initialises the plane without creating a unit, for a coordinator's
   checkout.
 - `--check NAME=COMMAND` registers a trusted plane check (repeatable).
-- The recorded `default_branch` is captured once at init: origin `HEAD`, else
-  `init.defaultBranch`, else an existing `main`/`master`, else `main`.
+- Sliceme captures the recorded `default_branch` once at init: origin `HEAD`,
+  else `init.defaultBranch`, else an existing `main` or `master`, else `main`.
 
 The programmatic plane-only helper is `Service.init_plane(root, ...)`.
 
@@ -94,9 +95,9 @@ without leaving the target half-merged. Delivery needs the campaign worktree
 branch; run `wave --open` first. It refuses until every accumulated commit has
 a newest unconsumed `approve` (or an `override` records a note).
 
-**The target is never the repository default branch** — `main`, `master`, and
-the recorded default are refused with **no override**. Promotion from a feature
-branch to the default branch stays a human `git` step.
+**The target is never the repository default branch.** Sliceme refuses `main`,
+`master`, and the recorded default, with **no override**. Promotion from a
+feature branch to the default branch stays a human `git` step.
 
 ### `exec`
 
@@ -114,9 +115,9 @@ delegate to it instead of each running the acceptance suite.
 - `--validate`: resolve and validate the project sandbox gate (manifest and,
   with `--gpu-required`, a GPU runner); exits non-zero when the gate fails.
 - `--submit`: enqueue a check job for `--source` (e.g. `node:w1`, `wave:0`),
-  `--commit`, and one or more `--command`.  A job whose
+  `--commit`, and one or more `--command`. A job whose
   `(tree, commands, toolchain, policy, sandbox, source)` fingerprint already
-  passed is returned `cached`; the commands are not re-run.
+  passed comes back as `cached`; the executor does not run the commands again.
 - `--run`: drain the queue with the single runner.  Holds an exclusive `flock`
   on `.sliceme/executor.lock`, so exactly one check vector runs at a time.
 - `--wait`: block until `--job` is terminal (or `--timeout`, default 600s).
@@ -124,9 +125,9 @@ delegate to it instead of each running the acceptance suite.
 - no flag: print queue counts plus queued/running/recent jobs.
 
 Each job runs in a detached scratch worktree at `--commit`, wrapped in the
-resolved sandbox (§4).  The result (status, exit code, output, duration,
-fingerprint) is stored in the `jobs` table.  `--run` first recovers any
-`running` job whose lease expired.
+resolved sandbox (§4). Sliceme stores the result (status, exit code, output,
+duration, fingerprint) in the `jobs` table. `--run` first recovers any `running`
+job whose lease expired.
 
 ### `wave`
 
@@ -136,17 +137,18 @@ sliceme wave --record --wave N [--message M] [--summary S]
 ```
 
 The campaign worktree, split out of `exec` so the executor stays a pure check
-queue. Ownership syntax is `dir:PATH` (a bare path is accepted); non-directory
-specs (`file:`, `symbol:`, …) are rejected when the DAG is projected.
+queue. Ownership syntax is `dir:PATH`; Sliceme also accepts a bare path. Sliceme rejects
+a non-directory spec (`file:`, `symbol:`, …) when it projects the DAG.
 
 - `--open`: create (or reuse) the single **campaign worktree** and branch
-  (`worktree_branch`, for example `sliceme/<target-slug>`), idempotently. The
-  same worktree is used for every wave; it is never recreated between waves.
+  (`worktree_branch`, for example `sliceme/<target-slug>`), idempotently.
+  Sliceme uses the same worktree for every wave and never recreates it between
+  waves.
 - `--record --wave N`: stage the campaign worktree, enforce
   conformance-by-ownership for wave `N`, and create one commit + prepared
   candidate per node. Rejects unowned, ambiguous, or cross-node-rename changes.
-  It diffs against the current `HEAD`, so an earlier wave's committed changes
-  are not re-attributed. Holds the executor lock, so it is serialized with
+  It diffs against the current `HEAD`, so it never re-attributes an earlier
+  wave's committed changes. It holds the executor lock, so it serializes with
   check runs.
 
 ### `attempt`
@@ -161,7 +163,7 @@ sliceme attempt --end   --node w1 [--attempt N] --status ok [--exit-code 0] \
 Persists one subagent run for one node: a planner, a worker, or a verifier.
 The coordinator calls `--begin` before `runSubagent` and `--end` after, and the
 same stream feeds a debounced per-node heartbeat file.  `--end` finds the
-latest running attempt for the node.
+newest running try for the node.
 
 ### `review`
 
@@ -174,17 +176,22 @@ sliceme review [--serve [--plane DIR ...] [--host H] [--port N]]
                [--report] [--narrative TEXT] [--design REF]
 ```
 
-The local review surface (`docs/review.md`). `--serve` runs the foreground
-loopback server (the client is one static page); `--state` prints one snapshot;
-`--diff` prints one file diff; `--poll` prints the open comments and the
-approval state; `--ack` marks one comment delivered; `--comment` records a
-comment; `--decision` appends a decision for `--commit`, or for every
-unapproved commit with `--all`; `--report` writes `.sliceme/<branch-key>.report.md`
-(a deterministic skeleton plus an optional `--narrative`). The snapshot includes the generated report even
-though it is git-ignored. `deliver` refuses a merge until every accumulated
-commit has a newest unconsumed `approve` (or an `override` records a note). The
-server binds `127.0.0.1`/`::1` only and requires an `X-Sliceme-Token` write
-token (carried in the URL fragment).
+See `docs/review.md` for the local review surface.
+
+- `--serve` runs the foreground loopback server; the client is one static page.
+- `--state` prints one snapshot; `--diff` prints one file diff.
+- `--poll` prints the open comments and the approval state.
+- `--ack` marks one comment delivered; `--comment` records a comment.
+- `--decision` appends a decision for `--commit`, or for every unapproved
+  commit with `--all`.
+- `--report` writes `.sliceme/<branch-key>.report.md` (a deterministic skeleton
+  plus an optional `--narrative`).
+
+The snapshot includes the generated report even though git ignores it. `deliver`
+refuses a merge until every accumulated commit has a newest unconsumed
+`approve` (or an `override` records a note). The server binds
+`127.0.0.1`/`::1` only and requires an `X-Sliceme-Token` write token (carried in
+the URL fragment).
 
 ### Sandbox manifests
 
@@ -249,10 +256,10 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
 ```
 
 `state.json` holds only what git and `state.db` cannot express quickly: per-node
-`pending|running|recorded|done|failed|paused`, the last verdict, and attempt
-counts. On conflict, git and `state.db` are authoritative; `state.json` is a
-rebuildable cache.  The `.session.json` descriptor is written only by the pi
-adapter; the engine reads it (`status --resume`, `status --sessions`).
+`pending|running|recorded|done|failed|paused`, the last verdict, and the number
+of tries. On conflict, git and `state.db` are authoritative; `state.json` is a
+rebuildable cache.  Only the pi adapter writes the `.session.json` descriptor;
+the engine reads it (`status --resume`, `status --sessions`).
 
 SQLite tables: `units`, `candidates`, `jobs`, `attempts`, `review_decisions`,
 `comments`.
@@ -275,10 +282,10 @@ SQLite tables: `units`, `candidates`, `jobs`, `attempts`, `review_decisions`,
   collide.
 
 Checks run in a clean detached scratch worktree at the commit and, when a
-sandbox is configured, wrapped accordingly. A passing job for an unchanged
-fingerprint is reused from cache; verification never mutates the candidate or
-the target branch. The newest terminal job for a commit is the review evidence.
-Agent-reported tests are provenance only, never acceptance.
+sandbox exists, wrapped accordingly. The executor serves a passing job
+for an unchanged fingerprint from cache; verification never mutates the
+candidate or the target branch. The newest terminal job for a commit is the
+review evidence. Agent-reported tests are provenance only, never acceptance.
 
 ## 5. Tests
 
@@ -286,12 +293,15 @@ Agent-reported tests are provenance only, never acceptance.
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers directory normalization and subtree conflicts, DAG wave
-projection, conformance-by-ownership at wave record time, the executor queue and
-sandbox profiles, campaign worktree recording, target-branch selection and
-refusal, and end-to-end flows (delivery, idempotency, conflict atomicity,
-failing checks, simulation, cleanup, reporting, per-commit review) plus CLI and
-packaging smoke tests.
+The suite covers these areas:
+
+- directory normalization and subtree conflicts, and the DAG wave projection;
+- conformance-by-ownership at wave record time;
+- the executor queue and the sandbox profiles;
+- campaign worktree recording and target-branch selection;
+- end-to-end flows (delivery, idempotency, conflict atomicity, failing checks,
+  simulation, cleanup, reporting, and per-commit review);
+- CLI and packaging smoke tests.
 
 | File | Covers |
 |---|---|

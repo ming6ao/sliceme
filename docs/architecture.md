@@ -2,27 +2,31 @@
 
 Status: current.
 
-This document describes how Sliceme is put together: the actors, the layered
-engine, the campaign lifecycle, how a DAG becomes waves, how verification is
-pinned to content, how work lands on a feature branch, and how state is
-persisted. It is a map for contributors and operators; the normative details
-live in [reference.md](./reference.md), [guide.md](./guide.md),
-[database.md](./database.md), and [workflow.md](./workflow.md).
+This document describes the parts of Sliceme: the actors, the engine layers,
+the campaign lifecycle, the waves, verification, delivery, and state. It is a
+map for contributors and operators. The normative details live in these
+documents:
 
-An interactive version of the component diagram with pan/zoom, focus, and
-dark/light themes is at [architecture.html](./architecture.html) (generated from
-[architecture.diagram.json](./architecture.diagram.json)).
+- [reference.md](./reference.md) — actions, modules, and state layout.
+- [guide.md](./guide.md) — the model, ownership, and orchestration.
+- [database.md](./database.md) — the SQLite schema and row lifecycle.
+- [workflow.md](./workflow.md) — the campaign loop and the worker contract.
+
+An interactive version of the part diagram with pan and zoom, focus, and
+dark/light themes is at [architecture.html](./architecture.html). The source is
+[architecture.diagram.json](./architecture.diagram.json).
 
 ## 1. In one paragraph
 
-Sliceme turns a design document into a DAG of work, schedules non-conflicting
-nodes into waves, runs one pure-editor worker subagent per node in a single
-campaign worktree, verifies each candidate against a content fingerprint with a
-single sandboxed executor, and delivers the campaign worktree onto a target
-feature branch in one approved merge. A pi coordinator session owns the campaign
-loop; a dependency-free Python engine owns state, isolation, and delivery. The
-DAG (`dag.json`) is the only authored schedule; waves are a pure projection of
-it.
+Sliceme turns a design document into a DAG of work. It packs non-conflicting
+nodes into waves. It runs one pure-editor worker subagent per node in a single
+campaign worktree. One sandboxed executor verifies each candidate against a
+content fingerprint. Sliceme then delivers the campaign worktree onto a target
+feature branch in one approved merge.
+
+A pi coordinator session owns the campaign loop. A dependency-free Python
+engine owns state, isolation, and delivery. The DAG (`dag.json`) is the only
+authored schedule, and waves are a pure projection of it.
 
 ## 2. Design principles and invariants
 
@@ -56,14 +60,15 @@ flowchart LR
 
 - **pi** is the only supported host today. The engine itself is host-agnostic:
   anything that can invoke the CLI gets the same behavior.
-- The **target repository** is the product being built. Sliceme only mutates it
-  through `git` operations (worktrees, commits, merges) and never commits its own
-  plane files (`.sliceme/` is added to the repository's `.git/info/exclude`).
+- The **target repository** is the product being built. Sliceme mutates it only
+  through `git` operations (worktrees, commits, merges). Sliceme never commits
+  its own plane files: it adds `.sliceme/` to the repository's
+  `.git/info/exclude`.
 - **Promotion to the default branch is a human `git` step.** The engine refuses
   to deliver onto `main`, `master`, or the recorded default branch, with no
   override.
 
-## 4. Layered component view
+## 4. Layered part view
 
 ```mermaid
 flowchart TB
@@ -139,16 +144,16 @@ adapter owns state.
 
 ## 5. The action surface and the request path
 
-The engine owns the actions in `surface.ACTIONS`; the pi coordinator adds three
-orchestration verbs (`ready`, `spawn`, `verify`) that drive the engine rather
-than adding actions.
+The engine owns the actions in `surface.ACTIONS`. The pi coordinator adds the
+orchestration verbs `ready`, `spawn`, `record`, `verify`, and `report`; these
+verbs drive the engine and the DAG rather than adding engine actions.
 
 ```mermaid
 flowchart LR
   CLI["sliceme CLI<br/>argparse"] --> DISPATCH
   PIUNIT["sliceme-unit tool"] --> DISPATCH
   PICO["sliceme coordinator tool"] -->|"exec / start / status / ..."| DISPATCH
-  PICO -.->|"ready / spawn / verify"| LOOP["Coordinator loop"]
+  PICO -.->|"ready / spawn / record / verify / report"| LOOP["Coordinator loop"]
   LOOP --> DISPATCH
   DISPATCH["surface.dispatch<br/>_validate + _HANDLERS"] --> HANDLER["handler"]
   HANDLER --> SVC["Service method"]
@@ -207,10 +212,10 @@ sequenceDiagram
   C->>E: deliver when every commit is approved (merge --no-ff into the target)
 ```
 
-The coordinator is **not** a unit: the plane is bootstrapped with `--no-unit`, so
-the coordinator's checkout holds no phantom worktree. Workers are child
-processes of the coordinator and are not detached, so a coordinator crash kills
-them; on resume, a node left `running` is reset and re-spawned.
+The coordinator is **not** a unit. The plane starts with `--no-unit`, so the
+coordinator's checkout holds no phantom worktree. Workers are child processes of
+the coordinator, and the coordinator does not detach them. A coordinator crash
+therefore kills them. On resume, a node left `running` resets and re-spawns.
 
 ## 7. From DAG to waves
 
@@ -236,16 +241,16 @@ flowchart TD
 | `ready(n)` | Every dependency is `done` (verified **and** recorded) and `n` is in the current wave. |
 | `owns` conflict | Equal directories, or one an ancestor of the other. `dir:src/api` overlaps `dir:src` and `dir:src/api/v2`. |
 
-Because every wave records onto the same campaign worktree, a later wave already
-sees the previous wave's files without any merge or rebase; the merge to the
-target branch is deferred to the single `deliver` step. `state.json` caches the
-projected waves; a planner change that alters `owns`/`depends_on` changes the DAG
-fingerprint and triggers a replan.
+Every wave records onto the same campaign worktree. A later wave therefore sees
+the files of the previous wave without a merge or a rebase. Sliceme defers the
+merge to the target branch to the single `deliver` step. `state.json` caches the
+projected waves. A planner change that alters `owns` or `depends_on` changes the
+DAG fingerprint and triggers a replan.
 
 ## 8. Verification: fingerprints and the executor
 
-A verdict is meaningless without the exact inputs it was produced from, so every
-verification is pinned to a fingerprint.
+Sliceme pins every verification to a fingerprint. A verdict is valid only for
+the exact inputs that produced it.
 
 ```mermaid
 flowchart LR
@@ -274,15 +279,15 @@ Two verification paths share this primitive:
 
 1. **Executor path (`verify`).** A verifier submits the node's acceptance vector
    to the executor; `exec --run` drains the queue under the single lock; the
-   verifier judges the recorded job. Dedupe by fingerprint means an unchanged
-   vector is served from cache.
+   verifier judges the recorded job. Dedupe by fingerprint means the executor
+   serves an unchanged vector from cache.
 2. **Delivery path (`deliver`).** The plane's trusted checks run on the merged
-   campaign-worktree tree; a passed fingerprint is reused.
+   campaign-worktree tree. Sliceme reuses a passed fingerprint.
 
 `source` is part of the identity, so a `node:w1` acceptance verdict can never
-collide with a plane check. The sandbox digest and executor version are folded
-in, so tightening isolation or changing how checks run invalidates cached
-verdicts.
+collide with a plane check. Sliceme folds in the sandbox digest and the executor
+version. A stricter sandbox or a change in how checks run therefore invalidates
+cached verdicts.
 
 ### The single executor
 
@@ -350,8 +355,8 @@ sequenceDiagram
 Delivery is deterministic and idempotent: re-running skips a target that already
 contains the campaign worktree.  For a generic non-campaign plane with no
 worktree branch, `deliver` falls back to ordered per-candidate merges.  The
-`_integration` worktree is the only place the target branch is mutated by the
-engine, and the default branch is never a valid target.
+engine mutates the target branch only in the `_integration` worktree. The
+default branch is never a valid target.
 
 ## 10. State and persistence
 
@@ -427,6 +432,9 @@ erDiagram
   <branch-key>.dag.json            # canonical plan (never committed)
   <branch-key>.state.json          # coordinator cache: node -> status, waves, sandbox digest (rebuildable)
   <branch-key>.report.md           # deterministic report (kept on cleanup)
+  <branch-key>.session.json        # adapter-written suspend/resume descriptor
+  <branch-key>.control.json        # cooperative pause flag
+  <branch-key>.progress_<node>.json# per-node subagent heartbeat
   <branch-key>.worker_<id>.log     # one log per worker id
   <branch-key>.events.jsonl        # append-only audit log (extension)
   worktrees/                       # the single campaign worktree (+ transient unit worktrees)
@@ -448,6 +456,8 @@ stateDiagram-v2
   pending --> running: spawn (current wave, deps done)
   running --> recorded: wave --record --wave N committed the node
   running --> failed: worker error or exit != 0
+  running --> paused: suspend aborts the worker
+  paused --> recorded: wave --record on resume
   recorded --> done: verifier PASS
   recorded --> failed: verifier FAIL
   failed --> running: re-spawn (attempt + 1, bounded by max_attempts)
@@ -464,8 +474,8 @@ stateDiagram-v2
 | Merge conflict at `deliver` | Merge aborted; structured findings returned; the target branch is never half-merged. |
 | Combined checks fail after merge | Target branch reset to its pre-merge tip; candidates not landed. |
 | Default-branch target | Refused at `start` and at `deliver`; there is no override. |
-| Orchestrator crash | Non-detached workers die; on resume, `running`/`recorded` nodes reset to `pending`; the campaign worktree is reused; expired executor leases requeue. |
-| Concurrent spawns completing together | Coordinator state is a rebuildable cache; git and `state.db` are the source of truth. (The proposed single-writer state store in [observability.md](./observability.md) §11.2 removes the read-modify-write race.) |
+| Orchestrator crash | Non-detached workers die. On resume, `running` and `recorded` nodes become `paused` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. Expired executor leases requeue. |
+| Concurrent spawns completing together | Coordinator state is a rebuildable cache; git and `state.db` are the source of truth. (The proposed single-writer state store in [observability.md](./observability.md) §9, suggestion 2, removes the read-modify-write race.) |
 
 Bounding knobs: `concurrency` (wave size), `max_attempts` per node, per-command
 timeouts, and the executor's single-runner serialization.
@@ -516,7 +526,7 @@ campaign".
 - [reference.md](./reference.md) — actions, modules, state layout, verification, tests.
 - [workflow.md](./workflow.md) — the campaign loop and the worker contract.
 - [database.md](./database.md) — the SQLite schema and row lifecycle.
-- [observability.md](./observability.md) — proposed live progress and metrics.
-- [sessions.md](./sessions.md) — proposed suspend/resume and checkpoints.
+- [observability.md](./observability.md) — run visibility and timing/agent metrics (partly implemented).
+- [sessions.md](./sessions.md) — suspend and resume, checkpoints, and the campaign registry.
 - [review.md](./review.md) — the local review client, server, and per-commit approval gate.
 - [publishing.md](./publishing.md) — packaging and release.

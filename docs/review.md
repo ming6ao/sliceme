@@ -1,9 +1,9 @@
 # Sliceme local review design
 
-Status: implemented. Revised for per-commit approvals: commits accumulate while
-the campaign runs, a human approves them one by one or all at once, the report
-is included even though it is git-ignored, and the coordinator proceeds to
-delivery automatically once every commit is approved.
+Status: implemented. Commits accumulate while the campaign runs. A human
+approves them one by one or all at once. Sliceme includes the report even though
+git ignores it. The coordinator proceeds to delivery automatically once a human
+approves every commit.
 
 A human reviews the unmerged commits from the campaign worktree in a local
 browser. The reviewer reads the diff and the report, writes comments, and
@@ -24,7 +24,7 @@ In:
 - Comments that attach to a commit, the report, a file, and a line range.
 - The verification evidence for each reviewed commit.
 - A non-blocking review: workers never wait for the human, and the coordinator
-  proceeds automatically when every commit is approved.
+  proceeds automatically when a human approves every commit.
 - Several planes under configured roots.
 
 Out:
@@ -116,8 +116,8 @@ acknowledge cycle.
 1. The `comment` action inserts a row with status `open`.
 2. The extension runs `sliceme review --poll` at session start, between waves,
    and on a timer.
-3. The poll returns the open comments, the unapproved commits, and whether every
-   commit is approved.
+3. The poll returns the open comments, the unapproved commits, and whether a
+   human approves every commit.
 4. The extension sends each comment to the session with `pi.sendUserMessage`.
 5. The extension runs `sliceme review --ack --comment <id>` for each comment.
    The ack sets the status to `delivered`.
@@ -138,7 +138,7 @@ Delivery proceeds only when every commit in the packet has a newest, unconsumed
 refuses with a `not-approved` finding. The engine never asks for approval again
 on its own.
 
-- A new commit is unapproved by default, so a later commit re-opens the gate. An
+- A new commit starts unapproved, so a later commit re-opens the gate. An
   approval can never outlive the diff it approved.
 - A `request_changes` row for a commit supersedes an earlier `approve` for that
   commit.
@@ -147,8 +147,8 @@ on its own.
   review.
 
 The coordinator does not prompt for a final approval. The browser approvals are
-the trigger: when `review --poll` reports that every commit is approved and every
-wave is done, the coordinator runs `deliver`.
+the trigger: when `review --poll` reports that a human approves every commit and
+every wave has completed, the coordinator runs `deliver`.
 
 ## 7. HTTP surface
 
@@ -167,10 +167,11 @@ Query parameters:
 - `/api/state?plane=<plane>&commit=<sha>`
 - `/api/diff?plane=<plane>&commit=<sha>&file=<path>`
 
-The snapshot returns the plane list, the pinned tips, the commit list with its
-approval state, the file index, the report, the comments, and the verification
-evidence. The client polls this route every few seconds. The design uses no
-Server-Sent Events, so it needs no stream token and no replay logic.
+The snapshot returns the plane list, the pinned tips, and the commit list with
+its approval state. It also returns the file index, the report, the comments, and
+the verification evidence. The client polls this route every few seconds. The
+design uses no Server-Sent Events, so it needs no stream token and no replay
+logic.
 
 The action route accepts a JSON body: `{"action": "...", "params": {...}}`. The
 route accepts only three actions: `comment`, `decision`, and `deliver`. The
@@ -283,8 +284,9 @@ travels in the snapshot because it is one small Markdown file.
 
 ## 9. Delivery
 
-The coordinator triggers delivery when every wave is done and every commit is
-approved. The design orders delivery to avoid a race with the campaign loop:
+The coordinator triggers delivery after every wave completes and a human
+approves every commit. The design orders delivery to avoid a race with the
+campaign loop:
 
 1. **Quiesce.** The poll runs only while the agent is idle, so no worker commits
    mid-delivery.
@@ -299,7 +301,7 @@ Preconditions, enforced in `Service`:
 - every wave is `done`, or an `override` decision records a note;
 - the campaign worktree has no uncommitted changes;
 - the target worktree is clean;
-- every reviewed commit is approved, or an override records a note;
+- a human approved every reviewed commit, or an override records a note;
 - if `policy.require_verification`, no candidate is `failed` or `blocked`,
   unless an override records a note.
 
@@ -348,7 +350,8 @@ rests on disk.
 4. The foreground server, the security checks, and the read-only client.
 5. The action route, the browser approval, and the delivery lock.
 6. The `comment` action and the `review --poll` / `--ack` consumer.
-7. Automatic delivery when every commit is approved, retention, and cleanup.
+7. Automatic delivery after a human approves every commit, retention, and
+   cleanup.
 
 ## 13. Trade-offs and accepted risks
 
@@ -364,8 +367,8 @@ An explicit concurrency model. A larger test surface.
 Accepted risks:
 
 - A human can change the worktree or branch with `git` during a review. A new
-  commit is unapproved by default, so the gate re-opens. The clean check catches
-  a dirty tree. Sliceme does not own the user's shell.
+  commit starts unapproved, so the gate re-opens. The clean check catches a
+  dirty tree. Sliceme does not own the user's shell.
 - The server is POSIX only.
 - A foreground server needs a terminal. The user must keep that terminal open.
 

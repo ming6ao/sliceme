@@ -2,14 +2,14 @@
 
 Status: current.
 
-This document describes the local plane's SQLite database: where it lives, how
-it is opened and evolved, every table and column, how rows are created and
-consumed across the campaign lifecycle, and the invariants that keep it a
-consistent audit trail.
+This document describes the local SQLite database of the plane. It covers the
+location, the connection, the schema evolution, every table and column, the row
+lifecycle, and the invariants. Those invariants keep the database a consistent
+audit trail.
 
 Implementation: `sliceme/store.py`. Business rules live in `sliceme/service.py`,
 `sliceme/integrate.py`, and `sliceme/executor.py`; this module owns persistence
-only. The plane directory layout is described in `docs/reference.md` §3.
+only. `docs/reference.md` §3 describes the plane directory layout.
 
 ## 1. Scope
 
@@ -17,12 +17,12 @@ The database holds what git and the plane files cannot express quickly:
 
 - the work units and the commits they offer;
 - the single executor's check queue, its fingerprints, and its results;
-- the per-subagent attempt metrics;
+- the metrics of each subagent try;
 - the review decisions and comments.
 
 It deliberately does **not** hold the plan. `dag.json` and `state.json` are
-files under `.sliceme/`; the plan is authoritative there and is read by the
-engine. `state.json` is a rebuildable cache, and git plus this database win on
+files under `.sliceme/`; the plan is authoritative there, and the engine reads
+it. `state.json` is a rebuildable cache, and git plus this database win on
 conflict. The suspend/resume descriptor is a file too; the database keeps no
 projection of it.
 
@@ -47,8 +47,8 @@ the schema, then request threads open with `migrate=False`.
 ## 3. Schema evolution
 
 Schema creation is idempotent: every statement uses `CREATE TABLE IF NOT
-EXISTS` and `CREATE INDEX IF NOT EXISTS`. Opening an older plane adds only what
-is missing.
+EXISTS` and `CREATE INDEX IF NOT EXISTS`. Opening an older plane adds only the
+missing parts.
 
 Structural changes go through `Store._migrate`, which calls `_ensure_columns`
 to add columns that predate the current schema:
@@ -79,7 +79,7 @@ comments          (standalone; keyed by branch_key)
 - A **job** is a check vector queued for the single executor. It carries its own
   fingerprint and result; the review evidence reads the newest terminal job for
   a commit.
-- An **attempt** is one subagent run and its metrics.
+- A **try** holds one subagent run and its metrics.
 - A **review decision** is one approval or rejection for one commit.
 - A **comment** is one review comment on a commit or the report.
 
@@ -110,7 +110,7 @@ which sets `landed`). Read by `list_units`, `get_unit`, `require_unit`,
 `Service.status`, `campaign.build_skeleton`, and `Service.gc`.
 
 `gc` prunes worktrees and branches for units in state `landed` or `closed`. Only
-`landed` is written today; `closed` is reserved.
+`landed` occurs today; Sliceme reserves `closed`.
 
 ### 5.2 `candidates`
 
@@ -129,8 +129,8 @@ Index: `idx_candidates_status`.
 
 Created by `Service._record_wave_commits`, one per changed node in a wave (with
 `node` set). The campaign worktree accumulates commits, so a later wave adds
-rows and never rewrites an earlier wave's row. The branch and the base commit
-are read from the unit join, so the table does not duplicate them.
+rows and never rewrites an earlier wave's row. The unit join provides the branch
+and the base commit, so the table does not duplicate them.
 
 Updated by `integrate._mark_delivered`, which sets `status='landed'` without
 rewriting `head_commit` (the node commit is provenance).
@@ -169,10 +169,9 @@ add `unit_name`, `unit_branch`, `worktree`, and `unit_base_commit`),
 
 Indexes: `idx_jobs_status`, `idx_jobs_fingerprint`.
 
-Created by `Executor.submit` through `Store.create_job` after resolving the
-sandbox and computing the fingerprint. `Store.find_passed_job` short-circuits a
-submit whose fingerprint already passed, so no new row is inserted on a cache
-hit.
+Created by `Executor.submit` through `Store.create_job` after it resolves the
+sandbox and computes the fingerprint. `Store.find_passed_job` short-circuits a
+submit whose fingerprint already passed, so no new row appears on a cache hit.
 
 Updated by `Executor.run_job` (marks `running` with `started_at` and
 `runner_pid`, then terminal with `finished_at`, `duration`, `exit_code`,
@@ -263,20 +262,20 @@ Created by `Service.review_comment`. `Service.review_poll` reads the `open` rows
 for the relay; `Service.review_ack` sets `delivered`. The queue is at-least-once:
 a lost ack repeats a comment, never loses it.
 
-## 6. Lifecycle: how data is created and used
+## 6. Row lifecycle
 
 1. **Plane bootstrap.** `start` writes `.sliceme/config.json` and opens
-   `Store`, which creates the schema. No domain rows are inserted.
+   `Store`, which creates the schema. Sliceme inserts no domain rows.
 2. **Unit.** `start` or `wave --open` creates a worktree and branch, then
    inserts a `units` row with `state='working'`.
 3. **Wave record.** `wave --record --wave N` runs conformance-by-ownership on
    the campaign worktree and inserts one `candidates` row per changed node with
    `status='prepared'`.
 4. **Verification.** The executor inserts `jobs` rows from `exec --submit` and
-   updates them through `exec --run`; a passing fingerprint is served from
-   cache. `Service.review_snapshot` reads the newest terminal job per commit as
+   updates them through `exec --run`; the cache serves a passing fingerprint.
+   `Service.review_snapshot` reads the newest terminal job per commit as
    evidence.
-5. **Delivery.** When every wave is done and every commit is approved,
+5. **Delivery.** When every wave completes and a human approves every commit,
    `deliver` merges the campaign worktree branch into the target with
    `git merge --no-ff`, then `_mark_delivered` sets the candidates and their
    unit to `landed`.
@@ -320,9 +319,8 @@ a lost ack repeats a comment, never loses it.
   executor commits explicitly after recording results.
 - `claim_next_job` and `recover_orphan_jobs` use `tx()`, so job state
   transitions are atomic.
-- Foreign keys are enabled. There are no cascade rules, and rows are not
-  deleted, so referential integrity is preserved by construction rather than by
-  cleanup.
+- Foreign keys are on. There are no cascade rules, and Sliceme deletes no rows,
+  so referential integrity holds by construction rather than by cleanup.
 - WAL plus `busy_timeout` allows a coordinator, subagents, and a second
   terminal to read the same plane safely.
 - The unique constraints that matter for correctness are `units.name` and
@@ -340,7 +338,7 @@ a lost ack repeats a comment, never loses it.
 - Worker logs are files, one per node.
 - The report is a Markdown file, included in the review snapshot.
 
-## 11. Suspend/resume and attempts
+## 11. Suspend/resume and subagent tries
 
 `attempts` persists per-subagent timings and agent metrics (turns, tool calls,
 tokens, cost, last tool, last activity), written through the `attempt --begin` /
@@ -355,8 +353,9 @@ descriptor is the single source of truth.
 
 `review_decisions` is an append-only approval log: the newest row for a commit
 wins, and `consumed_at` marks a merge that already used the approval. The row
-binds to one commit hash, so `Service.deliver` refuses until every accumulated
-commit is approved. `comments` is the review queue: the pi relay reads `open`
+binds to one commit hash, so `Service.deliver` refuses until a human approves
+every accumulated commit. `comments` is the review queue: the pi relay reads
+`open`
 rows with `review --poll`, sends them to the coordinator session, and marks them
 `delivered` with `review --ack`. `gc` prunes rows for campaigns without a
 descriptor older than the retention window (`policy.review_retention_days`,

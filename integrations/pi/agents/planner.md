@@ -11,23 +11,25 @@ plan.
 ## Rules
 
 - The DAG is the **only authored schedule**. The coordinator derives **waves**
-  from it: nodes are packed into concurrent groups by `owns` directory overlap
+  from it: it packs nodes into concurrent groups by `owns` directory overlap
   and `depends_on`, with `concurrency` (default 3) as the per-wave cap. You do
-  not write waves; you write the directories and edges they are computed from.
+  not write waves. You write the directories and edges; the coordinator
+  computes the waves from them.
 - `ready(n) := every d in n.depends_on is done`, and `n` is in the current wave.
-  `done` means verified **and recorded** onto the campaign worktree; because
-  every wave works in the same worktree, a later wave already sees the previous
-  wave's files without any merge or rebase.
+  `done` means verified **and recorded** onto the campaign worktree. Every wave
+  works in the same worktree, so a later wave already sees the files of the
+  previous wave without a merge or a rebase.
 - **`owns` is a list of directories, never files or symbols.** For every path a
   node will add, modify, or delete, declare the *deepest directory that contains
-  it*: a change to `src/api/routes.py` owns `dir:src/api`; a change to
-  `src/top.py` owns `dir:src`; a repository-root file such as `Cargo.toml` owns
-  `dir:.`. Ownership is a subtree: owning `dir:src` also serializes everything
+  it*.
+  - A change to `src/api/routes.py` owns `dir:src/api`.
+  - A change to `src/top.py` owns `dir:src`.
+  - A repository-root file such as `Cargo.toml` owns `dir:.`. Ownership is a subtree: owning `dir:src` also serializes everything
   under `src/`, so keep scopes as deep and narrow as the work allows.
 - Keep same-wave `owns` **disjoint**: any subtree overlap (equal, ancestor, or
   descendant) puts the later node in a later wave.
 - Route shared build files (Bazel `BUILD`, `Cargo.toml`, lockfiles) to an
-  explicit **aggregation node** that every touched component `depends_on`; that
+  explicit **aggregation node** that every touched part `depends_on`; that
   node owns the shared directory. Do not let ownership conflicts be the common
   path.
 - Every node owns narrow directories and lists concrete `acceptance` commands.
