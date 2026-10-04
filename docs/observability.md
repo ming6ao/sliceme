@@ -10,9 +10,19 @@ Status: partly implemented. The durable half landed with `docs/sessions.md`:
   planner, each worker, and each verifier
   (`integrations/pi/coordinator.ts`).
 
-Still proposed: the live in-process display (Priority 0), the `progress`
-projection and stalled detection (Priority 1), and the campaign-economics
-polish (Priority 2).
+The live multi-subagent view (Priority 0) also landed:
+
+- the pure `renderProgress`/`renderAgentLine` renderer in `common.ts`;
+- one in-process progress registry and one render timer in the coordinator;
+- a per-event `onProgress` feed and a `spawn` row streamed through `onUpdate`.
+
+The state-write race also landed:
+
+- one in-process `CampaignStateStore` per campaign branch owns `state.json` and
+  flushes it atomically, so parallel spawn completions keep their node status.
+
+Still proposed: the `progress` action and durable stalled detection
+(Priority 1), and the campaign-economics polish (Priority 2).
 
 This document describes how to make a running campaign observable. The primary
 goal is a **live progress display for the parallel worker subagents**. A second
@@ -69,18 +79,22 @@ from a second terminal:
 
 ## 3. Gaps
 
-1. **No live updates.** `spawnNode` awaits `runSubagent`, and the widget renders
-   only when `status` or `start` runs. The widget is stale while a worker runs.
-2. **No live consumer.** The heartbeat holds the current tool call and the last
-   assistant text, but no code consumes `onProgress`.
+1. **Live updates landed.** The coordinator now owns one progress registry and
+   one render timer. The timer recomposes the widget at about 4 Hz, so the view
+   stays current while a worker runs.
+2. **A live consumer landed.** `runTracked` registers each agent and folds the
+   `onProgress` snapshots into it. `spawn` also streams its own row through
+   `onUpdate`.
 3. **No combined projection.** Nothing joins work-unit status, wave status,
-   timings, executor state, agent metrics, and heartbeats into one snapshot.
-   The proposed `progress` action would do that.
-4. **`state.json` has no timestamps**, and each spawn reads, modifies, and
-   writes it. Parallel spawn completions can lose updates (see §9,
+   timings, executor state, agent metrics, and heartbeats into one durable
+   snapshot. The proposed `progress` action would do that.
+4. **One state store landed.** `state.json` still has no timestamps, but one
+   in-process `CampaignStateStore` now owns the file. Parallel spawn
+   completions share one state object, so they no longer lose updates (see §9,
    suggestion 2).
-5. **No stalled detection.** A dead worker heartbeat simply stops. Nothing
-   labels it.
+5. **Durable stalled detection is not implemented.** A dead worker heartbeat
+   simply stops. The live widget marks a silent row `⚠ stalled` from its age,
+   but the durable projection has no `stalled` field yet.
 
 ## 4. Design principles
 
@@ -103,13 +117,13 @@ from a second terminal:
 
 | # | Feature | Status | Where |
 |---|---|---|---|
-| P0.1 | Normalized progress events from the `pi --mode json` stream | Partial: `runSubagent` reduces into a `SubagentProgress` snapshot | `common.ts::runSubagent` |
-| P0.2 | One in-process progress registry for all running subagents | Proposed | coordinator extension |
-| P0.3 | One render timer (~4–10 Hz) that composes the widget | Proposed | coordinator extension |
-| P0.4 | Per-subagent row: state, node, current tool and argument, elapsed | Proposed | coordinator extension |
-| P0.5 | Campaign aggregate line: done/total, wave k/n, elapsed, totals | Proposed | coordinator extension |
-| P0.6 | `spawn` streams its own row through `onUpdate` | Proposed (`onUpdate` is ignored today) | coordinator extension |
-| P0.7 | Width-safe, theme-aware string renderer | Proposed | coordinator extension |
+| P0.1 | Normalized progress events from the `pi --mode json` stream | Implemented: `runSubagent` reduces into a `SubagentProgress` snapshot and emits it per event | `common.ts::runSubagent` |
+| P0.2 | One in-process progress registry for all running subagents | Implemented (`liveAgents`) | coordinator extension |
+| P0.3 | One render timer (~4–10 Hz) that composes the widget | Implemented (`LIVE_RENDER_MS = 250`) | coordinator extension |
+| P0.4 | Per-subagent row: state, node, current tool and argument, elapsed | Implemented (`renderAgentLine`) | `common.ts`, coordinator extension |
+| P0.5 | Campaign aggregate line: done/total, wave k/n, elapsed, totals | Implemented | `common.ts::renderProgress` |
+| P0.6 | `spawn` streams its own row through `onUpdate` | Implemented | coordinator extension |
+| P0.7 | Width-safe, theme-aware string renderer | Implemented (`renderProgress`) | `common.ts` |
 
 **Priority 1 — durable and queryable (crash-safe, second terminal).**
 
@@ -163,27 +177,28 @@ The in-memory `SubagentProgress` uses camelCase (`toolCalls`, `lastTool`). Only
 the file uses snake_case. Per-node files avoid write races between parallel
 spawns and are cheap for the engine to read.
 
-Stalled detection remains proposed: a heartbeat whose `updated_at` is older than
-`max(5 s, 2 × poll interval)` becomes `stalled` (§7.3).
+Durable stalled detection remains proposed: a heartbeat whose `updated_at` is
+older than `max(5 s, 2 × poll interval)` becomes `stalled` in the projection
+(§8.3). The live widget already marks a silent row `⚠ stalled`.
 
-## 7. The live pipeline (proposed)
+## 7. The live pipeline (landed)
 
-Only the `SubagentProgress` reducer, the heartbeat writer, and the
-`attempt --begin`/`--end` calls exist today. The registry and the render timer
-remain proposed.
+The `SubagentProgress` reducer, the heartbeat writer, the
+`attempt --begin`/`--end` calls, the live registry, and the render timer exist
+today.
 
 ```text
 runSubagent(w1) ─┐
 runSubagent(w2) ─┼─▶ processLine reducer ─▶ SubagentProgress snapshot
 runSubagent(w3) ─┘                          │
-                                            ├─▶ onProgress            (no consumer yet)
+                                            ├─▶ onProgress            (live registry)
                                             ├─▶ HeartbeatWriter       (≤1 Hz)
                                             │     └─ .sliceme/<key>.progress_<node>.json
                                             └─▶ attempt --begin/--end (via runTracked)
 
-proposed:
+landed:
   SubagentProgress ─▶ LiveProgress (one record per try)
-                          ├─▶ LiveRenderer (one timer, ~4–10 Hz)
+                          ├─▶ LiveRenderer (one timer, ~4 Hz)
                           │     ├─ ctx.ui.setWidget("sliceme", lines)
                           │     └─ onUpdate (each spawn's own call)
                           └─▶ the same debounced heartbeat writer
@@ -275,21 +290,22 @@ The node still reports `running`, but the display shows `⚠ stalled` and the ag
 of the last event. Stalled is a display state. It does not change `state.json`
 and does not fail a node by itself.
 
+The live widget implements the display rule. The durable `stalled` field in the
+proposed `progress` projection remains open.
+
 ## 9. Architectural suggestions
 
 These suggestions follow impact order.
 
-1. **Introduce one shared progress registry per coordinator process.** Each
-   `spawnNode` closure owns a `state` object and renders the widget on demand.
-   One registry with one render timer prevents several workers from overwriting
-   each other. Not implemented.
+1. **Introduce one shared progress registry per coordinator process.** One
+   registry (`liveAgents`) and one render timer now compose the widget, so
+   parallel workers never overwrite each other. Implemented.
 
-2. **Centralize campaign-state mutation.** `spawnNode` reads
-   `.sliceme/<key>.state.json`, mutates one node, and writes the whole file when
-   `runSubagent` resolves. Parallel spawns race, and the second writer can drop
-   the new status of the first node. Replace the read-modify-write with one
-   in-process `CampaignStateStore` guarded by an async mutex that flushes
-   atomically. Not implemented.
+2. **Centralize campaign-state mutation.** One in-process
+   `CampaignStateStore` per campaign branch now owns `.sliceme/<key>.state.json`.
+   Every caller gets the same state object, so a parallel spawn completion
+   cannot drop another one. `store.save` flushes it with an atomic write
+   (temporary file plus rename). Implemented.
 
 3. **Normalize the subagent event stream once.** Parse `pi --mode json` in one
    place into progress events, then reduce. The reducer exists; the separate
@@ -318,10 +334,9 @@ These suggestions follow impact order.
 
 ## 10. Phased delivery
 
-**Phase 0 — live in-process display (P0). Not started.** Add the normalized
-events and an `onProgress` consumer, the `LiveProgress` registry, and the render
-timer. Replace `widget` with `renderProgress`, and stream `onUpdate` from
-`spawn`.
+**Phase 0 — live in-process display (P0). Done.** The normalized events and
+the `onProgress` consumer, the `LiveProgress` registry, and the render timer
+landed. `renderProgress` replaced `widget`, and `spawn` streams `onUpdate`.
 
 **Phase 1 — durable heartbeats and tries (P1). Mostly done.** Landed: the
 heartbeat files, the `attempts` table, the `attempt` action, the
@@ -360,27 +375,36 @@ Landed:
 - `tests/test_pi_package.py` asserts that `attempt` appears in
   `surface.ACTIONS` and `SLICEME_ACTIONS`, that `runSubagent` accepts a
   heartbeat, and that the heartbeat file uses the snake_case keys.
+- `tests/test_pi_package.py::test_live_progress_view_is_wired` asserts the
+  registry, the timer, the `onProgress` consumer, and the `onUpdate` stream.
+- `tests/render_progress_test.mjs` drives `renderProgress` with fixed snapshots
+  and widths: markers, durations, truncation, stalled rows, and the empty
+  snapshot. `test_pi_package.py` runs it through the Node type stripper.
+- `tests/state_store_test.mjs` drives `CampaignStateStore`: two callers share
+  one state object and both mutations land, `save` writes atomically, and
+  `save(false)` leaves the file alone. `test_pi_package.py` runs it the same
+  way.
 
 Proposed:
 
 - `tests/test_progress.py` with known timestamps: durations, queue wait, wave
   rollups, totals, heartbeat merge, and stalled detection.
-- A `renderProgress` unit test with fixed snapshots and widths: markers,
-  truncation, ETA suppression below two finished nodes, and stalled rows.
+- Estimated-time-of-arrival suppression below two finished nodes.
 - `tests/test_executor.py`: a timing assertion that the executor records
   `duration`.
 
 ## 13. Risks and decisions
 
-- **Widget updates during a pending tool call.** Confirm with the installed pi
-  version that a timer may call `ctx.ui.setWidget` while a tool call is
-  outstanding. If not, `onUpdate` still covers the session.
+- **Widget updates with a pending tool call.** The render timer calls
+  `ctx.ui.setWidget` while a tool call waits. Each `spawn` also streams
+  `onUpdate`, so the row still arrives if a timer update is lost.
 - **Log volume and backpressure.** Debounce heartbeat writes (≤1 Hz plus a
   final flush) and keep consuming the JSON stream, because pi stalls when the
   pipe fills. Do not let rendering slow the line reader.
-- **Lost updates.** Without the state store of §9 suggestion 2, parallel spawn
-  completions can clobber `state.json`. Fix this before enabling many parallel
-  spawns.
+- **Lost updates.** The `CampaignStateStore` of §9 suggestion 2 now gives every
+  caller one shared state object and flushes it atomically, so parallel spawn
+  completions keep each other's node status. Two coordinator processes in one
+  checkout remain out of scope.
 - **Token accounting.** `message_update.usage` is cumulative per assistant
   response. Sum the latest value per `message_end`, not every delta.
 - **Metric sensitivity.** Token and cost data live under the git-excluded

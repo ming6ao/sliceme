@@ -41,6 +41,15 @@ def _frontmatter(text: str) -> dict[str, str]:
     return data
 
 
+def _node_strip_supported(node: str) -> bool:
+    """Whether this Node build can strip TypeScript types at run time (22.6+)."""
+    version = subprocess.run(
+        [node, "--version"], capture_output=True, text=True
+    ).stdout.strip()
+    match = re.match(r"v(\d+)\.(\d+)", version)
+    return bool(match) and (int(match.group(1)), int(match.group(2))) >= (22, 6)
+
+
 class PiPackageTests(unittest.TestCase):
     def test_workflow_doc_exists(self):
         # The workflow lives in docs/workflow.md (human docs); the in-session
@@ -314,6 +323,80 @@ class PiPackageTests(unittest.TestCase):
         )
         if result.returncode == 3:
             self.skipTest(result.stderr.strip() or "pi runtime or typescript not available")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_live_progress_view_is_wired(self):
+        # The live multi-subagent view (docs/observability.md Priority 0): the
+        # coordinator owns one registry and one render timer, the reducer reaches
+        # it through `onProgress`, and `spawn` streams its own row via `onUpdate`.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        common = PI_COMMON.read_text(encoding="utf-8")
+        for needle in (
+            "liveAgents",
+            "ensureLiveTimer",
+            "stopLiveTimer",
+            "renderProgress",
+            "renderAgentLine",
+            "onProgress:",
+            "onUpdate",
+        ):
+            self.assertIn(needle, coordinator, needle)
+        self.assertIn("export function renderProgress", common)
+        self.assertIn("export function renderAgentLine", common)
+        self.assertIn("export function truncateToWidth", common)
+        # Every recognized stream event reaches the live view; only the heartbeat
+        # file stays debounced.
+        self.assertIn("emitProgress", common)
+        # The timer stops on session shutdown.
+        self.assertIn("stopLiveTimer()", coordinator)
+
+    def test_render_progress_unit_test(self):
+        # The renderer is pure, so a Node harness drives it with fixed snapshots
+        # and widths. Node 22.6+ strips the TypeScript types at run time.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "render_progress_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_campaign_state_store_is_wired(self):
+        # One in-process store owns `state.json`; parallel spawn completions share
+        # the state object, so none of them drops another's node status
+        # (docs/observability.md §9 suggestion 2).
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        common = PI_COMMON.read_text(encoding="utf-8")
+        self.assertIn("class CampaignStateStore", common)
+        self.assertIn("export function writeJson", common)
+        self.assertIn("function stateStore", coordinator)
+        self.assertIn("new CampaignStateStore(file)", coordinator)
+        # No read-modify-write of the state file remains in the coordinator.
+        self.assertNotIn("readJson(stateFile", coordinator)
+        self.assertNotIn("writeJson(stateFile", coordinator)
+        self.assertNotIn("writeJson(statePath", coordinator)
+
+    def test_state_store_unit_test(self):
+        # The store keeps two parallel updates, persists atomically, and honors
+        # `save(false)` after delivery removed the file.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "state_store_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_docs_document_the_session_actions(self):

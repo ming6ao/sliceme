@@ -45,16 +45,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
 	branchKey,
+	CampaignStateStore,
 	controlPath,
 	dagPath,
 	heartbeatPath,
 	logEvent,
 	logPath,
 	readJson,
+	renderAgentLine,
+	renderProgress,
 	reviewLogPath,
 	reviewUrlPath,
 	runSliceme,
@@ -65,7 +69,13 @@ import {
 	statePath,
 	writeJson,
 } from "./common.ts";
-import type { ReviewServerHandle, SubagentResult } from "./common.ts";
+import type {
+	ProgressAgent,
+	ProgressSnapshot,
+	ReviewServerHandle,
+	SubagentProgress,
+	SubagentResult,
+} from "./common.ts";
 
 export const CAMPAIGN_ACTIONS = [
 	"start",
@@ -436,8 +446,82 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	function load(ctx: ExtensionContext, branch: string): { dag: Dag; state: CampaignState } {
 		return {
 			dag: readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] }),
-			state: readJson<CampaignState>(statePath(ctx.cwd, branch), { nodes: {} }),
+			state: stateStore(ctx, branch).read<CampaignState>(),
 		};
+	}
+
+	// One store per campaign branch. Every state mutation in this process goes
+	// through it, so parallel `spawn` completions cannot drop each other's writes
+	// (`docs/observability.md` §9 suggestion 2).
+	const stateStores = new Map<string, CampaignStateStore>();
+
+	function stateStore(ctx: ExtensionContext, branch: string): CampaignStateStore {
+		const file = statePath(ctx.cwd, branch);
+		let store = stateStores.get(file);
+		if (!store) {
+			store = new CampaignStateStore(file);
+			stateStores.set(file, store);
+		}
+		return store;
+	}
+
+	// ------------------------------------------------------------------
+	// Live progress view (docs/observability.md §5, §7)
+	// ------------------------------------------------------------------
+	// One registry and one render timer per coordinator process. The engine owns
+	// durable state; this registry owns the live rows. `runTracked` registers an
+	// agent and folds `onProgress` into it, then the timer recomposes the widget
+	// so elapsed time advances between events.
+	const liveAgents = new Map<string, ProgressAgent>();
+	let liveCampaign: Omit<ProgressSnapshot, "agents" | "now"> = { waves: [], nodes: [] };
+	let liveCtx: ExtensionContext | undefined;
+	let liveTimer: ReturnType<typeof setInterval> | undefined;
+	const LIVE_RENDER_MS = 250;
+
+	/** The only place that composes the widget; pure formatting lives in common.ts. */
+	function renderLive(): void {
+		const ctx = liveCtx;
+		if (!ctx?.hasUI) return;
+		const lines = renderProgress(
+			{ ...liveCampaign, agents: [...liveAgents.values()], now: Date.now() / 1000 },
+			{
+				width: process.stdout.columns || undefined,
+				color: (name, text) => ctx.ui.theme.fg(name as any, text),
+			},
+		);
+		ctx.ui.setWidget("sliceme", lines);
+	}
+
+	/** Cache the campaign projection for the next render. */
+	function liveCampaignFrom(dag: Dag, state: CampaignState): void {
+		liveCampaign = {
+			campaign: dag.campaign ?? state.campaign,
+			currentWave: state.current_wave,
+			waves: (state.waves ?? []).map((wave) => ({
+				index: wave.index,
+				status: wave.status,
+				members: wave.members,
+			})),
+			nodes: nodeIds(dag).map((id) => ({ id, status: nodeStatus(state, id) })),
+		};
+	}
+
+	/** Start the timer while any agent runs; render once and stop otherwise. */
+	function ensureLiveTimer(ctx: ExtensionContext): void {
+		liveCtx = ctx;
+		if (![...liveAgents.values()].some((agent) => agent.status === "running")) {
+			stopLiveTimer();
+			renderLive();
+			return;
+		}
+		if (liveTimer) return;
+		liveTimer = setInterval(renderLive, LIVE_RENDER_MS);
+	}
+
+	function stopLiveTimer(): void {
+		if (!liveTimer) return;
+		clearInterval(liveTimer);
+		liveTimer = undefined;
 	}
 
 	// ------------------------------------------------------------------
@@ -587,7 +671,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		// Stop the review server when the campaign is delivered or no commits
 		// remain.  This catches a delivery from the review client or the CLI, not
 		// only the tool path.
-		const teardownState = readJson<CampaignState>(statePath(ctx.cwd, branch), { nodes: {} });
+		const teardownState = stateStore(ctx, branch).read<CampaignState>();
 		if (reviewServer && !reviewNeeded(teardownState)) stopReviewServer(ctx, branch);
 		if (!ctx.isIdle()) return;
 		let payload: any;
@@ -620,10 +704,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		// When every commit is approved and every wave is done, proceed
 		// automatically; the human approval is the trigger, not a prompt.
 		if (payload?.all_approved && ctx.isIdle()) {
-			const stateFile = statePath(ctx.cwd, branch);
-			const state: any = readJson(stateFile, { nodes: {} });
+			const state: any = stateStore(ctx, branch).read();
 			if (allWavesDone(state) && !state.delivered) {
-				await tryDelivery(ctx, branch, state, stateFile, signal);
+				await tryDelivery(ctx, branch, state, signal);
 			}
 		}
 	}
@@ -762,7 +845,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		return lines.join("\n");
 	}
 
-	/** Run a subagent with attempt bookkeeping and a per-node heartbeat. */
+	/** Run a subagent with attempt bookkeeping, a heartbeat, and a live row. */
 	async function runTracked(
 		ctx: ExtensionContext,
 		branch: string,
@@ -775,9 +858,53 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			cwd: string;
 			log?: string;
 			signal?: AbortSignal;
+			onUpdate?: AgentToolUpdateCallback;
 		},
 	): Promise<SubagentResult> {
 		const attempt = opts.attempt ?? 1;
+		const now = () => Date.now() / 1000;
+		// Register the live row before the child starts, so the widget shows the
+		// agent even while it connects to the provider.
+		const live: ProgressAgent = {
+			key: `${opts.agent}:${opts.node}`,
+			node: opts.node,
+			agent: opts.agent,
+			unit: opts.unit,
+			attempt,
+			status: "running",
+			progress: {
+				node: opts.node,
+				unit: opts.unit,
+				attempt,
+				agent: opts.agent,
+				turns: 0,
+				toolCalls: 0,
+				tools: {},
+				tokensIn: 0,
+				tokensOut: 0,
+				cost: 0,
+				startedAt: now(),
+				updatedAt: now(),
+			},
+		};
+		liveAgents.set(live.key, live);
+		ensureLiveTimer(ctx);
+		// P0.6: a spawn streams its own row through the tool update channel.
+		const streamRow = (progress: SubagentProgress) => {
+			if (!opts.onUpdate) return;
+			opts.onUpdate({
+				content: [
+					{
+						type: "text" as const,
+						text: renderAgentLine(live, {
+							width: process.stdout.columns || undefined,
+							now: now(),
+						}),
+					},
+				],
+				details: { node: opts.node, agent: opts.agent, progress },
+			});
+		};
 		const begin = ["attempt", "--begin", "--node", opts.node, "--attempt", String(attempt)];
 		if (opts.unit) begin.push("--unit", opts.unit);
 		begin.push("--agent", opts.agent);
@@ -796,7 +923,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			unit: opts.unit,
 			attempt,
 			heartbeat: heartbeatPath(ctx.cwd, branch, opts.node),
+			onProgress: (progress) => {
+				live.progress = progress;
+				renderLive();
+				streamRow(progress);
+			},
 		});
+		live.status = result.interrupted ? "interrupted" : result.exitCode === 0 ? "done" : "failed";
+		live.finishedAt = now();
+		ensureLiveTimer(ctx);
 		try {
 			await sliceme(
 				ctx,
@@ -880,34 +1015,20 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		reconcileWaves(state, json?.dag_waves ?? []);
 		state.dag_fingerprint = fingerprint;
 		state.wave_size = Number(dag.concurrency ?? 3);
-		writeJson(statePath(ctx.cwd, branch), state);
+		stateStore(ctx, branch).save();
 		logEvent(ctx.cwd, branch, "wave.replanned", {
 			waves: (state.waves ?? []).map((w) => w.members),
 		});
 	}
 
+	/**
+	 * Refresh the campaign projection and compose one widget frame. The renderer
+	 * in `common.ts` is pure; this function only fetches the state and draws it.
+	 */
 	function widget(ctx: ExtensionContext, dag: Dag, state: CampaignState): void {
-		if (!ctx.hasUI) return;
-		const marker = (status: string) =>
-			status === "running" ? "●" : status === "done" ? "✓" : status === "failed" ? "✗" : "·";
-		const lines: string[] = [];
-		for (const wave of state.waves ?? []) {
-			const members = wave.members.map((id) => {
-				const node = (dag.nodes ?? []).find((n) => n.id === id);
-				const status = nodeStatus(state, id);
-				return `${marker(status)} ${id}${node?.label ? ` ${node.label}` : ""}`.trim();
-			});
-			lines.push(`─ wave ${wave.index} [${wave.status}]  ${members.join("   ")}`);
-		}
-		if (!lines.length) {
-			lines.push(
-				...nodeIds(dag).map((id) => {
-					const status = nodeStatus(state, id);
-					return `${marker(status)} ${id} [${status}]`;
-				}),
-			);
-		}
-		ctx.ui.setWidget("sliceme", lines.length ? lines : ["sliceme: no plan"]);
+		liveCtx = ctx;
+		liveCampaignFrom(dag, state);
+		renderLive();
 	}
 
 	// ------------------------------------------------------------------
@@ -923,7 +1044,6 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		branch: string,
 		state: any,
-		stateFile: string,
 		signal?: AbortSignal,
 	): Promise<string | null> {
 		let gate: any;
@@ -935,7 +1055,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		state.sandbox_digest = gate?.digest ?? null;
 		state.sandbox_manifest = gate?.manifest ?? null;
 		state.sandbox_required = Boolean(gate?.required);
-		writeJson(stateFile, state);
+		stateStore(ctx, branch).save();
 		logEvent(ctx.cwd, branch, "sandbox.gate", {
 			required: state.sandbox_required,
 			digest: state.sandbox_digest,
@@ -1063,14 +1183,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const worktreeBranch = String(plane?.worktree_branch ?? "");
 
 		const dagFile = dagPath(ctx.cwd, branch);
-		const stateFile = statePath(ctx.cwd, branch);
+		const store = stateStore(ctx, branch);
 
 		// 2a. Resume: rebuild node status from git/state.db, which always win
 		// over state.json. A node left `running` by a crash is reset.
 		if (fs.existsSync(dagFile) && !params.replan) {
 			const existing = readJson<Dag>(dagFile, { nodes: [] });
 			if (existing?.nodes?.length) {
-				const state: any = readJson(stateFile, { nodes: {} });
+				// A resume rebuild reads the file again, in case another run changed it.
+				const state: any = store.reload();
 				const status = (await sliceme(ctx, ["status"], signal)).json;
 				const candidates = status?.candidates ?? [];
 				// Consult the engine's resume plan so a worker interrupted with
@@ -1120,7 +1241,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				state.target_branch = branch;
 				state.worktree_branch = worktreeBranch;
 				state.base = existing.base ?? params.base ?? branch;
-				writeJson(stateFile, state);
+				store.save();
 				await ensureWaves(ctx, branch, existing, state);
 				const pendingWave = resumePlan?.resume_plan?.record_wave;
 				if (
@@ -1139,7 +1260,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 						/* unowned or ambiguous edits: leave the record for a human/CLI */
 					}
 				}
-				const resumeGateError = await sandboxGate(ctx, branch, state, stateFile, signal);
+				const resumeGateError = await sandboxGate(ctx, branch, state, signal);
 				if (resumeGateError) {
 					return {
 						content: [
@@ -1220,9 +1341,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			nodes: {},
 		};
 		for (const node of dag.nodes) state.nodes[node.id] = { status: "pending", attempts: 0 };
-		writeJson(stateFile, state);
+		store.replace(state);
+		store.save();
 		await ensureWaves(ctx, branch, dag, state);
-		const gateError = await sandboxGate(ctx, branch, state, stateFile, signal);
+		const gateError = await sandboxGate(ctx, branch, state, signal);
 		if (gateError) {
 			return {
 				content: [
@@ -1247,14 +1369,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		params: any,
 		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback,
 	): Promise<any> {
 		const node = String(params.node ?? "");
 		if (!node) throw new Error("spawn requires --node <id>");
 		const { json } = await sliceme(ctx, ["status"]);
 		const branch = String(json?.feature_branch ?? "main");
-		const stateFile = statePath(ctx.cwd, branch);
+		const store = stateStore(ctx, branch);
 		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
-		const state: any = readJson(stateFile, { nodes: {} });
+		const state: any = store.read();
 		if (isPaused(ctx, branch)) return pausedResult("spawn");
 		const spec = (dag.nodes ?? []).find((n) => n.id === node);
 		if (!spec) throw new Error(`spawn: unknown node '${node}'`);
@@ -1264,7 +1387,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const attempts = Number(state.nodes[node]?.attempts ?? 0);
 		if (attempts >= maxAttempts) {
 			state.nodes[node] = { ...(state.nodes[node] ?? {}), status: "failed" };
-			writeJson(stateFile, state);
+			store.save();
 			throw new Error(`spawn: node '${node}' exceeded max_attempts=${maxAttempts}`);
 		}
 
@@ -1298,8 +1421,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			worktree,
 			branch: String(unit.branch ?? state.worktree_branch ?? ""),
 		};
-		writeJson(stateFile, state);
+		store.save();
 		logEvent(ctx.cwd, branch, "node.spawn", { node, unit: unit.name, attempt });
+		widget(ctx, dag, state);
 
 		const previousEvidence = state.nodes[node]?.lastError
 			? `\nA previous attempt failed with this verifier evidence:\n${state.nodes[node].lastError}`
@@ -1323,23 +1447,26 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			cwd: worktree,
 			log: logPath(ctx.cwd, branch, node),
 			signal,
+			onUpdate,
 		});
 		if (result.interrupted || isPaused(ctx, branch)) {
 			// A suspended worker keeps its edits in the shared campaign worktree; mark
 			// the node paused so resume continues it instead of respawning from scratch.
 			// Its attempt is not consumed: the next spawn reuses the same attempt number.
 			state.nodes[node].status = "paused";
-			writeJson(stateFile, state);
+			store.save();
 			logEvent(ctx.cwd, branch, "node.suspended", {
 				node,
 				attempt,
 				signal: result.signal ?? null,
 			});
+			widget(ctx, dag, state);
 			return pausedResult("spawn");
 		}
 		state.nodes[node].status = result.exitCode === 0 ? "pending" : "failed";
 		state.nodes[node].attempts = attempt;
-		writeJson(stateFile, state);
+		store.save();
+		widget(ctx, dag, state);
 		return {
 			content: [{ type: "text" as const, text: `worker ${node} exited ${result.exitCode}` }],
 			details: { node, unit: unit.name, exitCode: result.exitCode, output: result.output },
@@ -1359,9 +1486,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	): Promise<any> {
 		const branch = await featureBranch(ctx);
 		if (isPaused(ctx, branch)) return pausedResult("record");
-		const stateFile = statePath(ctx.cwd, branch);
+		const store = stateStore(ctx, branch);
 		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
-		const state: any = readJson(stateFile, { nodes: {} });
+		const state: any = store.read();
 		await ensureWaves(ctx, branch, dag, state);
 		const wave = currentWave(state);
 		if (!wave) throw new Error("record: no open wave to record");
@@ -1387,7 +1514,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				worktree: recorded.json?.worktree,
 			};
 		}
-		writeJson(stateFile, state);
+		store.save();
+		widget(ctx, dag, state);
 		logEvent(ctx.cwd, branch, "wave.recorded", {
 			wave: wave.index,
 			candidates: candidates.map((c: any) => ({ node: c.node, commit: c.head_commit })),
@@ -1412,8 +1540,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const branch = await featureBranch(ctx);
 		if (isPaused(ctx, branch)) return pausedResult("verify");
 		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
-		const stateFile = statePath(ctx.cwd, branch);
-		const state: any = readJson(stateFile, { nodes: {} });
+		const store = stateStore(ctx, branch);
+		const state: any = store.read();
 		const spec = (dag.nodes ?? []).find((n) => n.id === node);
 		if (!spec) throw new Error(`verify: unknown node '${node}'`);
 		const commit = String(
@@ -1485,7 +1613,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			...(passed ? {} : { lastError: result.output || job?.output }),
 		};
 		const completed = advanceWaves(state);
-		writeJson(stateFile, state);
+		store.save();
+		widget(ctx, dag, state);
 		logEvent(ctx.cwd, branch, "node.verdict", {
 			node,
 			passed,
@@ -1498,7 +1627,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		// engine refuses until the human approves every commit in the review client.
 		let delivery: any = null;
 		if (passed && allWavesDone(state)) {
-			delivery = await tryDelivery(ctx, branch, state, stateFile, signal);
+			delivery = await tryDelivery(ctx, branch, state, signal);
 		}
 		return {
 			content: [
@@ -1527,11 +1656,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		branch: string,
 		state: any,
-		stateFile: string,
 		signal?: AbortSignal,
 		cleanupOverride?: string,
 	): Promise<any> {
 		if (state.delivered || !allWavesDone(state)) return null;
+		const store = stateStore(ctx, branch);
 		const target = String(state.target_branch ?? branch);
 		const source = String(state.worktree_branch ?? "");
 		// Generate the report so the reviewer can read it before approving.
@@ -1551,7 +1680,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (!message.includes("not-approved")) throw error;
 			// Not approved yet: stay ready for the next review poll.
 			state.ready_to_deliver = true;
-			writeJson(stateFile, state);
+			store.save();
 			return null;
 		}
 		const failed = (delivered.json?.results ?? []).some((r: any) => r.status === "failed");
@@ -1559,7 +1688,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		if (!failed) {
 			state.delivered = true;
 			// `cleanup: all` removes state.json; do not resurrect it.
-			if (cleanup !== "all") writeJson(stateFile, state);
+			store.save(cleanup !== "all");
 			// Terminal immediately: a crash before `session_shutdown` must not leave a
 			// `suspended` descriptor that re-offers a finished campaign on startup.
 			writeSessionDescriptor(
@@ -1571,7 +1700,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			// Delivery merges every approved commit; the review surface is done.
 			stopReviewServer(ctx, branch);
 		} else {
-			writeJson(stateFile, state);
+			store.save();
 		}
 		logEvent(ctx.cwd, branch, failed ? "campaign.deliver_failed" : "campaign.delivered", {
 			target,
@@ -1587,9 +1716,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		signal?: AbortSignal,
 	): Promise<any> {
 		const branch = await featureBranch(ctx);
-		const stateFile = statePath(ctx.cwd, branch);
-		const state: any = readJson(stateFile, { nodes: {} });
-		const delivered = await tryDelivery(ctx, branch, state, stateFile, signal, params.cleanup);
+		const state: any = stateStore(ctx, branch).read();
+		const delivered = await tryDelivery(ctx, branch, state, signal, params.cleanup);
 		if (!delivered) {
 			return {
 				content: [
@@ -1734,7 +1862,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			actor: Type.Optional(Type.String({ description: "review: who recorded the decision" })),
 			comment_id: Type.Optional(Type.Number({ description: "review: comment id for --ack" })),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			switch (params.action as (typeof CAMPAIGN_ACTIONS)[number]) {
 				case "start":
 					return startCampaign(ctx, params, signal);
@@ -1768,7 +1896,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					};
 				}
 				case "spawn":
-					return spawnNode(ctx, params, signal);
+					return spawnNode(ctx, params, signal, onUpdate);
 				case "record":
 					return recordWave(ctx, params, signal);
 				case "verify":
@@ -1887,6 +2015,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		reviewCtx = ctx;
+		liveCtx = ctx;
 		startReviewTimer();
 		try {
 			if (event.reason !== "resume" && event.reason !== "startup") return;
@@ -1947,12 +2076,14 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
-		// Fast and idempotent: stop the review child, then write the descriptor.
+		// Fast and idempotent: stop the review child and the live timer, then write
+		// the descriptor.
 		if (reviewTimer) {
 			clearInterval(reviewTimer);
 			reviewTimer = undefined;
 		}
 		reviewCtx = undefined;
+		stopLiveTimer();
 		stopReviewServer(ctx);
 		try {
 			const branch = configuredBranch(ctx.cwd);

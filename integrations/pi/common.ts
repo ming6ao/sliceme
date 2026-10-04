@@ -253,9 +253,51 @@ export function readJson<T>(file: string, fallback: T): T {
 	}
 }
 
+/** Write a JSON file atomically: a sibling temporary file, then a rename. */
 export function writeJson(file: string, data: unknown): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n", "utf8");
+	const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+	fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
+	fs.renameSync(tmp, file);
+}
+
+/**
+ * The single in-process owner of one campaign's `state.json`.
+ *
+ * The coordinator is the only writer, so the store keeps the state in memory
+ * and hands every caller the same object. Mutating that one object and calling
+ * `save()` therefore never drops a parallel `spawn` completion, and the atomic
+ * write never leaves a partial file.
+ */
+export class CampaignStateStore {
+	private readonly file: string;
+	private cache: any;
+
+	constructor(file: string) {
+		this.file = file;
+	}
+
+	/** The shared state object, loaded from disk on first use. */
+	read<T = any>(): T {
+		if (this.cache === undefined) this.cache = readJson<any>(this.file, { nodes: {} });
+		return this.cache as T;
+	}
+
+	/** Read the file again, for a resume rebuild. */
+	reload<T = any>(): T {
+		this.cache = undefined;
+		return this.read<T>();
+	}
+
+	/** Replace the shared state, for a new campaign. */
+	replace(state: any): void {
+		this.cache = state;
+	}
+
+	/** Flush the shared state. `write` is false when the engine removed the file. */
+	save(write = true): void {
+		if (write) writeJson(this.file, this.read());
+	}
 }
 
 /**
@@ -449,7 +491,14 @@ export async function runSubagent(options: {
 			} catch {
 				/* the heartbeat is best-effort; never fail the run for it */
 			}
-			options.onProgress?.(snapshot);
+		};
+		// The live view needs every event; only the heartbeat file is debounced.
+		const emitProgress = () => {
+			options.onProgress?.({
+				...progress,
+				tools: { ...progress.tools },
+				updatedAt: nowSeconds(),
+			});
 		};
 		const summariseArgs = (args: any): string | undefined => {
 			if (args && typeof args === "object") {
@@ -511,6 +560,7 @@ export async function runSubagent(options: {
 					return;
 			}
 			flushHeartbeat();
+			emitProgress();
 		};
 
 		proc.stdout.on("data", (data) => {
@@ -527,6 +577,7 @@ export async function runSubagent(options: {
 			if (buffer.trim()) processLine(buffer);
 			stream?.end();
 			flushHeartbeat(true);
+			emitProgress();
 			cleanup();
 			resolve({
 				exitCode: code ?? (signal ? 128 : 0),
@@ -539,6 +590,7 @@ export async function runSubagent(options: {
 		proc.on("error", (err) => {
 			stream?.end();
 			flushHeartbeat(true);
+			emitProgress();
 			cleanup();
 			resolve({ exitCode: 1, output, stderr: String(err) });
 		});
@@ -568,4 +620,252 @@ export async function runSubagent(options: {
 			else options.signal.addEventListener("abort", kill, { once: true });
 		}
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Live progress view (`docs/observability.md` §5, §7)
+//
+// `renderProgress` is pure: it reads one snapshot and returns terminal lines.
+// The coordinator owns the registry and the render timer; this module owns the
+// formatting, so a unit test can drive it with fixed timestamps and widths.
+// ---------------------------------------------------------------------------
+
+/** One running or finished subagent in the live view. */
+export interface ProgressAgent {
+	key: string;
+	node: string;
+	agent: string;
+	unit?: string;
+	attempt: number;
+	status: "running" | "done" | "failed" | "interrupted";
+	progress: SubagentProgress;
+	finishedAt?: number;
+}
+
+/** One campaign node in the live view. */
+export interface ProgressNode {
+	id: string;
+	status: string;
+}
+
+/** One wave in the live view. */
+export interface ProgressWave {
+	index: number;
+	status: string;
+	members: string[];
+}
+
+/** Everything `renderProgress` needs. The engine never enters this path. */
+export interface ProgressSnapshot {
+	campaign?: string;
+	currentWave?: number;
+	waves?: ProgressWave[];
+	nodes?: ProgressNode[];
+	agents: ProgressAgent[];
+	now: number;
+}
+
+export interface RenderProgressOptions {
+	/** Truncate every line to this many terminal columns. */
+	width?: number;
+	/** Style one line; `ctx.ui.theme.fg` fits. Default: no color. */
+	color?: (name: string, text: string) => string;
+	/** Maximum agent rows to show (default 8). */
+	maxAgents?: number;
+	/** A running row is stale after this many seconds (default 5). */
+	stalledAfterSeconds?: number;
+	/** Override the clock for `renderAgentLine`. */
+	now?: number;
+}
+
+const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+
+/** Terminal columns of one code point. Wide East-Asian and emoji count as two. */
+function codePointWidth(code: number): number {
+	if (code === 0) return 0;
+	if (
+		(code >= 0x1100 && code <= 0x115f) ||
+		code === 0x2329 ||
+		code === 0x232a ||
+		(code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+		(code >= 0xac00 && code <= 0xd7a3) ||
+		(code >= 0xf900 && code <= 0xfaff) ||
+		(code >= 0xfe30 && code <= 0xfe6f) ||
+		(code >= 0xff00 && code <= 0xff60) ||
+		(code >= 0xffe0 && code <= 0xffe6) ||
+		(code >= 0x1f300 && code <= 0x1f64f) ||
+		(code >= 0x1f900 && code <= 0x1f9ff) ||
+		(code >= 0x20000 && code <= 0x3fffd)
+	) {
+		return 2;
+	}
+	return 1;
+}
+
+/** Visible terminal width of a string, ignoring ANSI escapes. */
+export function visibleWidth(text: string): number {
+	const plain = text.replace(ANSI_PATTERN, "");
+	let width = 0;
+	for (const char of plain) width += codePointWidth(char.codePointAt(0) ?? 0);
+	return width;
+}
+
+/**
+ * Truncate to a visible width and mark the cut with an ellipsis. Truncate the
+ * plain text before you add color, so no escape sequence is cut in half.
+ */
+export function truncateToWidth(text: string, width: number): string {
+	if (!Number.isFinite(width) || width <= 0) return "";
+	if (visibleWidth(text) <= width) return text;
+	let out = "";
+	let used = 0;
+	for (const char of text) {
+		const size = codePointWidth(char.codePointAt(0) ?? 0);
+		if (used + size > width - 1) break;
+		out += char;
+		used += size;
+	}
+	return `${out}…`;
+}
+
+/** Short human duration: `45s`, `3m12s`, `1h04m`. */
+export function formatDuration(seconds: number): string {
+	const total = Math.max(0, Math.floor(seconds));
+	if (total < 60) return `${total}s`;
+	const minutes = Math.floor(total / 60);
+	if (minutes < 60) return `${minutes}m${String(total % 60).padStart(2, "0")}s`;
+	return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/** One display marker per node or agent status. */
+export function statusMarker(status: string): string {
+	switch (status) {
+		case "running":
+			return "●";
+		case "done":
+			return "✓";
+		case "failed":
+			return "✗";
+		case "interrupted":
+		case "paused":
+			return "⏸";
+		case "recorded":
+			return "◆";
+		default:
+			return "·";
+	}
+}
+
+function fit(text: string, options: RenderProgressOptions): string {
+	if (!options.width || options.width <= 0) return text;
+	return truncateToWidth(text, options.width);
+}
+
+function lastToolText(progress: SubagentProgress): string | undefined {
+	if (!progress.lastTool) return undefined;
+	const args = progress.lastToolArgs ? ` ${progress.lastToolArgs}` : "";
+	const text = `${progress.lastTool}${args}`;
+	return text.length > 60 ? `${text.slice(0, 59)}…` : text;
+}
+
+/** One agent row: state, node, elapsed, counters, current tool or stall. */
+export function renderAgentLine(
+	agent: ProgressAgent,
+	options: RenderProgressOptions = {},
+): string {
+	const color = options.color ?? ((_name: string, text: string) => text);
+	const progress = agent.progress;
+	const now = options.now ?? Date.now() / 1000;
+	const end = agent.status === "running" ? now : (agent.finishedAt ?? progress.updatedAt);
+	const bits = [formatDuration(Math.max(0, end - progress.startedAt))];
+	if (progress.turns) bits.push(`${progress.turns} turns`);
+	if (progress.toolCalls) bits.push(`${progress.toolCalls} tools`);
+	let name = "muted";
+	if (agent.status === "running") {
+		const age = Math.max(0, now - progress.updatedAt);
+		if (age > (options.stalledAfterSeconds ?? 5)) {
+			bits.push(`⚠ stalled ${formatDuration(age)}`);
+			name = "warning";
+		} else {
+			name = "accent";
+			const tool = lastToolText(progress);
+			if (tool) bits.push(tool);
+		}
+	} else if (agent.status === "done") {
+		name = "success";
+	} else if (agent.status === "failed") {
+		name = "error";
+	} else {
+		name = "warning";
+	}
+	const text = `${statusMarker(agent.status)} ${agent.node} ${agent.agent}  ${bits.join(" · ")}`;
+	return color(name, fit(text, options));
+}
+
+/**
+ * Render the whole live view: a header, one aggregate line, one row per
+ * subagent, then the wave projection. Pure and allocation-light.
+ */
+export function renderProgress(
+	snapshot: ProgressSnapshot,
+	options: RenderProgressOptions = {},
+): string[] {
+	const color = options.color ?? ((_name: string, text: string) => text);
+	const agents = snapshot.agents ?? [];
+	const nodes = snapshot.nodes ?? [];
+	const waves = snapshot.waves ?? [];
+	if (!agents.length && !nodes.length && !waves.length) {
+		return [color("dim", "sliceme: no plan")];
+	}
+	const now = snapshot.now;
+	const running = agents.filter((agent) => agent.status === "running");
+	const finished = agents
+		.filter((agent) => agent.status !== "running")
+		.sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+	const shown = [...running, ...finished].slice(0, options.maxAgents ?? 8);
+
+	const total = nodes.length || agents.length;
+	const counted: Array<{ status: string }> = nodes.length ? nodes : agents;
+	const done = counted.filter((item) => item.status === "done").length;
+	const failed = counted.filter((item) => item.status === "failed").length;
+
+	const lines: string[] = [];
+	const header = `sliceme${snapshot.campaign ? ` · ${snapshot.campaign}` : ""}`;
+	lines.push(color("accent", fit(header, options)));
+
+	const start = agents.reduce(
+		(min, agent) => Math.min(min, agent.progress.startedAt || now),
+		Number.POSITIVE_INFINITY,
+	);
+	const elapsed = Number.isFinite(start) ? now - start : 0;
+	const summary: string[] = [];
+	if (waves.length) {
+		const current =
+			snapshot.currentWave ?? waves.find((wave) => wave.status !== "done")?.index ?? waves.length;
+		summary.push(`wave ${Math.min(current + 1, waves.length)}/${waves.length}`);
+	}
+	summary.push(`${done}/${total} done`);
+	if (running.length) summary.push(`${running.length} running`);
+	if (failed) summary.push(`${failed} failed`);
+	if (elapsed >= 1) summary.push(formatDuration(elapsed));
+	lines.push(color("muted", fit(summary.join(" · "), options)));
+
+	const rowWidth = options.width && options.width > 2 ? options.width - 2 : options.width;
+	for (const agent of shown) {
+		lines.push(`  ${renderAgentLine(agent, { ...options, width: rowWidth, now })}`);
+	}
+	if (agents.length > shown.length) {
+		lines.push(color("dim", fit(`  … ${agents.length - shown.length} more`, options)));
+	}
+
+	for (const wave of waves) {
+		const members = wave.members
+			.map((id) => {
+				const node = nodes.find((candidate) => candidate.id === id);
+				return `${statusMarker(node?.status ?? "pending")} ${id}`;
+			})
+			.join("  ");
+		lines.push(color("dim", fit(`─ wave ${wave.index} [${wave.status}]  ${members}`, options)));
+	}
+	return lines;
 }
