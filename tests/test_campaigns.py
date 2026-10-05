@@ -228,6 +228,113 @@ class DeliveryIsolationTests(MultiCampaignCase):
 
 
 class CleanupTests(MultiCampaignCase):
+    def write_campaign_files(self, branch):
+        """Write one of every per-campaign file and return the disposable ones."""
+        write_json(campaign.dag_path(self.root, branch), {"nodes": []})
+        write_json(campaign.state_path(self.root, branch), {"nodes": {}})
+        write_json(campaign.session_path(self.root, branch), {"status": "suspended"})
+        write_json(campaign.control_path(self.root, branch), {"pause": True})
+        campaign.events_path(self.root, branch).write_text('{"kind":"x"}\n')
+        campaign.heartbeat_path(self.root, branch, "w1").write_text("{}\n")
+        campaign.worker_log_path(self.root, branch, "w1").write_text("log\n")
+        campaign.report_path(self.root, branch).write_text("# report\n")
+        return [
+            campaign.dag_path(self.root, branch),
+            campaign.state_path(self.root, branch),
+            campaign.session_path(self.root, branch),
+            campaign.control_path(self.root, branch),
+            campaign.events_path(self.root, branch),
+            campaign.heartbeat_path(self.root, branch, "w1"),
+            campaign.worker_log_path(self.root, branch, "w1"),
+        ]
+
+    def test_remove_campaign_artifacts_removes_every_file_but_the_report(self):
+        svc = self.service("feat/x")
+        try:
+            files = self.write_campaign_files("feat/x")
+            removed = svc.remove_campaign_artifacts()
+            self.assertEqual(sorted(removed), sorted(str(path) for path in files))
+            for path in files:
+                self.assertFalse(path.exists(), str(path))
+            self.assertTrue(campaign.report_path(self.root, "feat/x").exists())
+        finally:
+            svc.close()
+
+    def test_remove_campaign_artifacts_can_drop_the_report(self):
+        svc = self.service("feat/x")
+        try:
+            self.write_campaign_files("feat/x")
+            svc.remove_campaign_artifacts(keep_report=False)
+            self.assertFalse(campaign.report_path(self.root, "feat/x").exists())
+        finally:
+            svc.close()
+
+    def test_gc_artifacts_prunes_only_finished_campaigns(self):
+        x_files = self.write_campaign_files("feat/x")
+        y_files = self.write_campaign_files("feat/y")
+        svc = self.service()
+        try:
+            svc.store.set_campaign_state("feat--x", "delivered")
+            svc.store.conn.commit()
+
+            result = svc.gc(artifacts=True)
+
+            self.assertIn(
+                str(campaign.dag_path(self.root, "feat/x")), result["pruned_artifacts"]
+            )
+            for path in x_files:
+                self.assertFalse(path.exists(), str(path))
+            for path in y_files:
+                self.assertTrue(path.exists(), str(path))
+            # The report of a finished campaign stays as evidence.
+            self.assertTrue(campaign.report_path(self.root, "feat/x").exists())
+        finally:
+            svc.close()
+
+    def test_gc_without_artifacts_keeps_finished_campaign_files(self):
+        files = self.write_campaign_files("feat/x")
+        svc = self.service()
+        try:
+            svc.store.set_campaign_state("feat--x", "delivered")
+            svc.store.conn.commit()
+            svc.gc()
+            for path in files:
+                self.assertTrue(path.exists(), str(path))
+        finally:
+            svc.close()
+
+    def test_gc_artifacts_prunes_a_completed_descriptor(self):
+        files = self.write_campaign_files("feat/z")
+        campaign.write_session(
+            self.root, "feat/z", {"status": "completed", "feature_branch": "feat/z"}
+        )
+        svc = self.service()
+        try:
+            result = svc.gc(artifacts=True)
+            self.assertIn(
+                str(campaign.session_path(self.root, "feat/z")),
+                result["pruned_artifacts"],
+            )
+            for path in files:
+                self.assertFalse(path.exists(), str(path))
+            self.assertFalse(campaign.session_path(self.root, "feat/z").exists())
+            self.assertTrue(campaign.report_path(self.root, "feat/z").exists())
+        finally:
+            svc.close()
+
+    def test_gc_artifacts_keeps_a_suspended_descriptor(self):
+        files = self.write_campaign_files("feat/z")
+        campaign.write_session(
+            self.root, "feat/z", {"status": "suspended", "feature_branch": "feat/z"}
+        )
+        svc = self.service()
+        try:
+            svc.gc(artifacts=True)
+            for path in files:
+                self.assertTrue(path.exists(), str(path))
+        finally:
+            svc.close()
+
     def test_prune_keeps_every_registered_campaign(self):
         svc = self.service()
         try:

@@ -67,6 +67,11 @@ def heartbeat_path(root: Path, branch: str, node: str) -> Path:
     return state_dir(root) / f"{branch_key(branch)}.progress_{node}.json"
 
 
+def events_path(root: Path, branch: str) -> Path:
+    """The append-only audit log (``.events.jsonl``) for a campaign."""
+    return state_dir(root) / f"{branch_key(branch)}.events.jsonl"
+
+
 def load_session(root: Path, branch: str) -> dict[str, Any] | None:
     data = read_json(session_path(root, branch))
     return data if isinstance(data, dict) else None
@@ -149,6 +154,7 @@ __all__ = [
     "config_branch",
     "control_path",
     "dag_path",
+    "events_path",
     "heartbeat_path",
     "list_sessions",
     "load_control",

@@ -31,6 +31,7 @@ from .util import (
     now,
     read_json,
     slugify,
+    state_dir,
     worktrees_dir,
     write_json,
 )
@@ -1566,10 +1567,8 @@ class Service:
         """Append one review audit line to ``.sliceme/<branch-key>.events.jsonl``."""
         import json
 
-        from .util import state_dir
-
         branch = self.config.get("target_branch") or self.config.get("main_branch") or "main"
-        path = state_dir(self.root) / f"{campaign.branch_key(branch)}.events.jsonl"
+        path = campaign.events_path(self.root, branch)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
@@ -1741,20 +1740,25 @@ class Service:
             design=design,
         )
 
-    def remove_campaign_artifacts(self, *, keep_report: bool = True) -> list[str]:
-        """Delete ``<branch-key>`` dag/state/worker logs (report kept by default)."""
-        branch = self.config.get("main_branch") or "main"
-        removed: list[str] = []
+    def remove_campaign_artifacts(
+        self, *, branch: str | None = None, keep_report: bool = True
+    ) -> list[str]:
+        """Delete every per-campaign file.  Keep the report by default."""
+        branch = branch or self.config.get("main_branch") or "main"
+        state = state_dir(self.root)
+        key = campaign.branch_key(branch)
         paths = [
             campaign.dag_path(self.root, branch),
             campaign.state_path(self.root, branch),
+            campaign.session_path(self.root, branch),
+            campaign.control_path(self.root, branch),
+            campaign.events_path(self.root, branch),
+            *sorted(state.glob(f"{key}.progress_*.json")),
+            *sorted(state.glob(f"{key}.worker_*.log")),
         ]
-        removed.extend(self._remove_files(paths))
-        for log in sorted(self.root.glob(f".sliceme/{campaign.branch_key(branch)}.worker_*.log")):
-            removed.extend(self._remove_files([log]))
         if not keep_report:
-            removed.extend(self._remove_files([campaign.report_path(self.root, branch)]))
-        return removed
+            paths.append(campaign.report_path(self.root, branch))
+        return self._remove_files(paths)
 
     @staticmethod
     def _remove_files(paths: list[Path]) -> list[str]:
@@ -1768,7 +1772,13 @@ class Service:
                 continue
         return removed
 
-    def gc(self) -> dict[str, Any]:
+    def gc(self, *, artifacts: bool = False) -> dict[str, Any]:
+        """Prune worktrees, branches, scratch, and reviews.
+
+        ``artifacts`` also removes the files of finished campaigns (the report
+        stays).  ``status --gc`` sets it; ``deliver --cleanup worktrees`` does
+        not, so it keeps the dag and state records.
+        """
         removed = []
         pruned_branches = []
         for unit in self.store.list_units():
@@ -1796,13 +1806,38 @@ class Service:
 
         scratch = self.root / ".sliceme" / "scratch"
         rmtree(scratch)
+        pruned_artifacts = self._prune_finished_artifacts() if artifacts else []
         pruned_reviews = self._prune_reviews()
         self.store.conn.commit()
         return {
             "removed_worktrees": removed,
             "pruned_branches": pruned_branches,
+            "pruned_artifacts": pruned_artifacts,
             "pruned_reviews": pruned_reviews,
         }
+
+    def _prune_finished_artifacts(self) -> list[str]:
+        """Remove the files of campaigns that have finished (report kept).
+
+        A campaign has finished when the store records it as landed or
+        delivered, or when its descriptor marks it completed.  The descriptor
+        pass also reaches old campaigns that predate the campaign registry.
+        """
+        branches = {
+            str(row["target_branch"])
+            for row in self.store.list_campaigns()
+            if str(row.get("state")) in {"landed", "delivered"}
+        }
+        branches.update(
+            str(descriptor.get("feature_branch") or key)
+            for key, descriptor in campaign.list_sessions(self.root)
+            if str(descriptor.get("status")) == "completed"
+        )
+        return [
+            name
+            for branch in sorted(branches)
+            for name in self.remove_campaign_artifacts(branch=branch)
+        ]
 
     def _prune_reviews(self) -> dict[str, int]:
         """Prune old review rows for campaigns that are gone and unregistered.

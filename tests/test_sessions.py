@@ -299,6 +299,33 @@ class DeliveryCleanupTests(SessionsCase):
         # Cleanup is opt-in: the default keeps the worktree for inspection.
         self.assertTrue(Path(unit["worktree"]).exists())
 
+    def test_full_cleanup_removes_every_artifact_but_the_report(self):
+        self.record_w1()
+        campaign.write_session(self.root, "feat/x", self.descriptor())
+        campaign.write_control(self.root, "feat/x", {"pause": False})
+        campaign.events_path(self.root, "feat/x").write_text('{"kind":"x"}\n')
+        campaign.heartbeat_path(self.root, "feat/x", "w1").write_text("{}\n")
+        campaign.worker_log_path(self.root, "feat/x", "w1").write_text("log\n")
+        self.svc.report(narrative="done")
+        self.approve()
+
+        delivered = self.svc.deliver(cleanup="all")
+
+        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+        for path in (
+            campaign.dag_path(self.root, "feat/x"),
+            campaign.state_path(self.root, "feat/x"),
+            campaign.session_path(self.root, "feat/x"),
+            campaign.control_path(self.root, "feat/x"),
+            campaign.events_path(self.root, "feat/x"),
+            campaign.heartbeat_path(self.root, "feat/x", "w1"),
+            campaign.worker_log_path(self.root, "feat/x", "w1"),
+        ):
+            self.assertFalse(path.exists(), str(path))
+        # The report is review evidence and survives every cleanup level.
+        self.assertTrue(campaign.report_path(self.root, "feat/x").exists())
+
+
 class AttemptTests(SessionsCase):
     def test_attempt_begin_and_end_record_metrics(self):
         started = self.svc.begin_attempt(node="w1", unit="campaign", attempt=1)

@@ -285,7 +285,7 @@ def doctor(root: Path) -> dict[str, Any]:
 
 def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
     if p.get("gc"):
-        return service.gc()
+        return service.gc(artifacts=True)
     if p.get("health"):
         return doctor(service.root)
     if p.get("simulate"):
