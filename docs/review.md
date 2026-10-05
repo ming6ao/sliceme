@@ -168,20 +168,26 @@ every wave has completed, the coordinator runs `deliver`.
 
 ## 7. HTTP surface
 
-The client needs one coherent snapshot, one file diff, and one write path.
-Three routes cover the page.
+The client needs one coherent snapshot, one file diff, one file body, and one
+write path. Four routes cover the page.
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/` | static client |
 | GET | `/api/state` | one review snapshot |
 | GET | `/api/diff` | one file diff, loaded on demand |
+| GET | `/api/file` | one file body, for a Markdown preview |
 | POST | `/api/action` | run one review action |
 
 Query parameters:
 
 - `/api/state?plane=<plane>&commit=<sha>`
 - `/api/diff?plane=<plane>&commit=<sha>&file=<path>`
+- `/api/file?plane=<plane>&commit=<sha>&file=<path>`
+
+The file route validates the path. It rejects an absolute path, a `..`
+segment, a leading hyphen, and a colon. It reads the blob from git and refuses a
+binary file.
 
 The snapshot returns the plane list, the pinned tips, and the commit list with
 its approval state. It also returns the file index, the report, the comments, and
@@ -229,12 +235,16 @@ The client is one page. It has a top bar and three panes.
 - **File.** The left pane holds a file tree for the selected commit. A file row
   shows the path, the status, and the addition and deletion counts. A click
   loads that file diff from `/api/diff`.
+- **Markdown file.** A Markdown file opens as a rendered preview by default. The
+  center pane header holds a **View diff** button. A click shows the diff. In
+  diff view the button reads **View rendered**.
 - **Report.** The left pane holds a report row when a report exists. A click
-  shows the report text in the center pane.
+  shows the rendered report in the center pane.
 - **Line.** A click on a diff line or a line number sets the anchor. A blue band
   marks the anchor. A shift-click extends the anchor to a range.
 - The client writes the selection to `location.hash`. A reload then restores the
-  view. The hash holds the plane, the commit, the file, and the report flag.
+  view. The hash holds the plane, the commit, the file, the report flag, and the
+  preview flag.
 
 ### 8.2 Writing a comment
 
@@ -285,20 +295,26 @@ binds to one commit hash.
 
 ### 8.6 Rendering and accessibility
 
-- The client writes diff text, report text, and comment text with `textContent`.
-  It never writes HTML from plane data.
+- The client writes diff text and comment text with `textContent`. It never
+  writes HTML from plane data.
+- The client renders the report and a Markdown file preview as Markdown. The
+  renderer in `web/markdown.js` builds DOM nodes directly. It never assigns
+  `innerHTML`.
+- The Markdown renderer allows only `http`, `https`, `mailto`, and relative
+  links. It rejects every other scheme.
 - The Content Security Policy forbids inline script and remote script.
 - A status uses a text label and a color. A color alone never carries meaning.
 - Focus rings stay visible. The Tab key reaches each pane.
 
 ### 8.7 Static files
 
-The client has no build step. The server serves four fixed files from the
+The client has no build step. The server serves five fixed files from the
 package:
 
 - `web/index.html`
-- `web/app.js` — state, polling, and the action calls
+- `web/app.js` — state, polling, the action calls, and the Markdown preview
 - `web/diff.js` — diff rendering and line anchoring
+- `web/markdown.js` — safe Markdown rendering of the report and Markdown files
 - `web/style.css`
 
 The server sends the diff as JSON. Each line holds a type, an old line number, a
@@ -357,12 +373,14 @@ The server can invoke `deliver`, so the boundary is explicit:
 - Require `application/json` for each write. Check `Origin` and `Host` against
   the loopback origin.
 - Render agent diff lines, file names, comments, and report text as text, never
-  as HTML.
+  as HTML. The report uses the safe DOM renderer in `web/markdown.js`.
 - Send a strict Content Security Policy. Serve only a fixed file list.
 - Use no cookies and no ambient credentials.
 
 The CLI runs the server in the foreground. The command prints the URL and stops
-with Ctrl-C. The pi extension starts the server as a background child instead,
+with Ctrl-C.
+
+The pi extension starts the server as a background child instead,
 so the agent session never blocks. The engine opens the default browser when one
 is available. The `--no-browser` flag stops the open. The server sets the
 terminal title to the loopback address, so the URL stays visible after the
@@ -371,6 +389,7 @@ server prints more lines. The extension also keeps the URL in a widget.
 The design keeps no pid file. The write token normally rests in memory only.
 The URL file name carries the coordinator process id, so a stale file is easy to
 find. The parent-death watchdog stops a server when its coordinator exits.
+
 The optional `--url-file PATH` flag writes the URL, with the token, to `PATH`.
 The writer uses mode `0600`, and the server removes the file on exit. The
 coordinator uses this file to show the URL in a stable place.

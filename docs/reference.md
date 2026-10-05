@@ -15,7 +15,7 @@ derive from one action registry (`sliceme/surface.py`). Seven engine verbs:
 | `deliver` | Merge the campaign worktree into the target feature branch once every commit is approved. |
 | `exec` | The single sandboxed executor queue: `submit`/`run`/`wait`/`cancel` check jobs. |
 | `wave` | The campaign worktree: `--open` creates or reuses it, `--record --wave N` commits the wave. |
-| `review` | Local review: serve the browser client, read a snapshot, poll comments, record a decision, or write the report. |
+| `review` | Local review: serve the browser client, read a snapshot or a file body, poll comments, record a decision, or write the report. |
 | `attempt` | Record one subagent attempt's `--begin`/`--end` and its metrics. |
 
 The pi `sliceme` coordinator tool adds orchestration verbs (`ready`, `spawn`,
@@ -248,7 +248,7 @@ rejected.
 | `sliceme/executor.py` | The single sandboxed executor queue (submit/run/wait/cancel, dedupe, leases) |
 | `sliceme/integrate.py` | Target selection and guards, final delivery, and combined-tree simulation |
 | `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; deterministic report |
-| `sliceme/review/` | Local review: `server.py` (loopback HTTP), `api.py` (action dispatch), `packet.py` (snapshot + commits + report), `diff.py` (diff parsing), `security.py` (token + loopback), `web/` (client) |
+| `sliceme/review/` | Local review: `server.py` (loopback HTTP), `api.py` (action dispatch), `packet.py` (snapshot + commits + report + file body), `diff.py` (diff parsing), `security.py` (token + loopback), `web/` (client and the safe Markdown renderer) |
 
 The engine is dependency-free Python 3.11+. `Service` is the only state owner;
 adapters only parse arguments and render results. `bin/sliceme` is a shim so
@@ -339,7 +339,7 @@ The suite covers these areas:
 | `tests/test_target_branch.py` | current/existing/new target modes, persistence, default-branch refusal |
 | `tests/test_cli.py` | CLI surface and lifecycle |
 | `tests/test_pi_package.py` | pi package contract, tool/action lockstep, command gate, docs |
-| `tests/test_review.py` | review tables/migration, comment relay, per-commit approvals, the packet/report/diff, and the loopback server |
+| `tests/test_review.py` | review tables/migration, comment relay, per-commit approvals, the packet/report/diff, the Markdown file preview, and the loopback server |
 
 ## 6. Deliberate gaps
 

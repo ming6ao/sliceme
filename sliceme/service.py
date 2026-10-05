@@ -826,6 +826,11 @@ class Service:
 
         return packet.file_lines(self, commit, path)
 
+    def review_file(self, commit: str | None, path: str) -> dict[str, Any]:
+        from .review import packet
+
+        return packet.file_content(self, commit, path)
+
     def review_comment(
         self,
         *,

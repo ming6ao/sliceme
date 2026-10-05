@@ -1,9 +1,9 @@
 """Action dispatch for the review surface, shared by HTTP and the CLI.
 
-The HTTP route accepts only ``state``, ``diff``, ``comment``, ``decision``,
-``poll``, ``ack``, and ``deliver``.  Each handler validates its own parameters
-and calls :class:`sliceme.service.Service`, so the adapter stays thin and every
-action stays agent-callable.
+The HTTP route accepts only ``state``, ``diff``, ``file``, ``comment``,
+``decision``, ``poll``, ``ack``, and ``deliver``.  Each handler validates its
+parameters and calls :class:`sliceme.service.Service`, so the adapter stays thin
+and every action stays agent-callable.
 """
 
 from __future__ import annotations
@@ -29,6 +29,13 @@ def diff(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
     if not path:
         raise SlicemeError("review --diff requires --file")
     return service.review_diff(_optional(params.get("commit")), str(path))
+
+
+def file(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
+    path = params.get("file")
+    if not path:
+        raise SlicemeError("review file requires --file")
+    return service.review_file(_optional(params.get("commit")), str(path))
 
 
 def comment(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
@@ -84,6 +91,7 @@ def deliver(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
 _HANDLERS = {
     "state": state,
     "diff": diff,
+    "file": file,
     "comment": comment,
     "decision": decision,
     "report": report,

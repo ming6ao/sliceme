@@ -29,9 +29,13 @@
 			</aside>
 
 			<section id="center" aria-label="Diff">
-				<div id="diff-header" class="muted"></div>
+				<div id="center-header">
+					<div id="diff-header" class="muted"></div>
+					<button id="view-toggle" type="button" hidden>Preview</button>
+				</div>
 				<div id="diff" class="diff"></div>
-				<pre id="report" class="report" hidden></pre>
+				<div id="report" class="report markdown" hidden></div>
+				<div id="preview" class="report markdown" hidden></div>
 			</section>
 
 			<aside id="right" aria-label="Review">

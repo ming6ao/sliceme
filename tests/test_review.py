@@ -12,6 +12,7 @@ These pin the contract from ``docs/review.md``:
 import contextlib
 import io
 import json
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -65,6 +66,7 @@ class ReviewCase(unittest.TestCase):
         (self.root / "src" / "a" / "x.py").write_text("a = 1\n")
         (self.root / "src" / "b" / "y.py").write_text("b = 1\n")
         (self.root / "src" / "c" / "z.py").write_text("c = 1\n")
+        (self.root / "README.md").write_text("# Test plane\n\nHello **markdown**.\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
         run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
@@ -255,6 +257,13 @@ class PacketTests(ReviewCase):
         types = [line["type"] for line in result["lines"]]
         self.assertIn("add", types)
 
+    def test_review_file_reads_the_committed_text(self):
+        self.record_wave0()
+        result = self.svc.review_file(None, "README.md")
+        self.assertIn("markdown", result["content"])
+        with self.assertRaises(SlicemeError):
+            self.svc.review_file(None, "../etc/passwd")
+
 
 class DiffParsingTests(unittest.TestCase):
     def test_parse_unified_diff(self):
@@ -375,6 +384,38 @@ class ServerTests(ReviewCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_markdown_client_is_served(self):
+        server, thread = self._start()
+        port = server.server_address[1]
+        try:
+            with self._request(
+                "GET", f"http://127.0.0.1:{port}/markdown.js"
+            ) as response:
+                body = response.read().decode("utf-8")
+                csp = response.headers.get("Content-Security-Policy")
+            self.assertIn("renderMarkdown", body)
+            self.assertIn("default-src 'none'", csp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_file_route_serves_markdown_and_rejects_traversal(self):
+        server, thread = self._start()
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        try:
+            with self._request("GET", f"{base}/api/file?file=README.md") as response:
+                body = json.loads(response.read())
+            self.assertIn("markdown", body["content"])
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                self._request("GET", f"{base}/api/file?file=../etc/passwd")
+            self.assertEqual(ctx.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_run_server_removes_the_url_file_on_an_early_exit(self):
         # A supervisor stops the server with a terminate signal. A signal that
         # arrives before ``serve_forever`` (during the browser open) must still
@@ -445,6 +486,33 @@ class ServerTests(ReviewCase):
                 process.wait(timeout=5)
         self.assertIsNotNone(process.returncode)
         self.assertFalse(path.exists())
+
+
+class MarkdownClientTests(unittest.TestCase):
+    def test_client_uses_the_markdown_renderer(self):
+        web = Path(__file__).resolve().parent.parent / "sliceme" / "review" / "web"
+        app = (web / "app.js").read_text(encoding="utf-8")
+        index = (web / "index.html").read_text(encoding="utf-8")
+        self.assertIn('from "/markdown.js"', app)
+        self.assertIn("renderMarkdown(els.report", app)
+        self.assertIn("renderMarkdown(els.preview", app)
+        self.assertIn('id="report" class="report markdown"', index)
+        self.assertIn('id="preview" class="report markdown"', index)
+
+    def test_markdown_parser_unit_test(self):
+        # The parser is pure, so a Node harness checks the block and inline
+        # tokens and the URL guard.
+        node = shutil.which("node")
+        harness = Path(__file__).resolve().parent / "markdown_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        result = subprocess.run(
+            [node, str(harness)],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class BrowserAndUrlTests(unittest.TestCase):

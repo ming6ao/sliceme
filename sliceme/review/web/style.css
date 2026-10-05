@@ -115,11 +115,30 @@ main {
 	overflow: auto;
 }
 
+#center-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	border-bottom: 1px solid var(--line);
+	padding-right: 8px;
+}
+
 #diff-header {
 	padding: 8px 12px;
-	border-bottom: 1px solid var(--line);
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 12px;
+}
+
+#view-toggle {
+	flex: none;
+	font-size: 12px;
+	padding: 2px 8px;
 }
 
 .file-tree {
@@ -164,10 +183,97 @@ main {
 
 .report {
 	margin: 0;
-	padding: 12px;
-	white-space: pre-wrap;
-	word-break: break-word;
+	padding: 12px 16px;
 	font-size: 13px;
+	line-height: 1.55;
+	overflow-wrap: anywhere;
+}
+
+.report h1,
+.report h2,
+.report h3,
+.report h4,
+.report h5,
+.report h6 {
+	margin: 1.1em 0 0.4em;
+	line-height: 1.25;
+}
+
+.report h1 {
+	font-size: 1.5em;
+}
+
+.report h2 {
+	font-size: 1.3em;
+}
+
+.report h3 {
+	font-size: 1.15em;
+}
+
+.report p,
+.report ul,
+.report ol,
+.report blockquote,
+.report table,
+.report pre {
+	margin: 0.6em 0;
+}
+
+.report ul,
+.report ol {
+	padding-left: 1.6em;
+}
+
+.report code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	background: var(--hunk-bg);
+	padding: 1px 4px;
+	border-radius: 4px;
+}
+
+.report pre {
+	background: var(--hunk-bg);
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	padding: 8px 10px;
+	overflow: auto;
+}
+
+.report pre code {
+	background: transparent;
+	padding: 0;
+}
+
+.report blockquote {
+	padding: 2px 12px;
+	border-left: 3px solid var(--line);
+	color: var(--muted);
+}
+
+.report table {
+	border-collapse: collapse;
+}
+
+.report th,
+.report td {
+	border: 1px solid var(--line);
+	padding: 4px 8px;
+	text-align: left;
+}
+
+.report th {
+	background: var(--hunk-bg);
+}
+
+.report a {
+	color: var(--accent);
+}
+
+.report hr {
+	border: 0;
+	border-top: 1px solid var(--line);
+	margin: 1em 0;
 }
 
 .file-row {

@@ -40,6 +40,7 @@ STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/diff.js": ("diff.js", "text/javascript; charset=utf-8"),
+    "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
 
@@ -232,6 +233,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/diff":
             self._handle_diff(parse_qs(parsed.query))
             return
+        if parsed.path == "/api/file":
+            self._handle_file(parse_qs(parsed.query))
+            return
         self._error(HTTPStatus.NOT_FOUND, "not found")
 
     def _plane_key(self, query: dict[str, list[str]]) -> str:
@@ -253,6 +257,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, snapshot)
 
     def _handle_diff(self, query: dict[str, list[str]]) -> None:
+        self._handle_read(query, api.diff)
+
+    def _handle_file(self, query: dict[str, list[str]]) -> None:
+        self._handle_read(query, api.file)
+
+    def _handle_read(self, query: dict[str, list[str]], handler: Any) -> None:
         key = self._plane_key(query)
         service = self.server.service_for(key)  # type: ignore[attr-defined]
         params = {
@@ -260,7 +270,7 @@ class _Handler(BaseHTTPRequestHandler):
             "file": (query.get("file") or [None])[0],
         }
         try:
-            result = api.diff(service, params)
+            result = handler(service, params)
         except SlicemeError as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return

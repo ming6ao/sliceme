@@ -5,6 +5,7 @@
 // updates use `history.replaceState`, so the token never enters history.
 
 import { markAnchor, renderDiff } from "/diff.js";
+import { renderMarkdown } from "/markdown.js";
 
 const els = {
 	targetName: document.getElementById("target-name"),
@@ -18,6 +19,8 @@ const els = {
 	diffHeader: document.getElementById("diff-header"),
 	diff: document.getElementById("diff"),
 	report: document.getElementById("report"),
+	preview: document.getElementById("preview"),
+	viewToggle: document.getElementById("view-toggle"),
 	evidence: document.getElementById("evidence"),
 	comments: document.getElementById("comments"),
 	commentCount: document.getElementById("comment-count"),
@@ -35,6 +38,8 @@ const view = {
 	commit: "",
 	file: "",
 	report: false,
+	preview: false,
+	previewKey: "",
 	snapshot: null,
 	tips: null,
 	anchor: null,
@@ -52,6 +57,7 @@ function readHash() {
 	view.commit = params.get("commit") || "";
 	view.file = params.get("file") || "";
 	view.report = params.get("report") === "1";
+	view.preview = params.get("preview") === "1";
 }
 
 function writeHash() {
@@ -61,6 +67,7 @@ function writeHash() {
 	if (view.commit) params.set("commit", view.commit);
 	if (view.file) params.set("file", view.file);
 	if (view.report) params.set("report", "1");
+	if (view.preview) params.set("preview", "1");
 	history.replaceState(null, "", "#" + params.toString());
 }
 
@@ -99,6 +106,10 @@ function notice(message, isError = false) {
 
 function shortHash(hash) {
 	return hash ? String(hash).slice(0, 7) : "none";
+}
+
+function isMarkdown(path) {
+	return /\.(md|markdown|mdown|mkd)$/i.test(path || "");
 }
 
 // ---------------------------------------------------------------------------
@@ -301,27 +312,60 @@ function render() {
 // Selection and actions
 // ---------------------------------------------------------------------------
 async function loadDiff() {
-	if (view.report) {
-		els.diff.hidden = true;
-		els.report.hidden = false;
-		els.report.textContent = view.snapshot?.report?.content || "(no report generated)";
-		els.diffHeader.textContent = "report";
-		return;
-	}
 	els.diff.hidden = false;
 	els.report.hidden = true;
+	els.preview.hidden = true;
+	els.viewToggle.hidden = true;
+
+	if (view.report) return showReport();
 	if (!view.file) {
 		els.diffHeader.textContent = "Select a file to view its diff.";
 		els.diff.textContent = "";
 		return;
 	}
+	const markdown = isMarkdown(view.file);
+	els.viewToggle.hidden = !markdown;
+	els.viewToggle.textContent = view.preview ? "View diff" : "View rendered";
+	els.diffHeader.textContent = `${view.commit ? shortHash(view.commit) + " " : ""}${view.file}`;
+	if (markdown && view.preview) return showPreview();
+	return showDiff();
+}
+
+function showReport() {
+	els.diff.hidden = true;
+	els.report.hidden = false;
+	const content = view.snapshot?.report?.content || "";
+	if (content.trim()) renderMarkdown(els.report, content);
+	else els.report.textContent = "(no report generated)";
+	els.diffHeader.textContent = "report";
+}
+
+async function showPreview() {
+	els.diff.hidden = true;
+	els.preview.hidden = false;
+	const key = `${view.commit}|${view.file}`;
+	if (view.previewKey === key) return;
+	view.previewKey = key;
+	try {
+		const result = await apiGet("/api/file", {
+			plane: view.plane,
+			commit: view.commit,
+			file: view.file,
+		});
+		renderMarkdown(els.preview, result.content || "");
+	} catch (error) {
+		notice(error.message, true);
+		els.preview.textContent = "(cannot load the file)";
+	}
+}
+
+async function showDiff() {
 	try {
 		const result = await apiGet("/api/diff", {
 			plane: view.plane,
 			commit: view.commit,
 			file: view.file,
 		});
-		els.diffHeader.textContent = `${view.commit ? shortHash(view.commit) + " " : ""}${view.file}`;
 		renderDiff(els.diff, result.lines || [], {
 			onSelect: (anchor, { extend }) => {
 				if (extend && view.anchor && view.anchor.side === anchor.side) {
@@ -343,6 +387,8 @@ async function loadDiff() {
 function selectCommit(hash) {
 	view.commit = hash;
 	view.report = false;
+	view.preview = false;
+	view.previewKey = "";
 	view.file = "";
 	view.anchor = null;
 	view.range = null;
@@ -353,6 +399,8 @@ function selectCommit(hash) {
 function selectFile(path) {
 	view.file = path;
 	view.report = false;
+	view.preview = isMarkdown(path);
+	view.previewKey = "";
 	view.anchor = null;
 	view.range = null;
 	writeHash();
@@ -362,9 +410,20 @@ function selectFile(path) {
 
 function selectReport() {
 	view.report = true;
+	view.preview = false;
+	view.previewKey = "";
 	view.file = "";
 	writeHash();
 	renderFiles();
+	loadDiff();
+}
+
+function togglePreview() {
+	view.preview = !view.preview;
+	view.previewKey = "";
+	view.anchor = null;
+	view.range = null;
+	writeHash();
 	loadDiff();
 }
 
@@ -469,6 +528,8 @@ function reconcileSelection(snapshot) {
 	const files = snapshot.files || [];
 	if (view.file && files.some((file) => file.path === view.file)) return changed;
 	view.file = files.length ? files[0].path : "";
+	view.preview = isMarkdown(view.file);
+	view.previewKey = "";
 	view.anchor = null;
 	view.range = null;
 	return true;
@@ -507,6 +568,7 @@ async function poll() {
 // ---------------------------------------------------------------------------
 els.approveAll.addEventListener("click", approveAll);
 els.deliver.addEventListener("click", deliver);
+els.viewToggle.addEventListener("click", togglePreview);
 els.commentForm.addEventListener("submit", (event) => {
 	event.preventDefault();
 	submitComment();

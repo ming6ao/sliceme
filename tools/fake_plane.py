@@ -205,10 +205,20 @@ NODE_EDITS = {
     "w5": {
         "docs/usage.md": (
             "# Usage\n\n"
-            "Run the service locally.\n\n"
+            "Run the service locally. See the `README.md` file for an overview.\n\n"
+            "> The service reads no configuration files yet.\n\n"
             "## Flags\n\n"
-            "- `--store` selects the store backend.\n"
-            "- `--verbose` enables debug output.\n"
+            "| Flag | Default | Purpose |\n"
+            "| --- | --- | --- |\n"
+            "| `--store` | `memory` | Select the store backend. |\n"
+            "| `--verbose` | off | Enable debug output. |\n\n"
+            "## Example\n\n"
+            "```bash\n"
+            "python -m src.cli.main --store memory --verbose\n"
+            "```\n\n"
+            "The **default** store keeps data in memory. A later release adds a\n"
+            "*file* backend. Use the [project issues](https://example.com/issues)\n"
+            "for a request.\n"
         ),
         "docs/configuration.md": (
             "# Configuration\n\n"
