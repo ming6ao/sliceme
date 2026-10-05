@@ -22,13 +22,18 @@ from pathlib import Path
 from typing import Any
 
 from .store import Store
-from .util import SlicemeError, read_json, state_dir, write_json
+from .util import (
+    SlicemeError,
+    branch_key as _branch_key,
+    read_json,
+    state_dir,
+    write_json,
+)
 
 
 def branch_key(branch: str) -> str:
     """The file prefix for a feature branch (``feat/x`` -> ``feat--x``)."""
-    key = (branch or "main").strip().replace("/", "--")
-    return key or "main"
+    return _branch_key(branch)
 
 
 def dag_path(root: Path, branch: str) -> Path:
@@ -180,6 +185,7 @@ def build_skeleton(
     store: Store,
     *,
     branch: str | None = None,
+    campaign: str | None = None,
     design: str | None = None,
 ) -> dict[str, Any]:
     branch = branch or config_branch(config)
@@ -187,8 +193,13 @@ def build_skeleton(
     state = load_state(root, branch)
     nodes = node_by_id(dag) if dag else {}
 
-    units = sorted(store.list_units(), key=lambda u: int(u["id"]))
-    candidates = sorted(store.list_candidates(), key=lambda c: int(c["id"]))
+    units = sorted(
+        store.list_units(campaign=campaign) if campaign else store.list_units(),
+        key=lambda u: int(u["id"]),
+    )
+    candidates = sorted(
+        store.list_candidates(campaign=campaign), key=lambda c: int(c["id"])
+    )
 
     per_node: list[dict[str, Any]] = []
     node_candidates = [c for c in candidates if c.get("node")]
@@ -322,10 +333,13 @@ def write_report(
     *,
     narrative: str | None = None,
     branch: str | None = None,
+    campaign: str | None = None,
     design: str | None = None,
 ) -> dict[str, Any]:
     branch = branch or config_branch(config)
-    skeleton = build_skeleton(root, config, store, branch=branch, design=design)
+    skeleton = build_skeleton(
+        root, config, store, branch=branch, campaign=campaign, design=design
+    )
     content = render(skeleton, narrative)
     path = report_path(root, branch)
     path.parent.mkdir(parents=True, exist_ok=True)

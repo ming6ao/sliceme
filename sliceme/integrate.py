@@ -172,13 +172,13 @@ def is_default_branch(
 # ---------------------------------------------------------------------------
 # Final delivery: merge the campaign worktree into the target branch
 # ---------------------------------------------------------------------------
-def _mark_delivered(store: Store) -> None:
-    """Mark every prepared candidate as landed without rewriting its commit.
+def _mark_delivered(store: Store, campaign: str | None = None) -> None:
+    """Mark this campaign's prepared candidates as landed.
 
     The candidate's ``head_commit`` is provenance (the node's commit on the
     campaign worktree), so delivery must not overwrite it with the merge commit.
     """
-    for candidate in store.list_candidates(statuses=["prepared"]):
+    for candidate in store.list_candidates(statuses=["prepared"], campaign=campaign):
         store.update_candidate(int(candidate["id"]), status="landed")
         unit = store.get_unit(int(candidate["unit_id"]))
         if unit:
@@ -195,6 +195,7 @@ def _deliver_branch(
     source: str,
     no_ff: bool,
     run_checks_flag: bool,
+    campaign: str | None = None,
 ) -> list[LandResult]:
     """Merge a single campaign worktree branch onto the target branch."""
     wt_path, _created = main_worktree(root, target)
@@ -205,7 +206,7 @@ def _deliver_branch(
     source_head = gitutil.rev_parse(root, source)
     target_head = gitutil.head_commit(wt_path)
     if gitutil.merge_base(root, target_head, source_head) == source_head:
-        _mark_delivered(store)
+        _mark_delivered(store, campaign)
         return [
             LandResult(
                 candidate_id=0,
@@ -254,7 +255,7 @@ def _deliver_branch(
                 )
             ]
 
-    _mark_delivered(store)
+    _mark_delivered(store, campaign)
     return [
         LandResult(
             candidate_id=0,
@@ -273,6 +274,7 @@ def deliver(
     root: Path,
     config: dict[str, Any],
     *,
+    campaign: str | None = None,
     target: str | None = None,
     source: str | None = None,
     no_ff: bool = True,
@@ -302,6 +304,7 @@ def deliver(
         source=str(source),
         no_ff=no_ff,
         run_checks_flag=run_checks_flag,
+        campaign=campaign,
     )
 
 
@@ -400,10 +403,13 @@ def simulate(
     root: Path,
     config: dict[str, Any],
     *,
+    campaign: str | None = None,
     statuses: list[str] | None = None,
     run_checks_flag: bool = True,
 ) -> dict[str, Any]:
-    candidates = store.list_candidates(statuses=statuses or ["prepared", "pending"])
+    candidates = store.list_candidates(
+        statuses=statuses or ["prepared", "pending"], campaign=campaign
+    )
     waves = plan_waves(store, root, config, candidates)
     base_ref = config.get("base") or config.get("main_branch") or "main"
     scratch = scratch_dir(root)

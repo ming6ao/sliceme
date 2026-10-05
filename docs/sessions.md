@@ -29,9 +29,11 @@ Pi saves every session as JSONL and reopens it with `pi --continue`,
 
 - Replacing the pi session picker. `/resume` stays pi's.
 - A daemon. Suspension is a file and SQLite checkpoint plus the pi session file.
-- Several concurrent campaigns per plane. One campaign exists per plane and
-  target branch.
 - Remote or cross-repository scheduling.
+
+One session owns one campaign. Several campaigns can share a plane at the same
+time. The session records its campaign in `.sliceme/active.<pid>.campaign`, and
+every campaign-scoped engine call passes `--campaign <branch>`.
 
 ## 2. Two layers, one lifecycle
 
@@ -180,7 +182,8 @@ The adapter writes the descriptor. The engine reads it.
 The descriptor does not duplicate the per-node status of `state.json`. It
 records the status at suspend time plus the recorded commit, so resume can
 detect drift. There is no per-node worktree or branch: every node in a wave
-shares the one campaign worktree.
+shares the campaign worktree. Each campaign has its own descriptor file, keyed
+by the campaign branch.
 
 A successful `deliver` writes `completed` immediately, so a crash after the
 merge cannot leave a `suspended` descriptor. When every wave finished but

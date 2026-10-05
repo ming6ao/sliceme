@@ -82,7 +82,9 @@ def review_commits(service: "Service") -> list[str]:
     """Campaign commits plus any prepared candidate commits, oldest first."""
     commits = campaign_commits(service)
     seen = set(commits)
-    for candidate in service.store.list_candidates(statuses=["prepared"]):
+    for candidate in service.store.list_candidates(
+        statuses=["prepared"], campaign=service.campaign_key()
+    ):
         try:
             head = gitutil.rev_parse(service.root, candidate["unit_branch"])
         except SlicemeError:
@@ -167,7 +169,7 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
 def _evidence_map(service: "Service", hashes: set[str]) -> dict[str, dict[str, Any]]:
     """The newest verification for each reviewed commit, keyed by commit hash."""
     found: dict[str, dict[str, Any]] = {}
-    for candidate in service.store.list_candidates():
+    for candidate in service.store.list_candidates(campaign=service.campaign_key()):
         head = str(candidate.get("head_commit") or "")
         if head not in hashes:
             continue

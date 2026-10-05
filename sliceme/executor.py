@@ -54,11 +54,13 @@ class Executor:
         config: dict[str, Any],
         *,
         dag: dict[str, Any] | None = None,
+        campaign: str | None = None,
     ):
         self.root = Path(root)
         self.store = store
         self.config = config
         self.dag = dag
+        self.campaign = campaign
 
     # -- locking --------------------------------------------------------
     @contextmanager
@@ -141,6 +143,7 @@ class Executor:
 
         job_id = self.store.create_job(
             wave=wave,
+            campaign=self.campaign,
             requester=requester,
             source=source,
             commit_ref=commit_sha,

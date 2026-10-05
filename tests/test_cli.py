@@ -354,6 +354,46 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(json.loads(out.stdout)["turns"], 3)
 
+    def test_cli_runs_two_campaigns_by_flag(self):
+        """`--campaign` scopes a call; a bare `status` reports the plane."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "a.txt").write_text("hi\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+
+            out = run_cli(
+                ["start", "--no-unit", "--target", "feat/x", "--target-mode", "new",
+                 "--check", "ok=true"],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            out = run_cli(
+                ["start", "--no-unit", "--target", "feat/y", "--target-mode", "new"],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+            out = run_cli(["--json", "status", "--campaign", "feat/x"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(json.loads(out.stdout)["target_branch"], "feat/x")
+
+            out = run_cli(["--json", "status", "--campaign", "feat/y"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(json.loads(out.stdout)["target_branch"], "feat/y")
+
+            out = run_cli(["--json", "status"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            summary = json.loads(out.stdout)
+            self.assertTrue(summary.get("plane"))
+            self.assertEqual(
+                {c["target_branch"] for c in summary["campaigns"]},
+                {"feat/x", "feat/y"},
+            )
+
     def test_cli_surface_matches_registry(self):
         """The CLI subcommands are exactly the registry (plus aliases)."""
         import argparse

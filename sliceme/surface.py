@@ -44,6 +44,12 @@ class Action:
     aliases: tuple[str, ...] = ()
 
 
+CAMPAIGN_HELP = (
+    "campaign to operate on: a target branch, a branch key, or a unit name "
+    "(default: the only campaign)"
+)
+
+
 ACTIONS: tuple[Action, ...] = (
     Action(
         name="start",
@@ -61,6 +67,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("checks", "list", "trusted check NAME=COMMAND (repeatable)", flag="check"),
             Param("force", "boolean", "overwrite an existing config"),
             Param("no_unit", "boolean", "initialise the plane without creating a unit for cwd"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
@@ -76,6 +83,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("sessions", "boolean", "list registered campaigns instead of the plane"),
             Param("resume", "boolean", "reconcile a suspended campaign and return its resume plan"),
             Param("plan_only", "boolean", "with --resume: report without side effects"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
@@ -87,6 +95,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("ff", "boolean", "allow a fast-forward instead of a merge commit"),
             Param("cleanup", "string", "cleanup after delivery", choices=("none", "worktrees", "all")),
             Param("no_checks", "boolean", "skip the plane's trusted checks"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
@@ -110,6 +119,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("wave", "int", "campaign wave the job belongs to"),
             Param("requester", "string", "verifier id that submitted the job"),
             Param("limit", "int", "with --run: at most this many jobs"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
@@ -121,6 +131,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("wave", "int", "wave index to record"),
             Param("messages", "string", "record: JSON object of node id to description"),
             Param("summary", "string", "record: candidate summary"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
@@ -153,6 +164,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("body", "string", "comment body"),
             Param("note", "string", "decision note"),
             Param("actor", "string", "who recorded the decision"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
@@ -175,6 +187,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("cost", "string", "end: approximate cost"),
             Param("last_tool", "string", "end: last tool name"),
             Param("error", "string", "end: error text"),
+            Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
 )
@@ -401,6 +414,7 @@ def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
             port=int(p.get("port") or 0),
             browser=not p.get("no_browser"),
             url_file=p.get("url_file"),
+            campaign=p.get("campaign"),
         )
     if p.get("poll"):
         return review_api.poll(service, p)

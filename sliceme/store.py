@@ -12,16 +12,33 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-from .util import SlicemeError, db_path, now
+from .util import SlicemeError, branch_key, db_path, now
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;
 
+CREATE TABLE IF NOT EXISTS campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL UNIQUE,
+  target_branch TEXT NOT NULL UNIQUE,
+  worktree_branch TEXT NOT NULL UNIQUE,
+  base TEXT,
+  unit_name TEXT NOT NULL UNIQUE,
+  name TEXT,
+  design TEXT,
+  state TEXT NOT NULL DEFAULT 'working',
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaigns_state ON campaigns(state);
+
 CREATE TABLE IF NOT EXISTS units (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
+  campaign TEXT,
   kind TEXT NOT NULL DEFAULT 'worker',
   worktree TEXT NOT NULL,
   branch TEXT NOT NULL,
@@ -35,6 +52,7 @@ CREATE TABLE IF NOT EXISTS units (
 CREATE TABLE IF NOT EXISTS candidates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   unit_id INTEGER NOT NULL REFERENCES units(id),
+  campaign TEXT,
   head_commit TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'prepared',
   summary TEXT,
@@ -44,10 +62,12 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
+CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign);
 
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   wave INTEGER,
+  campaign TEXT,
   requester TEXT,
   source TEXT NOT NULL,
   commit_ref TEXT NOT NULL,
@@ -72,11 +92,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_fingerprint ON jobs(fingerprint, status);
+CREATE INDEX IF NOT EXISTS idx_jobs_campaign ON jobs(campaign);
 
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   node TEXT NOT NULL,
   unit TEXT,
+  campaign TEXT,
   attempt INTEGER NOT NULL DEFAULT 1,
   agent TEXT NOT NULL DEFAULT 'worker',
   status TEXT NOT NULL DEFAULT 'running',
@@ -158,6 +180,19 @@ class Store:
         """Additive column migrations for planes created by older versions."""
         self._ensure_columns("jobs", {"timeout": "INTEGER NOT NULL DEFAULT 3600"})
         self._ensure_columns("candidates", {"node": "TEXT"})
+        self._ensure_columns("units", {"campaign": "TEXT"})
+        self._ensure_columns("candidates", {"campaign": "TEXT"})
+        self._ensure_columns("jobs", {"campaign": "TEXT"})
+        self._ensure_columns("attempts", {"campaign": "TEXT"})
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_units_campaign ON units(campaign)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_attempts_campaign ON attempts(campaign)"
+        )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
         existing = {
@@ -186,6 +221,98 @@ class Store:
             self.conn.rollback()
             raise
 
+    # ---- campaigns ----------------------------------------------------
+    def create_campaign(
+        self,
+        *,
+        key: str,
+        target_branch: str,
+        worktree_branch: str,
+        base: str | None = None,
+        unit_name: str | None = None,
+        name: str | None = None,
+        design: str | None = None,
+        state: str = "working",
+    ) -> dict[str, Any]:
+        """Register a campaign.  Idempotent on the unique key or target."""
+        ts = now()
+        unit_name = unit_name or f"campaign:{key}"
+        with self.tx() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO campaigns(key, target_branch, worktree_branch,"
+                " base, unit_name, name, design, state, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    key,
+                    target_branch,
+                    worktree_branch,
+                    base,
+                    unit_name,
+                    name,
+                    design,
+                    state,
+                    ts,
+                    ts,
+                ),
+            )
+            row = c.execute(
+                "SELECT * FROM campaigns WHERE key=?", (key,)
+            ).fetchone()
+        return _dict(row)  # type: ignore[return-value]
+
+    def get_campaign(self, ref: str | int | None) -> dict[str, Any] | None:
+        """Find a campaign by key, target branch, unit name, or id."""
+        if ref is None:
+            return None
+        text = str(ref)
+        if text.isdigit():
+            row = self.conn.execute(
+                "SELECT * FROM campaigns WHERE id=?", (int(text),)
+            ).fetchone()
+            if row is not None:
+                return _dict(row)
+        row = self.conn.execute(
+            "SELECT * FROM campaigns WHERE key=? OR target_branch=? OR unit_name=?"
+            " OR name=? ORDER BY id LIMIT 1",
+            (text, text, text, text),
+        ).fetchone()
+        return _dict(row)
+
+    def require_campaign(self, ref: str | int | None) -> dict[str, Any]:
+        campaign = self.get_campaign(ref)
+        if campaign is None:
+            raise SlicemeError(f"unknown campaign: {ref}")
+        return campaign
+
+    def list_campaigns(self, *, state: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM campaigns"
+        params: list[Any] = []
+        if state:
+            sql += " WHERE state=?"
+            params.append(state)
+        sql += " ORDER BY id"
+        return _dicts(self.conn.execute(sql, params).fetchall())
+
+    def set_campaign_state(self, ref: str | int, state: str) -> dict[str, Any] | None:
+        self.conn.execute(
+            "UPDATE campaigns SET state=?, updated_at=? WHERE key=? OR target_branch=?"
+            " OR unit_name=? OR id=?",
+            (state, now(), str(ref), str(ref), str(ref), int(ref) if str(ref).isdigit() else -1),
+        )
+        return self.get_campaign(ref)
+
+    def update_campaign_target(
+        self, key: str, *, target_branch: str, worktree_branch: str | None = None
+    ) -> dict[str, Any] | None:
+        sets = ["target_branch=?", "key=?", "updated_at=?"]
+        params: list[Any] = [target_branch, branch_key(target_branch), now()]
+        if worktree_branch is not None:
+            sets.insert(1, "worktree_branch=?")
+            params.insert(1, worktree_branch)
+        params.append(key)
+        self.conn.execute(f"UPDATE campaigns SET {', '.join(sets)} WHERE key=?", params)
+        return self.get_campaign(branch_key(target_branch))
+
     # ---- units --------------------------------------------------------
     def create_unit(
         self,
@@ -195,13 +322,14 @@ class Store:
         worktree: str,
         branch: str,
         base_commit: str,
+        campaign: str | None = None,
     ) -> int:
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO units(name, kind, worktree, branch, base_commit,"
-                " state, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (name, kind, worktree, branch, base_commit, "working", ts, ts),
+                "INSERT INTO units(name, campaign, kind, worktree, branch, base_commit,"
+                " state, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (name, campaign, kind, worktree, branch, base_commit, "working", ts, ts),
             )
             row = c.execute("SELECT id FROM units WHERE name=?", (name,)).fetchone()
         return int(row["id"])
@@ -222,12 +350,28 @@ class Store:
             ).fetchone()
         return _dict(row)
 
-    def list_units(self, *, active_only: bool = False) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM units"
+    def get_unit_by_campaign(self, campaign: str) -> dict[str, Any] | None:
+        """The campaign's accumulation unit, if it exists."""
+        row = self.conn.execute(
+            "SELECT * FROM units WHERE campaign=? ORDER BY id DESC LIMIT 1", (campaign,)
+        ).fetchone()
+        return _dict(row)
+
+    def list_units(
+        self, *, active_only: bool = False, campaign: str | None = None
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
         if active_only:
-            sql += " WHERE state='active'"
+            clauses.append("state='active'")
+        if campaign is not None:
+            clauses.append("campaign=?")
+            params.append(campaign)
+        sql = "SELECT * FROM units"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id"
-        return _dicts(self.conn.execute(sql).fetchall())
+        return _dicts(self.conn.execute(sql, params).fetchall())
 
     # ---- candidates ---------------------------------------------------
     def create_candidate(
@@ -237,13 +381,14 @@ class Store:
         head_commit: str,
         summary: str | None,
         node: str | None = None,
+        campaign: str | None = None,
     ) -> int:
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO candidates(unit_id, head_commit, status, summary, node,"
-                " created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
-                (unit_id, head_commit, "prepared", summary, node, ts, ts),
+                "INSERT INTO candidates(unit_id, campaign, head_commit, status, summary,"
+                " node, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (unit_id, campaign, head_commit, "prepared", summary, node, ts, ts),
             )
             return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
@@ -281,17 +426,28 @@ class Store:
             ).fetchone()
         return _dict(row)
 
-    def list_candidates(self, *, statuses: Sequence[str] | None = None) -> list[dict[str, Any]]:
+    def list_candidates(
+        self,
+        *,
+        statuses: Sequence[str] | None = None,
+        campaign: str | None = None,
+    ) -> list[dict[str, Any]]:
         sql = (
             "SELECT c.*, u.name AS unit_name, u.worktree AS worktree,"
             " u.branch AS unit_branch, u.base_commit AS unit_base_commit"
             " FROM candidates c JOIN units u ON u.id=c.unit_id"
         )
+        clauses: list[str] = []
         params: list[Any] = []
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
-            sql += f" WHERE c.status IN ({placeholders})"
+            clauses.append(f"c.status IN ({placeholders})")
             params.extend(statuses)
+        if campaign is not None:
+            clauses.append("c.campaign=?")
+            params.append(campaign)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY c.created_at ASC, c.id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
 
@@ -315,6 +471,7 @@ class Store:
     JOB_FIELDS = frozenset(
         {
             "wave",
+            "campaign",
             "requester",
             "source",
             "commit_ref",
@@ -345,6 +502,7 @@ class Store:
         commit_ref: str,
         commands: list[str],
         wave: int | None = None,
+        campaign: str | None = None,
         requester: str | None = None,
         tree: str | None = None,
         sandbox: dict[str, Any] | None = None,
@@ -357,11 +515,12 @@ class Store:
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO jobs(wave, requester, source, commit_ref, tree, commands,"
-                " sandbox, sandbox_digest, gpu, priority, status, fingerprint,"
-                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs(wave, campaign, requester, source, commit_ref, tree,"
+                " commands, sandbox, sandbox_digest, gpu, priority, status, fingerprint,"
+                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     wave,
+                    campaign,
                     requester,
                     source,
                     commit_ref,
@@ -446,10 +605,16 @@ class Store:
             )
             return int(cursor.rowcount)
 
-    def job_counts(self) -> dict[str, int]:
-        rows = self.conn.execute(
-            "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
-        ).fetchall()
+    def job_counts(self, *, campaign: str | None = None) -> dict[str, int]:
+        if campaign is None:
+            rows = self.conn.execute(
+                "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT status, COUNT(*) AS c FROM jobs WHERE campaign=? GROUP BY status",
+                (campaign,),
+            ).fetchall()
         return {str(r["status"]): int(r["c"]) for r in rows}
 
     # ---- attempts (per-subagent fidelity) ----------------------------
@@ -457,6 +622,7 @@ class Store:
         {
             "node",
             "unit",
+            "campaign",
             "attempt",
             "agent",
             "status",
@@ -481,6 +647,7 @@ class Store:
         *,
         node: str,
         unit: str | None = None,
+        campaign: str | None = None,
         attempt: int = 1,
         agent: str = "worker",
         started_at: float | None = None,
@@ -488,9 +655,9 @@ class Store:
         ts = now() if started_at is None else float(started_at)
         with self.tx() as c:
             c.execute(
-                "INSERT INTO attempts(node, unit, attempt, agent, status, started_at,"
-                " last_activity_at) VALUES(?,?,?,?,?,?,?)",
-                (node, unit, int(attempt), agent, "running", ts, ts),
+                "INSERT INTO attempts(node, unit, campaign, attempt, agent, status,"
+                " started_at, last_activity_at) VALUES(?,?,?,?,?,?,?,?)",
+                (node, unit, campaign, int(attempt), agent, "running", ts, ts),
             )
             return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
@@ -521,7 +688,11 @@ class Store:
         )
 
     def list_attempts(
-        self, *, node: str | None = None, statuses: Sequence[str] | None = None
+        self,
+        *,
+        node: str | None = None,
+        statuses: Sequence[str] | None = None,
+        campaign: str | None = None,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM attempts"
         clauses: list[str] = []
@@ -533,26 +704,36 @@ class Store:
             placeholders = ",".join("?" for _ in statuses)
             clauses.append(f"status IN ({placeholders})")
             params.extend(statuses)
+        if campaign is not None:
+            clauses.append("campaign=?")
+            params.append(campaign)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
 
-    def latest_attempt(self, node: str) -> dict[str, Any] | None:
-        return _dict(
-            self.conn.execute(
-                "SELECT * FROM attempts WHERE node=? ORDER BY id DESC LIMIT 1", (node,)
-            ).fetchone()
-        )
+    def latest_attempt(
+        self, node: str, *, campaign: str | None = None
+    ) -> dict[str, Any] | None:
+        sql = "SELECT * FROM attempts WHERE node=?"
+        params: list[Any] = [node]
+        if campaign is not None:
+            sql += " AND campaign=?"
+            params.append(campaign)
+        sql += " ORDER BY id DESC LIMIT 1"
+        return _dict(self.conn.execute(sql, params).fetchone())
 
     def find_running_attempt(
-        self, node: str, attempt: int | None = None
+        self, node: str, attempt: int | None = None, *, campaign: str | None = None
     ) -> dict[str, Any] | None:
         sql = "SELECT * FROM attempts WHERE node=? AND status='running'"
         params: list[Any] = [node]
         if attempt is not None:
             sql += " AND attempt=?"
             params.append(int(attempt))
+        if campaign is not None:
+            sql += " AND campaign=?"
+            params.append(campaign)
         sql += " ORDER BY id DESC LIMIT 1"
         return _dict(self.conn.execute(sql, params).fetchone())
 

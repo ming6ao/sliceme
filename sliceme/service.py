@@ -25,6 +25,7 @@ from .ownership import (
 from .store import Store
 from .util import (
     SlicemeError,
+    branch_key,
     config_path,
     now,
     read_json,
@@ -44,19 +45,119 @@ def _subject_line(text: str | None) -> str:
 
 
 class Service:
-    def __init__(self, root: Path, store: Store | None = None, *, migrate: bool = True):
+    def __init__(
+        self,
+        root: Path,
+        store: Store | None = None,
+        *,
+        campaign: str | None = None,
+        migrate: bool = True,
+    ):
         self.root = root
         self.store = store or Store(root, migrate=migrate)
+        self._campaign_ref = campaign
+        self._campaign: dict[str, Any] | None = None
+        if migrate:
+            self._ensure_legacy_campaign()
 
     def close(self) -> None:
         self.store.close()
 
     @property
-    def config(self) -> dict[str, Any]:
+    def plane_config(self) -> dict[str, Any]:
+        """The plane's ``config.json`` fields only (no campaign)."""
         cfg = read_json(config_path(self.root))
         if cfg is None:
             raise SlicemeError("missing .sliceme/config.json")
         return cfg
+
+    @property
+    def campaign(self) -> dict[str, Any] | None:
+        """The bound campaign, or the sole campaign, or ``None``.
+
+        A plane with several campaigns and no explicit reference is an error:
+        the caller must name one so state cannot silently mix.
+        """
+        if self._campaign is not None:
+            return self._campaign
+        if self._campaign_ref is not None:
+            self._campaign = self.store.require_campaign(self._campaign_ref)
+            return self._campaign
+        working = self.store.list_campaigns(state="working")
+        if len(working) == 1:
+            self._campaign = working[0]
+        elif working:
+            raise SlicemeError(
+                "several campaigns in this plane; pass --campaign <branch>"
+            )
+        else:
+            rows = self.store.list_campaigns()
+            if len(rows) == 1:
+                self._campaign = rows[0]
+            elif rows:
+                raise SlicemeError(
+                    "several campaigns in this plane; pass --campaign <branch>"
+                )
+        return self._campaign
+
+    def require_campaign(self) -> dict[str, Any]:
+        campaign = self.campaign
+        if campaign is None:
+            raise SlicemeError("no campaign in this plane; run `sliceme start` first")
+        return campaign
+
+    def campaign_key(self) -> str | None:
+        campaign = self.campaign
+        return campaign["key"] if campaign else None
+
+    @property
+    def config(self) -> dict[str, Any]:
+        """The effective config: plane fields plus the bound campaign fields.
+
+        Most call sites read ``target_branch`` / ``worktree_branch`` and keep
+        working.  Plane-only readers use :attr:`plane_config`.
+        """
+        cfg = dict(self.plane_config)
+        campaign = self.campaign
+        if campaign is not None:
+            cfg["target_branch"] = campaign["target_branch"]
+            cfg["main_branch"] = campaign["target_branch"]
+            cfg["worktree_branch"] = campaign["worktree_branch"]
+            cfg["base"] = campaign.get("base") or cfg.get("base")
+            cfg["campaign_name"] = campaign.get("name")
+            cfg["campaign_design"] = campaign.get("design")
+            cfg["campaign_key"] = campaign["key"]
+        return cfg
+
+    # The design document's name; the property is the same object.
+    campaign_config = config
+
+    def _ensure_legacy_campaign(self) -> dict[str, Any] | None:
+        """Register the one campaign of an old plane (idempotent)."""
+        if self.store.list_campaigns():
+            return None
+        cfg = read_json(config_path(self.root)) or {}
+        target = cfg.get("target_branch") or cfg.get("main_branch")
+        if not target:
+            return None
+        worktree_branch = cfg.get("worktree_branch") or _default_worktree_branch(
+            self.root, str(target)
+        )
+        unit = self.store.get_unit("campaign")
+        row = self.store.create_campaign(
+            key=branch_key(str(target)),
+            target_branch=str(target),
+            worktree_branch=str(worktree_branch),
+            base=cfg.get("base"),
+            unit_name="campaign",
+        )
+        if unit is not None:
+            self.store.conn.execute(
+                "UPDATE units SET campaign=? WHERE id=? AND campaign IS NULL",
+                (row["key"], int(unit["id"])),
+            )
+            self.store.conn.commit()
+        return row
 
     # ------------------------------------------------------------------
     # Bootstrap
@@ -128,6 +229,76 @@ class Service:
         store.close()
         _ensure_gitignore(root)
         return config
+
+    @classmethod
+    def _sync_campaign_retarget(
+        cls,
+        root: Path,
+        *,
+        old_target: str | None = None,
+        worktree_branch: str | None = None,
+        target_mode: str | None = None,
+    ) -> None:
+        """Register a campaign for a named target branch.
+
+        A resumed campaign already has a row, so this is a no-op.  A target
+        chosen with ``new`` is always a new campaign.  When the caller adopts
+        an existing branch and the plane has one campaign with no recorded
+        work, that campaign is retargeted in place for backward compatibility.
+        """
+        cfg = read_json(config_path(root)) or {}
+        new_target = cfg.get("target_branch") or cfg.get("main_branch")
+        if not new_target:
+            return
+        with _campaign_lock(root):
+            store = Store(root)
+            try:
+                # A plane created by `start --no-unit` has no row yet.
+                if not store.list_campaigns() and old_target:
+                    store.create_campaign(
+                        key=branch_key(str(old_target)),
+                        target_branch=str(old_target),
+                        worktree_branch=_default_worktree_branch(root, str(old_target)),
+                        base=cfg.get("base"),
+                        unit_name="campaign",
+                    )
+                if store.get_campaign(new_target) is not None:
+                    store.conn.commit()
+                    return
+                old = store.get_campaign(old_target) if old_target else None
+                if (
+                    old is not None
+                    and old["target_branch"] != str(new_target)
+                    and target_mode != "new"
+                    and not _campaign_has_work(store, root, old)
+                ):
+                    store.update_campaign_target(
+                        old["key"],
+                        target_branch=str(new_target),
+                        worktree_branch=worktree_branch,
+                    )
+                    store.conn.commit()
+                    return
+                key = branch_key(str(new_target))
+                by_key = store.get_campaign(key)
+                if by_key is not None and by_key["target_branch"] != str(new_target):
+                    raise SlicemeError(
+                        f"branch key collision: '{new_target}' and "
+                        f"'{by_key['target_branch']}' share the key '{key}'"
+                    )
+                store.create_campaign(
+                    key=key,
+                    target_branch=str(new_target),
+                    worktree_branch=str(
+                        worktree_branch
+                        or _default_worktree_branch(root, str(new_target))
+                    ),
+                    base=cfg.get("base"),
+                    unit_name=f"campaign:{key}",
+                )
+                store.conn.commit()
+            finally:
+                store.close()
 
     @classmethod
     def _retarget_plane(
@@ -215,9 +386,12 @@ class Service:
             )
             initialized = True
         elif main_branch or target_branch or target_mode:
-            # An existing plane keeps its identity; re-point its target branch
-            # only when the caller names one explicitly.  `campaign start`
-            # uses this to adopt the chosen branch.
+            # An existing plane keeps its identity; adopting a target branch
+            # registers a campaign.  A resumed campaign already has a row, so
+            # the registration is a no-op; a different target is a new
+            # campaign and the earlier one stays intact.
+            old_cfg = read_json(config_path(root)) or {}
+            old_target = old_cfg.get("target_branch") or old_cfg.get("main_branch")
             cls._retarget_plane(
                 root,
                 main_branch=main_branch,
@@ -225,6 +399,12 @@ class Service:
                 target_mode=target_mode,
                 worktree_branch=worktree_branch,
                 base=base,
+            )
+            cls._sync_campaign_retarget(
+                root,
+                old_target=old_target,
+                worktree_branch=worktree_branch,
+                target_mode=target_mode,
             )
 
         # Keep the exclude entry fresh even when the plane already existed and
@@ -243,18 +423,19 @@ class Service:
 
         service = cls(root)
         try:
-            unit = service.current_unit(start)
             created = False
-        except SlicemeError:
-            existing = {u["name"] for u in service.list_units()}
-            base_name = name or slugify(start.name) or "session"
-            unit_name = base_name
-            counter = 2
-            while unit_name in existing:
-                unit_name = f"{base_name}-{counter}"
-                counter += 1
-            unit = service.create_workspace(unit_name, kind=kind, base=base)
-            created = True
+            try:
+                unit = service.current_unit(start)
+            except SlicemeError:
+                existing = {u["name"] for u in service.store.list_units()}
+                base_name = name or slugify(start.name) or "session"
+                unit_name = base_name
+                counter = 2
+                while unit_name in existing:
+                    unit_name = f"{base_name}-{counter}"
+                    counter += 1
+                unit = service.create_workspace(unit_name, kind=kind, base=base)
+                created = True
         finally:
             service.close()
 
@@ -301,6 +482,13 @@ class Service:
     def list_units(self) -> list[dict[str, Any]]:
         return self.store.list_units()
 
+    def _scoped_units(self) -> list[dict[str, Any]]:
+        """Units that belong to the bound campaign (or every unit)."""
+        key = self.campaign_key()
+        if key is None:
+            return self.store.list_units()
+        return self.store.list_units(campaign=key)
+
     def unit_detail(self, unit_ref: str | int) -> dict[str, Any]:
         unit = self.store.require_unit(unit_ref)
         unit["candidates"] = [
@@ -341,14 +529,20 @@ class Service:
     # Campaign scope: one worktree for the whole campaign
     # ------------------------------------------------------------------
     def create_campaign_workspace(self, *, base: str | None = None) -> dict[str, Any]:
-        """Create (or reuse) the single campaign worktree.
+        """Create (or reuse) the campaign worktree for the bound campaign.
 
         Every wave commits onto this one branch.  It is never recreated and
         never rebased, so files written by an earlier wave are still present
         when the next wave runs.
         """
-        name = "campaign"
-        existing = self.store.get_unit(name)
+        campaign_row = self.campaign
+        if campaign_row is None:
+            campaign_row = self._ensure_legacy_campaign()
+        if campaign_row is None:
+            raise SlicemeError("no campaign in this plane; run `sliceme start` first")
+        key = str(campaign_row["key"])
+        name = str(campaign_row["unit_name"])
+        existing = self.store.get_unit_by_campaign(key)
         if existing is not None:
             worktree = Path(existing["worktree"])
             if worktree.exists():
@@ -357,22 +551,25 @@ class Service:
         config = self.config
         base_ref = (
             base
+            or campaign_row.get("base")
             or config.get("base")
-            or config.get("target_branch")
-            or config.get("main_branch")
-            or "main"
+            or campaign_row["target_branch"]
         )
         base_commit = gitutil.rev_parse(self.root, base_ref)
-        branch = str(config.get("worktree_branch") or "").strip()
+        branch = str(campaign_row.get("worktree_branch") or "").strip()
         if not branch:
-            branch = _default_worktree_branch(self.root, base_ref)
-            config["worktree_branch"] = branch
-            write_json(config_path(self.root), config)
+            branch = _default_worktree_branch(self.root, str(campaign_row["target_branch"]))
+            self.store.update_campaign_target(
+                key,
+                target_branch=str(campaign_row["target_branch"]),
+                worktree_branch=branch,
+            )
+            self.store.conn.commit()
         if integrate.is_default_branch(self.root, branch, config):
             raise SlicemeError(
                 f"refusing to use the default branch '{branch}' as the campaign worktree"
             )
-        worktree = worktrees_dir(self.root) / "campaign"
+        worktree = worktrees_dir(self.root) / f"campaign-{key}"
         gitutil.cleanup_worktree(self.root, worktree)
         if gitutil.branch_exists(self.root, branch):
             gitutil.add_worktree(
@@ -387,6 +584,7 @@ class Service:
                 worktree=str(worktree),
                 branch=branch,
                 base_commit=base_commit,
+                campaign=key,
             )
         except Exception:
             gitutil.cleanup_worktree(self.root, worktree)
@@ -416,7 +614,10 @@ class Service:
             gitutil.add_worktree(
                 self.root, worktree, branch=branch, base=gitutil.rev_parse(self.root, base_ref)
             )
-        return self.store.get_unit("campaign")  # type: ignore[return-value]
+        key = existing.get("campaign")
+        if key:
+            return self.store.get_unit_by_campaign(str(key))  # type: ignore[return-value]
+        return self.store.get_unit(existing["name"])  # type: ignore[return-value]
 
     def create_wave_workspace(
         self, wave_index: int, *, base: str | None = None
@@ -425,7 +626,10 @@ class Service:
         return self.create_campaign_workspace(base=base)
 
     def wave_unit(self, wave_index: int) -> dict[str, Any] | None:
-        return self.store.get_unit("campaign")
+        campaign_row = self.campaign
+        if campaign_row is None:
+            return self.store.get_unit("campaign")
+        return self.store.get_unit_by_campaign(str(campaign_row["key"]))
 
     def record_wave(
         self,
@@ -537,6 +741,7 @@ class Service:
                 head_commit=head,
                 summary=summary,
                 node=node_id,
+                campaign=self.campaign_key(),
             )
             created.append(self.store.get_candidate(cid))
         self.store.conn.commit()
@@ -551,7 +756,11 @@ class Service:
 
     def simulation(self, *, run_checks_flag: bool = True) -> dict[str, Any]:
         return integrate.simulate(
-            self.store, self.root, self.config, run_checks_flag=run_checks_flag
+            self.store,
+            self.root,
+            self.config,
+            campaign=self.campaign_key(),
+            run_checks_flag=run_checks_flag,
         )
 
     def executor(self):
@@ -560,7 +769,9 @@ class Service:
 
         branch = self.config.get("main_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
-        return Executor(self.root, self.store, self.config, dag=dag)
+        return Executor(
+            self.root, self.store, self.config, dag=dag, campaign=self.campaign_key()
+        )
 
     def sandbox_info(self, *, gpu_required: bool = False) -> dict[str, Any]:
         """Resolve and validate the project sandbox gate (never raises)."""
@@ -582,14 +793,24 @@ class Service:
         }
 
     def status(self) -> dict[str, Any]:
+        # A plane with several campaigns and no reference reports the plane,
+        # not one campaign.  A bound campaign reports its own slice.
+        if self._campaign_ref is None:
+            working = self.store.list_campaigns(state="working")
+            if len(working) > 1:
+                return self._plane_status()
+        campaign = self.campaign
+        if campaign is None:
+            return self._plane_status()
+        key = campaign["key"]
         branch = self.config.get("target_branch") or self.config.get("main_branch")
         # Normalization is required, so it runs before every projection.
         try:
             dag_merge = self.normalize_dag()
         except SlicemeError as exc:
             dag_merge = {"merged": {}, "error": str(exc)}
-        units = [self._project_unit(u, branch) for u in self.list_units()]
-        candidates = self.store.list_candidates()
+        units = [self._project_unit(u, branch) for u in self._scoped_units()]
+        candidates = self.store.list_candidates(campaign=key)
         waves = integrate.plan_waves(
             self.store,
             self.root,
@@ -601,6 +822,8 @@ class Service:
             "root": str(self.root),
             "main_branch": branch,
             "target_branch": branch,
+            "campaign": campaign.get("name") or campaign["key"],
+            "campaign_key": key,
             "worktree_branch": self.config.get("worktree_branch"),
             "feature_branch": branch,
             "default_branch": self.config.get("default_branch") or integrate.found_default_branch(self.root),
@@ -610,8 +833,33 @@ class Service:
             "dag_waves": dag_waves,
             "dag_waves_error": dag_waves_error,
             "dag_merge": dag_merge,
-            "executor": self.store.job_counts(),
+            "executor": self.store.job_counts(campaign=key),
             "sandbox": self.sandbox_info(),
+        }
+
+    def _plane_status(self) -> dict[str, Any]:
+        """A plane-level summary when no campaign is named."""
+        cfg = self.plane_config
+        campaigns = []
+        for row in self.store.list_campaigns():
+            candidates = self.store.list_candidates(campaign=row["key"])
+            campaigns.append(
+                {
+                    "key": row["key"],
+                    "target_branch": row["target_branch"],
+                    "worktree_branch": row["worktree_branch"],
+                    "unit_name": row["unit_name"],
+                    "state": row["state"],
+                    "candidates": len(candidates),
+                    "landed": sum(1 for c in candidates if c["status"] == "landed"),
+                }
+            )
+        return {
+            "root": str(self.root),
+            "plane": True,
+            "default_branch": cfg.get("default_branch")
+            or integrate.found_default_branch(self.root),
+            "campaigns": campaigns,
         }
 
     # ------------------------------------------------------------------
@@ -638,12 +886,16 @@ class Service:
             node_ids = sorted(state_nodes)
 
         latest: dict[str, dict[str, Any]] = {}
-        for candidate in self.store.list_candidates():
+        for candidate in self.store.list_candidates(campaign=self.campaign_key()):
             node = candidate.get("node")
             if node:
                 latest[str(node)] = candidate  # ascending id order: last wins
 
-        unit = self.store.get_unit("campaign")
+        campaign_row = self.campaign
+        unit = None
+        if campaign_row is not None:
+            unit = self.store.get_unit_by_campaign(str(campaign_row["key"]))
+        unit = unit or self.store.get_unit("campaign")
         worktree = Path(unit["worktree"]) if unit and unit.get("worktree") else None
         worktree_present = bool(worktree and worktree.exists())
         worktree_dirty = bool(worktree_present and not gitutil.is_clean(worktree))
@@ -743,10 +995,17 @@ class Service:
     def sessions(self) -> dict[str, Any]:
         """List every registered campaign from its descriptor files."""
         branch = (
-            self.config.get("target_branch")
-            or self.config.get("main_branch")
+            self.plane_config.get("target_branch")
+            or self.plane_config.get("main_branch")
             or "main"
         )
+        current = None
+        try:
+            current = self.campaign
+        except SlicemeError:
+            current = None
+        if current is not None:
+            branch = current["target_branch"]
         entries: list[dict[str, Any]] = []
         for key, descriptor in campaign.list_sessions(self.root):
             feature_branch = str(descriptor.get("feature_branch") or key)
@@ -792,7 +1051,12 @@ class Service:
         started_at: float | None = None,
     ) -> dict[str, Any]:
         attempt_id = self.store.create_attempt(
-            node=node, unit=unit, attempt=attempt, agent=agent, started_at=started_at
+            node=node,
+            unit=unit,
+            campaign=self.campaign_key(),
+            attempt=attempt,
+            agent=agent,
+            started_at=started_at,
         )
         self.store.conn.commit()
         return self.store.get_attempt(attempt_id)  # type: ignore[return-value]
@@ -801,7 +1065,9 @@ class Service:
         self, *, node: str, attempt: int | None = None, **fields: Any
     ) -> dict[str, Any] | None:
         """Finish the running attempt for *node* (optionally a specific attempt)."""
-        row = self.store.find_running_attempt(node, attempt)
+        row = self.store.find_running_attempt(
+            node, attempt, campaign=self.campaign_key()
+        )
         if row is None:
             return None
         result = self.store.finish_attempt(int(row["id"]), **fields)
@@ -811,7 +1077,11 @@ class Service:
     def attempts(
         self, *, node: str | None = None, statuses: list[str] | None = None
     ) -> dict[str, Any]:
-        return {"attempts": self.store.list_attempts(node=node, statuses=statuses)}
+        return {
+            "attempts": self.store.list_attempts(
+                node=node, statuses=statuses, campaign=self.campaign_key()
+            )
+        }
 
     # ------------------------------------------------------------------
     # Local review (docs/review.md)
@@ -1047,7 +1317,11 @@ class Service:
         # Keep any node that already has progress out of the merge.
         nodes = [dict(node) for node in dag["nodes"]]
         statuses = campaign.load_state(self.root, branch).get("nodes") or {}
-        recorded = {str(c["node"]) for c in self.store.list_candidates() if c.get("node")}
+        recorded = {
+            str(c["node"])
+            for c in self.store.list_candidates(campaign=self.campaign_key())
+            if c.get("node")
+        }
         for node in nodes:
             nid = str(node.get("id"))
             entry = statuses.get(nid)
@@ -1106,7 +1380,9 @@ class Service:
         projected = dict(unit)
         unit_id = int(unit["id"])
         candidates = [
-            c for c in self.store.list_candidates() if int(c["unit_id"]) == unit_id
+            c
+            for c in self.store.list_candidates(campaign=self.campaign_key())
+            if int(c["unit_id"]) == unit_id
         ]
         latest = candidates[-1] if candidates else None
         verification = (
@@ -1149,6 +1425,7 @@ class Service:
                 self.store,
                 self.root,
                 self.config,
+                campaign=self.campaign_key(),
                 target=target,
                 source=source,
                 no_ff=no_ff,
@@ -1158,6 +1435,10 @@ class Service:
                 self.consume_approvals(commits)
                 if override:
                     self.store.consume_review_decisions([int(override["id"])])
+                    self.store.conn.commit()
+                key = self.campaign_key()
+                if key:
+                    self.store.set_campaign_state(key, "delivered")
                     self.store.conn.commit()
         cleanup_result: dict[str, Any] | None = None
         artifacts_removed: list[str] = []
@@ -1178,7 +1459,12 @@ class Service:
     ) -> dict[str, Any]:
         """Write the deterministic campaign report plus an optional narrative."""
         return campaign.write_report(
-            self.root, self.config, self.store, narrative=narrative, design=design
+            self.root,
+            self.config,
+            self.store,
+            campaign=self.campaign_key(),
+            narrative=narrative,
+            design=design,
         )
 
     def remove_campaign_artifacts(self, *, keep_report: bool = True) -> list[str]:
@@ -1247,27 +1533,37 @@ class Service:
     def _prune_reviews(self) -> dict[str, int]:
         """Prune old review rows for campaigns that are gone and unregistered.
 
-        A campaign with a descriptor file and the current campaign are never
-        pruned, so an active review is never lost to a retention sweep.
+        Every key in the campaign registry, every descriptor file, and the
+        current campaign are kept, so an active review is never lost.
         """
-        policy = self.config.get("policy") or {}
+        policy = self.plane_config.get("policy") or {}
         days = float(policy.get("review_retention_days") or 30)
         keep = {
             campaign.branch_key(str(descriptor.get("feature_branch") or key))
             for key, descriptor in campaign.list_sessions(self.root)
         }
-        branch = (
-            self.config.get("target_branch")
-            or self.config.get("main_branch")
-            or "main"
-        )
-        keep.add(campaign.branch_key(str(branch)))
+        keep.update(row["key"] for row in self.store.list_campaigns())
         return self.store.prune_reviews(keep_branch_keys=keep, keep_after=now() - days * 86400)
 
 
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
+@contextmanager
+def _campaign_lock(root: Path):
+    """The campaign-creation lock, separate from the executor lock."""
+    import fcntl
+
+    from .util import state_dir
+
+    path = state_dir(root) / "campaigns.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 @contextmanager
 def _delivery_lock(root: Path):
     """The plane delivery lock, separate from ``executor.lock`` (POSIX only)."""
@@ -1283,6 +1579,15 @@ def _delivery_lock(root: Path):
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _campaign_has_work(store: Store, root: Path, campaign_row: dict[str, Any]) -> bool:
+    """Whether a campaign already recorded a DAG, a candidate, or a unit."""
+    if campaign.dag_path(root, str(campaign_row["target_branch"])).exists():
+        return True
+    if store.list_candidates(campaign=str(campaign_row["key"])):
+        return True
+    return store.get_unit_by_campaign(str(campaign_row["key"])) is not None
 
 
 def _owners_of(path: str, owners: dict[str, list[str]]) -> list[str]:

@@ -117,6 +117,7 @@ export async function spawnReviewServer(options: {
 	cwd: string;
 	urlFile: string;
 	logFile: string;
+	campaign?: string;
 	waitMs?: number;
 }): Promise<ReviewServerHandle> {
 	const invocation = resolveSlicemeInvocation();
@@ -129,11 +130,14 @@ export async function spawnReviewServer(options: {
 	// token, on stdout, so the token never enters the log. Mode 0600 keeps the
 	// log private when the operating system creates it.
 	const err = fs.openSync(options.logFile, "a", 0o600);
-	const child = spawn(
-		invocation.command,
-		[...invocation.prefix, "review", "--serve", "--url-file", options.urlFile],
-		{ cwd: options.cwd, shell: false, detached: false, stdio: ["pipe", "ignore", err] },
-	);
+	const reviewArgs = ["review", "--serve", "--url-file", options.urlFile];
+	if (options.campaign) reviewArgs.push("--campaign", options.campaign);
+	const child = spawn(invocation.command, [...invocation.prefix, ...reviewArgs], {
+		cwd: options.cwd,
+		shell: false,
+		detached: false,
+		stdio: ["pipe", "ignore", err],
+	});
 	fs.closeSync(err);
 	const deadline = Date.now() + (options.waitMs ?? 5000);
 	try {
@@ -206,6 +210,49 @@ export function heartbeatPath(cwd: string, branch: string, node: string): string
  */
 export function reviewUrlPath(cwd: string, pid: number = process.pid): string {
 	return path.join(stateDir(cwd), `review.${pid}.url`);
+}
+
+/**
+ * The private per-process pointer to the session's active campaign branch.
+ *
+ * The pi session owns a campaign, and a session can outlive one process, so the
+ * pointer is best-effort.  The engine's `config.json` mirror is the fallback
+ * for a resumed session or a pointer written by an earlier process.
+ */
+export function activeCampaignPath(cwd: string, pid: number = process.pid): string {
+	return path.join(stateDir(cwd), `active.${pid}.campaign`);
+}
+
+/** Read the active campaign branch from the pointer file, if any. */
+export function readActiveCampaign(
+	cwd: string,
+	pid: number = process.pid,
+): string | undefined {
+	const value = readJson<any>(activeCampaignPath(cwd, pid), undefined);
+	const branch = value?.campaign ?? value?.branch;
+	return typeof branch === "string" && branch ? branch : undefined;
+}
+
+/** Write the active campaign branch to the pointer file. */
+export function writeActiveCampaign(
+	cwd: string,
+	branch: string,
+	pid: number = process.pid,
+): void {
+	writeJson(activeCampaignPath(cwd, pid), {
+		campaign: branch,
+		pid,
+		updated_at: Date.now() / 1000,
+	});
+}
+
+/** Remove the active campaign pointer file. */
+export function clearActiveCampaign(cwd: string, pid: number = process.pid): void {
+	try {
+		fs.rmSync(activeCampaignPath(cwd, pid), { force: true });
+	} catch {
+		/* the file may already be gone */
+	}
 }
 
 /** Whether a process with this id exists. */

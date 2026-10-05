@@ -35,14 +35,14 @@ blocks another node.
   mode.
 - Sliceme does not resolve arbitrary text conflicts. The local review client
   is per-commit; it is not a general code-review tool.
-- A remote or shared scheduler, or several concurrent campaigns per plane, is
-  out of scope.
+- A remote or shared scheduler is out of scope.
+- The engine keeps one executor and one SQLite database per plane.
 
 ## 2. Core concepts
 
 | Term | Definition |
 |---|---|
-| **Campaign** | One target (feature) branch, one campaign worktree branch, a `dag.json` plan, and executor `state.json`. |
+| **Campaign** | One target (feature) branch, one campaign worktree branch, a `dag.json` plan, and executor `state.json`. Several campaigns can share one plane. |
 | **Coordinator** | The top-level session that owns the plan and drives the campaign. |
 | **Node** | One DAG unit of work with `owns`, `depends_on`, `acceptance`, `gpu`. |
 | **Unit** | A worktree + branch: the single `campaign` worktree, or a `sliceme/<name>` unit for non-campaign planes. |
@@ -401,6 +401,25 @@ shared index is not safe for multiple processes. They never run the suite in
 the shared tree. The executor snapshots the tree and runs the acceptance
 vector. Multiple read-only verifiers judge the recorded evidence of the
 executor.
+
+### 6.5 Several campaigns in one plane
+
+A plane is one repository root with a `.sliceme/` directory. A plane holds the
+one SQLite database, the one executor lock, the one delivery lock, and the
+default branch. Several campaigns can share the plane at the same time.
+
+Each campaign has its own target branch, campaign worktree branch, DAG file,
+state file, review queue, and delivery. The campaigns share one executor and
+one database. The target branch identifies a campaign.
+
+Use `--campaign` to name a campaign. The value is a target branch, a branch
+key, or a unit name. When a plane holds one campaign, `--campaign` is optional.
+When a plane holds several campaigns, a call without `--campaign` reports the
+plane summary instead of one campaign.
+
+The engine records campaigns in the `campaigns` table. The `config.json` file
+keeps a mirror of the newest target branch for one release, so an old reader
+keeps working.
 
 ## 7. Agent integration (pi)
 

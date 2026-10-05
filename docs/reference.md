@@ -22,6 +22,11 @@ The pi `sliceme` coordinator tool adds orchestration verbs (`ready`, `spawn`,
 `record`, `verify`, `deliver`) on top; those drive the engine and the DAG rather
 than adding engine actions.
 
+Most campaign-scoped actions accept `--campaign REF`. The reference is a target
+branch, a branch key, or a unit name. When a plane holds one campaign,
+`--campaign` is optional. When a plane holds several campaigns, a campaign-scoped
+call without `--campaign` returns the plane summary. See §3 for the layout.
+
 ### `start`
 
 ```bash
@@ -186,7 +191,7 @@ newest running try for the node.
 ### `review`
 
 ```bash
-sliceme review [--serve [--plane DIR ...] [--host H] [--port N]
+sliceme review [--serve [--plane DIR ...] [--campaign REF] [--host H] [--port N]
                [--no-browser] [--url-file PATH]]
                [--state] [--diff --file PATH] [--poll] [--ack --comment-id N]
                [--comment --body TEXT] [--decision approve|request_changes|override]
@@ -262,9 +267,10 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
 
 ```text
 .sliceme/
-  config.json                      # plane config (target_branch, worktree_branch, default_branch, checks, policy)
-  state.db                         # units, candidates, jobs, attempts, review_decisions, comments (SQLite, WAL)
+  config.json                      # plane config (default_branch, checks, policy)
+  state.db                         # units, campaigns, candidates, jobs, attempts, review_decisions, comments (SQLite, WAL)
   executor.lock                    # exclusive lock held by the single executor runner
+  campaigns.lock                   # campaign-creation lock
   review.lock                      # plane delivery lock (separate from executor.lock)
   review.<pid>.url                 # loopback review URL with the write token (mode 0600, per session)
   review.server.log                # review server stderr (shared, append-only)
@@ -348,8 +354,8 @@ The suite covers these areas:
   are not inferred.
 - No long-lived daemon or unix socket: the CLI calls the SQLite service directly
   (WAL).
-- One campaign per plane; RPC-steerable workers and multiple concurrent
-  campaigns are out of scope.
+- One campaign occupies one target branch; several campaigns can share a plane.
+  RPC-steerable workers are out of scope.
 - `jj` workspaces and shared dependency caches are not implemented.  Campaign
   workers are pure editors in the single campaign worktree (`wave --open` /
   `wave --record --wave N`).

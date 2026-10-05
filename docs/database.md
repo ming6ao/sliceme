@@ -55,6 +55,10 @@ to add columns that predate the current schema:
 
 - `jobs.timeout INTEGER NOT NULL DEFAULT 3600`
 - `candidates.node TEXT`
+- `units.campaign TEXT`
+- `candidates.campaign TEXT`
+- `jobs.campaign TEXT`
+- `attempts.campaign TEXT`
 
 The pattern is additive only. New columns must have a default or be nullable,
 because existing rows are not rewritten. Destructive changes (renames, drops,
@@ -64,16 +68,19 @@ working.
 ## 4. Entity relationships
 
 ```text
-units 1 ──── * candidates
+campaigns 1 ──── * units
+campaigns 1 ──── * candidates
 
-jobs              (standalone; no foreign-key edges)
-attempts          (standalone)
+jobs              (standalone; carries campaign)
+attempts          (standalone; carries campaign)
 review_decisions  (standalone; keyed by branch_key and commit)
 comments          (standalone; keyed by branch_key)
 ```
 
-- A **unit** is one writer: a git worktree plus a branch. The campaign unit is
-  named `campaign`; `start` may create one more unit for a directory.
+- A **campaign** is one target branch, one campaign worktree branch, one DAG,
+  and one review queue. A plane holds one or more campaigns.
+- A **unit** is one writer: a git worktree plus a branch. A campaign unit
+  belongs to its campaign; `start` may create one more unit for a directory.
 - A **candidate** is a committed head a unit offers for delivery. The campaign
   worktree accumulates commits, so a later wave adds rows.
 - A **job** is a check vector queued for the single executor. It carries its own
@@ -262,10 +269,34 @@ Created by `Service.review_comment`. `Service.review_poll` reads the `open` rows
 for the relay; `Service.review_ack` sets `delivered`. The queue is at-least-once:
 a lost ack repeats a comment, never loses it.
 
+### 5.7 `campaigns`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `key` | TEXT NOT NULL UNIQUE | `branch_key(target_branch)` |
+| `target_branch` | TEXT NOT NULL UNIQUE | the feature branch delivery lands on |
+| `worktree_branch` | TEXT NOT NULL UNIQUE | the campaign accumulation branch |
+| `base` | TEXT | fork point |
+| `unit_name` | TEXT NOT NULL UNIQUE | the campaign worktree unit name |
+| `name` | TEXT | display name |
+| `design` | TEXT | design document reference |
+| `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, `delivered`, `closed` |
+| `created_at` | REAL NOT NULL | |
+| `updated_at` | REAL NOT NULL | |
+
+Index: `idx_campaigns_state(state)`.
+
+Created by `Service._ensure_legacy_campaign`, `Service._sync_campaign_retarget`,
+and `Store.create_campaign` (idempotent on the key or target). Read by
+`Service.campaign`, `Service.status`, the review server, and the report. A
+legacy plane gets one row on first open. `Service.deliver` sets `delivered`.
+
 ## 6. Row lifecycle
 
 1. **Plane bootstrap.** `start` writes `.sliceme/config.json` and opens
-   `Store`, which creates the schema. Sliceme inserts no domain rows.
+   `Store`, which creates the schema. Sliceme registers one campaign for the
+   recorded target branch.
 2. **Unit.** `start` or `wave --open` creates a worktree and branch, then
    inserts a `units` row with `state='working'`.
 3. **Wave record.** `wave --record --wave N` runs conformance-by-ownership on
@@ -292,6 +323,7 @@ a lost ack repeats a comment, never loses it.
 
 | Table | Writers | Readers |
 |---|---|---|
+| `campaigns` | `Service._ensure_legacy_campaign`, `_sync_campaign_retarget`, `Store.create_campaign`, `Service.deliver` | `Service.campaign`, `Service.status`, the review server |
 | `units` | `Service.create_workspace`, `create_campaign_workspace`, `integrate._mark_delivered`, `gc` (branch prune) | `Service.status`, `current_unit`, `unit_detail`, `gc`, `campaign.build_skeleton` |
 | `candidates` | `Service._record_wave_commits`, `integrate._mark_delivered` | `Service.status`, `Service.review_snapshot`, `campaign.build_skeleton` |
 | `jobs` | `Executor.submit/run_job/cancel`, `recover_orphan_jobs` | `Executor.status/wait`, `Service.status`, `Service.review_snapshot` |
@@ -303,6 +335,7 @@ a lost ack repeats a comment, never loses it.
 
 | Table | Column | Values |
 |---|---|---|
+| `campaigns` | `state` | `working` (default), `delivered`, `closed` |
 | `units` | `state` | `working` (default), `landed`; `closed` reserved |
 | `units` | `kind` | `worker` (default), `campaign` |
 | `candidates` | `status` | `prepared` (default), `pending`, `landed`, `failed`, `blocked` |

@@ -46,7 +46,6 @@ from a second terminal:
 
 - A long-lived daemon or a second terminal renderer (`reference.md` §6). The
   live view is an in-process renderer plus small on-disk snapshots.
-- Several concurrent campaigns per plane.
 - Precise billing. Token and cost figures are approximate rollups of the
   provider usage.
 - Replacing the pi TUI. The display is a `ctx.ui.setWidget` region and the

@@ -177,6 +177,12 @@ To add an action: define it once in `surface.ACTIONS`, implement a handler and a
 `Service` method, and add the name to `integrations/pi/unit.ts::SLICEME_ACTIONS`.
 The CLI and the parity test follow automatically.
 
+A plane holds one `campaigns` registry and one or more campaigns. A campaign is
+identified by its target branch. Every campaign-scoped action accepts
+`--campaign REF`, where `REF` is a target branch, a branch key, or a unit name.
+A plane with one campaign makes the flag optional. A plane with several
+campaigns returns a plane summary when the flag is absent.
+
 ## 6. The campaign lifecycle
 
 ```mermaid
@@ -428,9 +434,10 @@ erDiagram
 
 ```text
 .sliceme/
-  config.json                      # version, target_branch, worktree_branch, base, default_branch, checks, policy
-  state.db                         # SQLite WAL: units, candidates, jobs, attempts, review_decisions, comments
+  config.json                      # version, default_branch, checks, policy (campaign mirror kept one release)
+  state.db                         # SQLite WAL: campaigns, units, candidates, jobs, attempts, review_decisions, comments
   executor.lock                    # exclusive lock held by the single executor runner
+  campaigns.lock                   # campaign-creation lock
   review.lock                      # plane delivery lock (separate from executor.lock)
   <branch-key>.dag.json            # canonical plan (never committed)
   <branch-key>.state.json          # coordinator cache: node -> status, waves, sandbox digest (rebuildable)
@@ -447,9 +454,12 @@ erDiagram
 `<branch-key>` replaces `/` with `--` (`feat/x` → `feat--x`), so one campaign's
 files form a single glob and campaigns cannot collide. `state.json` holds only
 what git and `state.db` cannot express quickly; on conflict, git and `state.db`
-win. The `attempts` table from [observability.md](./observability.md), and the
+win. A plane holds one `campaigns` registry table and several campaigns. The
+`attempts` table from [observability.md](./observability.md), and the
 `review_decisions` and `comments` tables from [review.md](./review.md), are
-implemented. The suspend/resume descriptor is a file, not a table.
+implemented.
+
+The suspend/resume descriptor is a file, not a table.
 
 ## 11. Concurrency, failure, and recovery
 

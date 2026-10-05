@@ -38,6 +38,16 @@ def slugify(text: str, max_len: int = 40) -> str:
     return (slug or "unit")[:max_len]
 
 
+def branch_key(branch: str) -> str:
+    """The file prefix and registry key for a campaign branch.
+
+    ``feat/x`` maps to ``feat--x``.  The mapping is lossy (``feat--x`` also
+    maps here), so callers that create a campaign must reject a collision.
+    """
+    key = (branch or "main").strip().replace("/", "--")
+    return key or "main"
+
+
 def find_repo_root(start: str | os.PathLike[str] | None = None) -> Path:
     """Walk up from *start* to the nearest directory holding ``.sliceme``."""
     current = Path(start or os.getcwd()).resolve()

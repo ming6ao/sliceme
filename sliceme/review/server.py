@@ -22,7 +22,6 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ..service import Service
-from ..store import Store
 from ..util import SlicemeError, config_path
 from . import api
 from .security import (
@@ -243,9 +242,34 @@ class _Handler(BaseHTTPRequestHandler):
         requested = (query.get("plane") or [""])[0]
         return requested if requested in keys else next(iter(keys))
 
+    def _campaign_key(self, query: dict[str, list[str]], plane_key: str) -> str | None:
+        pinned = getattr(self.server, "pinned_campaign", None)  # type: ignore[attr-defined]
+        if pinned:
+            return str(pinned)
+        rows: list[dict[str, Any]] = self.server.campaign_rows.get(plane_key, [])  # type: ignore[attr-defined]
+        keys = [str(row["key"]) for row in rows]
+        requested = (query.get("campaign") or [""])[0]
+        if requested in keys:
+            return requested
+        return keys[0] if keys else None
+
+    def _campaign_key_from_params(
+        self, params: dict[str, Any], plane_key: str
+    ) -> str | None:
+        pinned = getattr(self.server, "pinned_campaign", None)  # type: ignore[attr-defined]
+        if pinned:
+            return str(pinned)
+        rows: list[dict[str, Any]] = self.server.campaign_rows.get(plane_key, [])  # type: ignore[attr-defined]
+        keys = [str(row["key"]) for row in rows]
+        requested = str(params.get("campaign") or "")
+        if requested in keys:
+            return requested
+        return keys[0] if keys else None
+
     def _handle_state(self, query: dict[str, list[str]]) -> None:
         key = self._plane_key(query)
-        service = self.server.service_for(key)  # type: ignore[attr-defined]
+        campaign_key = self._campaign_key(query, key)
+        service = self.server.service_for(key, campaign_key)  # type: ignore[attr-defined]
         params = {"commit": (query.get("commit") or [None])[0]}
         try:
             snapshot = api.state(service, params)
@@ -254,6 +278,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         snapshot["planes"] = self.server.plane_list()  # type: ignore[attr-defined]
         snapshot["plane"] = key
+        snapshot["campaigns"] = self.server.campaign_list(key)  # type: ignore[attr-defined]
+        snapshot["campaign"] = campaign_key
         self._send_json(HTTPStatus.OK, snapshot)
 
     def _handle_diff(self, query: dict[str, list[str]]) -> None:
@@ -264,7 +290,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _handle_read(self, query: dict[str, list[str]], handler: Any) -> None:
         key = self._plane_key(query)
-        service = self.server.service_for(key)  # type: ignore[attr-defined]
+        campaign_key = self._campaign_key(query, key)
+        service = self.server.service_for(key, campaign_key)  # type: ignore[attr-defined]
         params = {
             "commit": (query.get("commit") or [None])[0],
             "file": (query.get("file") or [None])[0],
@@ -306,7 +333,8 @@ class _Handler(BaseHTTPRequestHandler):
         keys: dict[str, Path] = self.server.plane_keys  # type: ignore[attr-defined]
         if not key or key not in keys:
             key = next(iter(keys))
-        service = self.server.service_for(key)  # type: ignore[attr-defined]
+        campaign_key = self._campaign_key_from_params(params, key)
+        service = self.server.service_for(key, campaign_key)  # type: ignore[attr-defined]
         try:
             result = api.dispatch(service, action, params)
         except SlicemeError as exc:
@@ -339,27 +367,55 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], planes: dict[str, Path], token: str):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        planes: dict[str, Path],
+        token: str,
+        *,
+        campaign_rows: dict[str, list[dict[str, Any]]] | None = None,
+        pinned_campaign: str | None = None,
+    ):
         super().__init__(address, _Handler)
         self.plane_keys = planes
+        self.campaign_rows = campaign_rows or {}
+        self.pinned_campaign = pinned_campaign
         self.token = token
         self._local = threading.local()
 
     def plane_list(self) -> list[dict[str, str]]:
         return [{"key": key, "root": str(root)} for key, root in self.plane_keys.items()]
 
-    def service_for(self, key: str) -> Service:
+    def campaign_list(self, plane_key: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "key": row["key"],
+                "target_branch": row["target_branch"],
+                "name": row.get("name"),
+                "state": row["state"],
+            }
+            for row in self.campaign_rows.get(plane_key, [])
+        ]
+
+    def service_for(self, key: str, campaign_key: str | None = None) -> Service:
         services = getattr(self._local, "services", None)
         if services is None:
             services = {}
             self._local.services = services
-        if key not in services:
-            services[key] = Service(self.plane_keys[key], migrate=False)
-        return services[key]
+        cache_key = (key, campaign_key or "")
+        if cache_key not in services:
+            services[cache_key] = Service(
+                self.plane_keys[key], campaign=campaign_key, migrate=False
+            )
+        return services[cache_key]
 
 
 def build_server(
-    plane_roots: list[Path], *, host: str = "127.0.0.1", port: int = 0
+    plane_roots: list[Path],
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    campaign: str | None = None,
 ) -> _Server:
     """Build (but do not start) the review server, for tests and embedding."""
     if not is_loopback_host(host):
@@ -367,13 +423,24 @@ def build_server(
     planes = discover_planes(list(plane_roots))
     if not planes:
         raise SlicemeError("no Sliceme plane found to review")
-    # Run schema and migrations once, then close; request Services skip them.
+    # Run the schema, the migrations, and the legacy campaign backfill once.
+    by_plane: dict[str, list[dict[str, Any]]] = {}
     for plane in planes:
-        store = Store(plane)
-        store.close()
+        service = Service(plane)
+        try:
+            by_plane[str(plane)] = service.store.list_campaigns()
+        finally:
+            service.close()
     token = mint_token()
     keys = _plane_keys(planes)
-    return _Server((host, int(port)), keys, token)
+    campaign_map = {key: by_plane.get(str(root), []) for key, root in keys.items()}
+    return _Server(
+        (host, int(port)),
+        keys,
+        token,
+        campaign_rows=campaign_map,
+        pinned_campaign=campaign,
+    )
 
 
 def run_server(
@@ -383,8 +450,9 @@ def run_server(
     port: int = 0,
     browser: bool = True,
     url_file: Path | str | None = None,
+    campaign: str | None = None,
 ) -> dict[str, Any]:
-    server = build_server(plane_roots, host=host, port=port)
+    server = build_server(plane_roots, host=host, port=port, campaign=campaign)
     token = server.token
     actual_host, actual_port = server.server_address[:2]
     url = f"http://{actual_host}:{actual_port}/#token={token}"

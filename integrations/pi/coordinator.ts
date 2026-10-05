@@ -51,11 +51,13 @@ import { Type } from "typebox";
 import {
 	branchKey,
 	CampaignStateStore,
+	clearActiveCampaign,
 	controlPath,
 	dagPath,
 	heartbeatPath,
 	logEvent,
 	logPath,
+	readActiveCampaign,
 	readJson,
 	renderAgentLine,
 	renderProgress,
@@ -67,6 +69,7 @@ import {
 	spawnReviewServer,
 	stateDir,
 	statePath,
+	writeActiveCampaign,
 	writeJson,
 } from "./common.ts";
 import type {
@@ -229,6 +232,18 @@ const PAUSE_TTL_SECONDS = 3600;
 function configuredBranch(cwd: string): string | undefined {
 	const cfg = readJson<any>(path.join(stateDir(cwd), "config.json"), undefined);
 	return cfg?.target_branch ?? cfg?.main_branch;
+}
+
+/**
+ * The campaign this session owns.
+ *
+ * Order: the per-process pointer file, then the engine's config mirror.  The
+ * pointer is authoritative when several campaigns share one plane; the mirror
+ * is the fallback for a resumed session whose pointer was written by an
+ * earlier process.
+ */
+function activeCampaign(cwd: string): string | undefined {
+	return readActiveCampaign(cwd) ?? configuredBranch(cwd);
 }
 
 function readyNodes(dag: Dag, state: CampaignState): string[] {
@@ -422,8 +437,29 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// Engine verbs that act on one campaign.  The active campaign is injected
+	// as `--campaign` so a tool call never mixes two campaigns' state.  `start`
+	// is excluded because it creates or resumes the campaign itself.
+	const CAMPAIGN_SCOPED_ACTIONS = new Set([
+		"status",
+		"deliver",
+		"review",
+		"exec",
+		"wave",
+		"attempt",
+	]);
+
+	function withCampaign(ctx: ExtensionContext, args: string[]): string[] {
+		const action = args[0];
+		if (!CAMPAIGN_SCOPED_ACTIONS.has(action)) return args;
+		if (args.includes("--campaign")) return args;
+		const branch = activeCampaign(ctx.cwd);
+		if (!branch) return args;
+		return [...args, "--campaign", branch];
+	}
+
 	const sliceme = (ctx: ExtensionContext, args: string[], signal?: AbortSignal) =>
-		runSliceme(pi, ctx, args, signal);
+		runSliceme(pi, ctx, withCampaign(ctx, args), signal);
 
 	async function featureBranch(ctx: ExtensionContext): Promise<string> {
 		const { json } = await sliceme(ctx, ["status"]);
@@ -778,7 +814,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		reviewTimer = setInterval(() => {
 			const ctx = reviewCtx;
 			if (!ctx) return;
-			const branch = configuredBranch(ctx.cwd) ?? "";
+			const branch = activeCampaign(ctx.cwd) ?? "";
 			if (!branch) return;
 			relaySafely(ctx, branch);
 		}, 15000);
@@ -821,6 +857,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				urlFile: reviewUrlPath(ctx.cwd),
 				logFile: reviewLogPath(ctx.cwd),
+				campaign: branch,
 			});
 		} catch {
 			/* review is optional; the campaign must continue without it */
@@ -838,7 +875,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		reviewServer = undefined;
 		if (ctx.hasUI) ctx.ui.setWidget("sliceme-review", undefined);
 		if (!handle) return;
-		const key = branch ?? configuredBranch(ctx.cwd);
+		const key = branch ?? activeCampaign(ctx.cwd);
 		try {
 			handle.child.kill("SIGTERM");
 		} catch {
@@ -1181,22 +1218,25 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const unit = opened.json?.unit ?? {};
 		if (!unit.worktree) throw new Error("sliceme: could not create the campaign worktree");
 		// A re-opened worktree restores the source branch, so allow delivery again.
-		const branch = configuredBranch(ctx.cwd);
+		const branch = activeCampaign(ctx.cwd);
 		if (branch) deliveryBlocked.delete(branch);
 		return unit;
 	}
 
 	/**
-	 * Read the recorded target/worktree branch from an existing plane, if any.
-	 * Lets a resume reuse the branch chosen at the start of the campaign instead
-	 * of asking again.
+	 * Read the session's campaign from the engine, if any.  The pointer file
+	 * names the campaign; the engine's config mirror is the fallback.
 	 */
-	async function existingPlane(
+	async function existingCampaign(
 		ctx: ExtensionContext,
 	): Promise<{ target?: string; worktree?: string } | null> {
 		if (!fs.existsSync(path.join(stateDir(ctx.cwd), "config.json"))) return null;
 		try {
-			const { json } = await sliceme(ctx, ["status"]);
+			const branch = activeCampaign(ctx.cwd);
+			const { json } = await sliceme(
+				ctx,
+				branch ? ["status", "--campaign", branch] : ["status"],
+			);
 			return {
 				target: json?.target_branch ?? json?.main_branch,
 				worktree: json?.worktree_branch,
@@ -1218,7 +1258,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		// campaign.  Work accumulates on a separate campaign worktree branch and is
 		// only merged to the target after all waves finish and the user approves.
 		// A resume reuses the recorded target instead of asking again.
-		const prior = await existingPlane(ctx);
+		const prior = await existingCampaign(ctx);
 		const resuming = Boolean(
 			prior?.target &&
 				!params.replan &&
@@ -1256,6 +1296,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			["start", "--no-unit", "--target", branch, "--target-mode", chosen.mode],
 			signal,
 		);
+		// Bind this session to the campaign so every later engine call names it.
+		writeActiveCampaign(ctx.cwd, branch);
 		const plane = (await sliceme(ctx, ["status"], signal)).json;
 		const worktreeBranch = String(plane?.worktree_branch ?? "");
 
@@ -2057,7 +2099,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	pi.registerCommand("suspend", {
 		description: "Suspend the current Sliceme campaign and register it for resume",
 		handler: async (args, ctx) => {
-			const branch = configuredBranch(ctx.cwd);
+			const branch = activeCampaign(ctx.cwd);
 			if (!branch || !fs.existsSync(dagPath(ctx.cwd, branch))) {
 				ctx.ui.notify("sliceme: no campaign in this directory", "warning");
 				return;
@@ -2136,7 +2178,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		startReviewTimer();
 		try {
 			if (event.reason !== "resume" && event.reason !== "startup") return;
-			const branch = configuredBranch(ctx.cwd);
+			const branch = activeCampaign(ctx.cwd);
 			if (!branch) return;
 			const descriptor = readJson<any>(sessionPath(ctx.cwd, branch), undefined);
 			if (!descriptor || descriptor.status !== "suspended") return;
@@ -2183,7 +2225,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		} catch {
 			/* a resume hook must never break session startup */
 		} finally {
-			const branch = configuredBranch(ctx.cwd);
+			const branch = activeCampaign(ctx.cwd);
 			if (branch) {
 				const { state } = load(ctx, branch);
 				if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
@@ -2203,7 +2245,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		stopLiveTimer();
 		stopReviewServer(ctx);
 		try {
-			const branch = configuredBranch(ctx.cwd);
+			const branch = activeCampaign(ctx.cwd);
+			clearActiveCampaign(ctx.cwd);
 			if (!branch || !fs.existsSync(dagPath(ctx.cwd, branch))) return;
 			const { state } = load(ctx, branch);
 			const waves = state.waves ?? [];

@@ -26,6 +26,7 @@ In:
 - A non-blocking review: workers never wait for the human, and the coordinator
   proceeds automatically when a human approves every commit.
 - Several planes under configured roots.
+- Several campaigns in one plane, with a campaign selector in the client.
 
 Out:
 
@@ -33,7 +34,6 @@ Out:
 - Promotion from the target feature branch to the default branch. That step
   stays a human `git` step.
 - Uncommitted working-tree changes. The review unit is commits.
-- More than one concurrent campaign per plane.
 - Windows. The design uses POSIX locks.
 
 ## 2. Architecture
@@ -181,9 +181,9 @@ write path. Four routes cover the page.
 
 Query parameters:
 
-- `/api/state?plane=<plane>&commit=<sha>`
-- `/api/diff?plane=<plane>&commit=<sha>&file=<path>`
-- `/api/file?plane=<plane>&commit=<sha>&file=<path>`
+- `/api/state?plane=<plane>&campaign=<key>&commit=<sha>`
+- `/api/diff?plane=<plane>&campaign=<key>&commit=<sha>&file=<path>`
+- `/api/file?plane=<plane>&campaign=<key>&commit=<sha>&file=<path>`
 
 The file route validates the path. It rejects an absolute path, a `..`
 segment, a leading hyphen, and a colon. It reads the blob from git and refuses a
@@ -243,7 +243,7 @@ The client is one page. It has a top bar and three panes.
 - **Line.** A click on a diff line or a line number sets the anchor. A blue band
   marks the anchor. A shift-click extends the anchor to a range.
 - The client writes the selection to `location.hash`. A reload then restores the
-  view. The hash holds the plane, the commit, the file, the report flag, and the
+  view. The hash holds the plane, the campaign, the commit, the file, the report flag, and the
   preview flag.
 
 ### 8.2 Writing a comment

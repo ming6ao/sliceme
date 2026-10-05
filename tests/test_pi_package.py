@@ -406,6 +406,40 @@ class PiPackageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_active_campaign_pointer_is_wired(self):
+        # The coordinator binds a session to one campaign with a per-process
+        # pointer file, and passes `--campaign` to campaign-scoped engine calls
+        # (docs/multi-campaign.md).
+        common = PI_COMMON.read_text(encoding="utf-8")
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        for symbol in (
+            "activeCampaignPath",
+            "readActiveCampaign",
+            "writeActiveCampaign",
+            "clearActiveCampaign",
+        ):
+            self.assertIn(symbol, common, symbol)
+        self.assertIn("function activeCampaign", coordinator)
+        self.assertIn("withCampaign", coordinator)
+        self.assertIn("writeActiveCampaign(ctx.cwd, branch)", coordinator)
+        self.assertIn('"--campaign"', coordinator)
+        self.assertIn("clearActiveCampaign(ctx.cwd)", coordinator)
+
+    def test_active_campaign_pointer_unit_test(self):
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "active_campaign_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_docs_document_the_session_actions(self):
         names = {a.name for a in surface.ACTIONS}
         self.assertIn("attempt", names)

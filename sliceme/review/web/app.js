@@ -9,6 +9,7 @@ import { renderMarkdown } from "/markdown.js";
 
 const els = {
 	targetName: document.getElementById("target-name"),
+	campaignSelect: document.getElementById("campaign-select"),
 	tips: document.getElementById("tips"),
 	approvalState: document.getElementById("approval-state"),
 	stale: document.getElementById("stale"),
@@ -35,6 +36,7 @@ const els = {
 const view = {
 	token: "",
 	plane: "",
+	campaign: "",
 	commit: "",
 	file: "",
 	report: false,
@@ -54,6 +56,7 @@ function readHash() {
 	const params = new URLSearchParams(location.hash.replace(/^#/, ""));
 	if (params.get("token")) view.token = params.get("token");
 	if (params.get("plane")) view.plane = params.get("plane");
+	if (params.get("campaign")) view.campaign = params.get("campaign");
 	view.commit = params.get("commit") || "";
 	view.file = params.get("file") || "";
 	view.report = params.get("report") === "1";
@@ -64,6 +67,7 @@ function writeHash() {
 	const params = new URLSearchParams();
 	if (view.token) params.set("token", view.token);
 	if (view.plane) params.set("plane", view.plane);
+	if (view.campaign) params.set("campaign", view.campaign);
 	if (view.commit) params.set("commit", view.commit);
 	if (view.file) params.set("file", view.file);
 	if (view.report) params.set("report", "1");
@@ -87,7 +91,7 @@ async function apiPost(action, params) {
 	const response = await fetch("/api/action", {
 		method: "POST",
 		headers: { "Content-Type": "application/json", "X-Sliceme-Token": view.token },
-		body: JSON.stringify({ action, params: { plane: view.plane, ...params } }),
+		body: JSON.stringify({ action, params: { plane: view.plane, campaign: view.campaign, ...params } }),
 	});
 	const body = await response.json().catch(() => ({}));
 	if (!response.ok) throw new Error(body.error || response.statusText);
@@ -115,9 +119,29 @@ function isMarkdown(path) {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+function renderCampaignSelect() {
+	const snapshot = view.snapshot;
+	const campaigns = snapshot?.campaigns || [];
+	const select = els.campaignSelect;
+	select.textContent = "";
+	if (campaigns.length <= 1) {
+		select.hidden = true;
+		return;
+	}
+	for (const campaign of campaigns) {
+		const option = document.createElement("option");
+		option.value = campaign.key;
+		option.textContent = campaign.target_branch || campaign.key;
+		if (campaign.key === (snapshot.campaign || view.campaign)) option.selected = true;
+		select.append(option);
+	}
+	select.hidden = false;
+}
+
 function renderTopbar() {
 	const snapshot = view.snapshot;
 	if (!snapshot) return;
+	renderCampaignSelect();
 	els.targetName.textContent = `sliceme review · ${snapshot.feature_branch}`;
 	els.tips.textContent = `${shortHash(snapshot.source_tip)} → ${shortHash(snapshot.target_tip)}`;
 	const unapproved = (snapshot.commits || []).filter((commit) => !commit.approved).length;
@@ -349,6 +373,7 @@ async function showPreview() {
 	try {
 		const result = await apiGet("/api/file", {
 			plane: view.plane,
+			campaign: view.campaign,
 			commit: view.commit,
 			file: view.file,
 		});
@@ -363,6 +388,7 @@ async function showDiff() {
 	try {
 		const result = await apiGet("/api/diff", {
 			plane: view.plane,
+			campaign: view.campaign,
 			commit: view.commit,
 			file: view.file,
 		});
@@ -546,8 +572,13 @@ async function applySnapshot(snapshot) {
 
 async function poll() {
 	try {
-		const snapshot = await apiGet("/api/state", { plane: view.plane, commit: view.commit });
+		const snapshot = await apiGet("/api/state", {
+			plane: view.plane,
+			campaign: view.campaign,
+			commit: view.commit,
+		});
 		if (snapshot.plane) view.plane = snapshot.plane;
+		if (snapshot.campaign) view.campaign = snapshot.campaign;
 		const tipsChanged = view.tips ? tipsDiffer(view.tips, snapshot) : false;
 		if (tipsChanged && !els.commentForm.hidden) {
 			// A comment draft is open. Keep the diff and the anchor stable until
@@ -569,6 +600,18 @@ async function poll() {
 els.approveAll.addEventListener("click", approveAll);
 els.deliver.addEventListener("click", deliver);
 els.viewToggle.addEventListener("click", togglePreview);
+els.campaignSelect.addEventListener("change", () => {
+	view.campaign = els.campaignSelect.value;
+	view.commit = "";
+	view.file = "";
+	view.report = false;
+	view.preview = false;
+	view.previewKey = "";
+	view.anchor = null;
+	view.range = null;
+	writeHash();
+	void poll();
+});
 els.commentForm.addEventListener("submit", (event) => {
 	event.preventDefault();
 	submitComment();

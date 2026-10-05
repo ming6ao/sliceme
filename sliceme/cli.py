@@ -168,11 +168,12 @@ def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
             port=int(getattr(args, "port", 0) or 0),
             browser=not getattr(args, "no_browser", False),
             url_file=getattr(args, "url_file", None),
+            campaign=getattr(args, "campaign", None),
         )
         _print(result, as_json)
         return 0
 
-    service = Service(_root(args))
+    service = Service(_root(args), campaign=getattr(args, "campaign", None))
     try:
         result = surface.dispatch(service, action, vars(args))
     finally:
