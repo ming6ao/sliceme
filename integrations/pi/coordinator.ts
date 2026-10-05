@@ -696,6 +696,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	// repeats a comment rather than losing it.  The in-process set only avoids a
 	// duplicate inside one session.
 	const relayedComments = new Set<number>();
+	// Campaign branches whose automatic delivery hit a hard refusal. Only a
+	// re-opened campaign worktree clears the block.
+	const deliveryBlocked = new Set<string>();
 	let reviewTimer: ReturnType<typeof setInterval> | undefined;
 	let reviewCtx: ExtensionContext | undefined;
 	let reviewServer: ReviewServerHandle | undefined;
@@ -705,11 +708,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		branch: string,
 		signal?: AbortSignal,
 	): Promise<void> {
-		// Stop the review server when the campaign is delivered or no commits
-		// remain.  This catches a delivery from the review client or the CLI, not
-		// only the tool path.
-		const teardownState = stateStore(ctx, branch).read<CampaignState>();
-		if (reviewServer && !reviewNeeded(teardownState)) stopReviewServer(ctx, branch);
+		const state = stateStore(ctx, branch).read<CampaignState>();
+		// Stop the review server when the campaign is delivered or when the
+		// server process has exited. This catches a delivery from the review
+		// client or the CLI, not only the tool path.
+		if (reviewServer && (!reviewNeeded(state) || reviewServer.child.exitCode !== null)) {
+			stopReviewServer(ctx, branch);
+		}
 		if (!ctx.isIdle()) return;
 		let payload: any;
 		try {
@@ -738,23 +743,44 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				/* at-least-once: a failed ack repeats the comment, never loses it */
 			}
 		}
+		// Nothing is left to review once every commit is approved and no wave
+		// will add a commit, so stop showing the URL even before delivery.
+		if (payload?.all_approved && allWavesDone(state)) stopReviewServer(ctx, branch);
 		// When every commit is approved and every wave is done, proceed
 		// automatically; the human approval is the trigger, not a prompt.
 		if (payload?.all_approved && ctx.isIdle()) {
-			const state: any = stateStore(ctx, branch).read();
-			if (allWavesDone(state) && !state.delivered) {
-				await tryDelivery(ctx, branch, state, signal);
+			if (allWavesDone(state) && !state.delivered && !deliveryBlocked.has(branch)) {
+				try {
+					await tryDelivery(ctx, branch, state, signal);
+				} catch (error) {
+					const message = String((error as Error)?.message ?? error);
+					deliveryBlocked.add(branch);
+					logEvent(ctx.cwd, branch, "campaign.deliver_blocked", { error: message });
+					if (ctx.hasUI) {
+						ctx.ui.notify(`sliceme: automatic delivery stopped: ${message}`, "error");
+					}
+				}
 			}
 		}
+	}
+
+	/** Fire-and-forget relay; a relay failure must never crash the session. */
+	function relaySafely(ctx: ExtensionContext, branch: string): void {
+		void relayReviewComments(ctx, branch).catch((error) => {
+			logEvent(ctx.cwd, branch, "review.relay_failed", {
+				error: String((error as Error)?.message ?? error),
+			});
+		});
 	}
 
 	function startReviewTimer(): void {
 		if (reviewTimer) return;
 		reviewTimer = setInterval(() => {
-			if (!reviewCtx) return;
-			const branch = configuredBranch(reviewCtx.cwd) ?? "";
+			const ctx = reviewCtx;
+			if (!ctx) return;
+			const branch = configuredBranch(ctx.cwd) ?? "";
 			if (!branch) return;
-			void relayReviewComments(reviewCtx, branch);
+			relaySafely(ctx, branch);
 		}, 15000);
 	}
 
@@ -778,6 +804,17 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	 */
 	async function ensureReviewServer(ctx: ExtensionContext, branch: string): Promise<void> {
 		if (reviewServer && reviewServer.child.exitCode === null) return;
+		// Do not restart the review surface once every commit is approved and no
+		// wave remains. A delivery from the review client does not update
+		// state.json, so the engine poll is the source of truth here.
+		if (allWavesDone(stateStore(ctx, branch).read<CampaignState>())) {
+			try {
+				const payload = (await sliceme(ctx, ["review", "--poll"])).json;
+				if (payload?.all_approved) return;
+			} catch {
+				/* fall through and start the server */
+			}
+		}
 		let handle: ReviewServerHandle;
 		try {
 			handle = await spawnReviewServer({
@@ -1143,6 +1180,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const opened = await sliceme(ctx, ["wave", "--open"], signal);
 		const unit = opened.json?.unit ?? {};
 		if (!unit.worktree) throw new Error("sliceme: could not create the campaign worktree");
+		// A re-opened worktree restores the source branch, so allow delivery again.
+		const branch = configuredBranch(ctx.cwd);
+		if (branch) deliveryBlocked.delete(branch);
 		return unit;
 	}
 
@@ -1598,7 +1638,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			? `wave ${wave.index} recorded: ${candidates.map((c: any) => c.node).join(", ")}`
 			: `wave ${wave.index} recorded no changes`;
 		// Between waves, deliver any review comments the human wrote.
-		void relayReviewComments(ctx, branch);
+		relaySafely(ctx, branch);
 		// The first recorded commit makes the review client available.
 		if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
 		return { content: [{ type: "text" as const, text: summary }], details: recorded.json ?? {} };
@@ -2147,7 +2187,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (branch) {
 				const { state } = load(ctx, branch);
 				if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
-				void relayReviewComments(ctx, branch);
+				relaySafely(ctx, branch);
 			}
 		}
 	});
