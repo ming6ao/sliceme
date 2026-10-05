@@ -182,11 +182,22 @@ ACTIONS: tuple[Action, ...] = (
             Param("turns", "int", "end: turn count"),
             Param("tool_calls", "int", "end: tool call count"),
             Param("tools", "string", "end: JSON tool histogram"),
+            Param("tool_seconds", "string", "end: total tool seconds"),
+            Param("tool_durations", "string", "end: JSON tool duration map"),
+            Param("slowest_commands", "string", "end: JSON slowest command list"),
             Param("tokens_in", "int", "end: input tokens"),
             Param("tokens_out", "int", "end: output tokens"),
             Param("cost", "string", "end: approximate cost"),
             Param("last_tool", "string", "end: last tool name"),
             Param("error", "string", "end: error text"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
+        name="progress",
+        summary="time and tool breakdown for a campaign",
+        params=(
+            Param("node", "string", "show one node instead of the campaign"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -320,6 +331,9 @@ def _dispatch_attempt(service: "Service", p: dict[str, Any]) -> Any:
             "turns",
             "tool_calls",
             "tools",
+            "tool_seconds",
+            "tool_durations",
+            "slowest_commands",
             "tokens_in",
             "tokens_out",
             "cost",
@@ -331,8 +345,15 @@ def _dispatch_attempt(service: "Service", p: dict[str, Any]) -> Any:
                 continue
             if key in {"exit_code", "turns", "tool_calls", "tokens_in", "tokens_out"}:
                 value = int(value)
-            elif key == "cost":
+            elif key in {"cost", "tool_seconds"}:
                 value = float(value)
+            elif key in {"tool_durations", "slowest_commands"}:
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise SlicemeError(
+                        f"attempt --end {key} is not valid JSON: {exc}"
+                    ) from None
             fields[key] = value
         result = service.end_attempt(
             node=str(node), attempt=attempt_number, **fields
@@ -341,6 +362,10 @@ def _dispatch_attempt(service: "Service", p: dict[str, Any]) -> Any:
             raise SlicemeError(f"no running attempt for node '{node}'")
         return result
     return service.attempts(node=str(node))
+
+
+def _dispatch_progress(service: "Service", p: dict[str, Any]) -> Any:
+    return service.progress(node=p.get("node"))
 
 
 def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
@@ -435,6 +460,7 @@ _HANDLERS = {
     "status": _dispatch_status,
     "deliver": _dispatch_deliver,
     "attempt": _dispatch_attempt,
+    "progress": _dispatch_progress,
     "exec": _dispatch_exec,
     "wave": _dispatch_wave,
     "review": _dispatch_review,

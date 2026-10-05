@@ -210,6 +210,9 @@ the review evidence for a commit.
 | `turns` | INTEGER NOT NULL DEFAULT 0 | |
 | `tool_calls` | INTEGER NOT NULL DEFAULT 0 | |
 | `tools` | TEXT | JSON tool histogram |
+| `tool_seconds` | REAL NOT NULL DEFAULT 0 | total tool call time |
+| `tool_durations` | TEXT | JSON map of tool name to total seconds |
+| `slowest_commands` | TEXT | JSON list of the slowest shell commands |
 | `tokens_in` | INTEGER NOT NULL DEFAULT 0 | |
 | `tokens_out` | INTEGER NOT NULL DEFAULT 0 | |
 | `cost` | REAL NOT NULL DEFAULT 0 | approximate cost |
@@ -221,8 +224,10 @@ Indexes: `idx_attempts_node`, `idx_attempts_status`.
 
 Created by `Store.create_attempt` through `Service.begin_attempt` (the
 `attempt --begin` action). Finished by `Store.finish_attempt` through
-`Service.end_attempt` (`attempt --end`). Read by `Service.attempts` and the
-resume continuation prompt.
+`Service.end_attempt` (`attempt --end`). Read by `Service.attempts`, the
+`Service.progress` projection, and the resume continuation prompt. The time
+split is the attempt wall clock minus `tool_seconds`, and the result is the
+thinking time (`docs/observability.md`).
 
 ### 5.5 `review_decisions`
 

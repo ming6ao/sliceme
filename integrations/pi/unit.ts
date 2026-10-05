@@ -38,6 +38,7 @@ export const SLICEME_ACTIONS = [
 	"wave",
 	"review",
 	"attempt",
+	"progress",
 ] as const;
 
 /** The `sliceme` tool exposes exactly the agent surface. */

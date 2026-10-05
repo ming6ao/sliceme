@@ -17,6 +17,7 @@ derive from one action registry (`sliceme/surface.py`). Seven engine verbs:
 | `wave` | The campaign worktree: `--open` creates or reuses it, `--record --wave N` commits the wave. |
 | `review` | Local review: serve the browser client, read a snapshot or a file body, poll comments, record a decision, or write the report. |
 | `attempt` | Record one subagent attempt's `--begin`/`--end` and its metrics. |
+| `progress` | The time and tool breakdown for a campaign (attempts, jobs, heartbeats). |
 
 The pi `sliceme` coordinator tool adds orchestration verbs (`ready`, `spawn`,
 `record`, `verify`, `deliver`) on top; those drive the engine and the DAG rather
@@ -68,7 +69,8 @@ sliceme status [--unit U] [--short] [--simulate] [--no-checks] [--health] [--gc]
 ```
 
 `--short` prints only the current unit name. `--health` checks git/config/db.
-`--gc` prunes worktrees, landed-unit branches, and expired review rows.
+`--gc` prunes worktrees, landed-unit branches, expired review rows, and the
+files of every campaign that has finished, and it keeps the report.
 `--simulate` groups prepared candidates into DAG waves, materializes each
 wave's combined tree, and runs the configured checks once over the combined
 result; `--no-checks` plans only. `--sessions` lists registered campaigns from
@@ -180,13 +182,34 @@ a non-directory spec (`file:`, `symbol:`, …) when it projects the DAG.
 sliceme attempt --begin --node w1 [--unit U] [--attempt N] [--agent worker]
 sliceme attempt --end   --node w1 [--attempt N] --status ok [--exit-code 0] \
                         [--turns 7] [--tool-calls 23] [--tokens-in 45210] \
-                        [--tokens-out 3120] [--cost 0.42] [--tools '{"bash":6}']
+                        [--tokens-out 3120] [--cost 0.42] [--tools '{"bash":6}'] \
+                        [--tool-seconds 42.5] [--tool-durations '{"bash":30}'] \
+                        [--slowest-commands '[{"command":"cargo","seconds":30}]']
 ```
 
 Persists one subagent run for one node: a planner, a worker, or a verifier.
 The coordinator calls `--begin` before `runSubagent` and `--end` after, and the
 same stream feeds a debounced per-node heartbeat file.  `--end` finds the
 newest running try for the node.
+
+The `--tool-seconds` value is the total tool call time. The time split is the
+attempt wall clock minus `--tool-seconds`, and the result is the thinking time.
+`--tool-durations` is a JSON map of tool name to total seconds.
+`--slowest-commands` is a JSON list of the slowest shell commands. See
+[observability.md](./observability.md).
+
+### `progress`
+
+```bash
+sliceme progress [--node ID] [--campaign REF]
+```
+
+Prints the durable time and tool breakdown for one campaign. The action joins
+the DAG waves, `state.json`, the `attempts` table, the `jobs` table, and the
+per-node heartbeat files. The output has a `totals` block, a `by_agent` block, a
+`tools` rollup, a `commands` rollup, a `verification` block, and a `nodes` list.
+The `--node` flag narrows the view to one node. See
+[observability.md](./observability.md).
 
 ### `review`
 

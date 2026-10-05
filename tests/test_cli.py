@@ -354,6 +354,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(json.loads(out.stdout)["turns"], 3)
 
+            run_cli(["--json", "attempt", "--begin", "--node", "w2"], root)
+            out = run_cli(
+                [
+                    "--json",
+                    "attempt",
+                    "--end",
+                    "--node",
+                    "w2",
+                    "--status",
+                    "ok",
+                    "--tool-seconds",
+                    "12.5",
+                    "--tool-durations",
+                    json.dumps({"bash": 10.0, "read": 2.5}),
+                    "--slowest-commands",
+                    json.dumps(
+                        [{"command": "cargo", "tool": "bash", "seconds": 10.0, "calls": 1}]
+                    ),
+                ],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            ended = json.loads(out.stdout)
+            self.assertEqual(ended["tool_seconds"], 12.5)
+            self.assertIn("bash", ended["tool_durations"])
+
+            out = run_cli(["--json", "progress"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            progress = json.loads(out.stdout)
+            self.assertIn("totals", progress)
+            self.assertIn("tools", progress)
+            self.assertIn("verification", progress)
+
     def test_cli_runs_two_campaigns_by_flag(self):
         """`--campaign` scopes a call; a bare `status` reports the plane."""
         with tempfile.TemporaryDirectory() as tmp:

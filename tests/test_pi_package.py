@@ -183,6 +183,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("deliver", names)
         self.assertIn("wave", names)
         self.assertIn("review", names)
+        self.assertIn("progress", names)
         text = PI_UNIT.read_text(encoding="utf-8")
         match = re.search(r"SLICEME_ACTIONS\s*=\s*\[(.*?)\]\s*as const", text, re.DOTALL)
         self.assertIsNotNone(match)
@@ -356,6 +357,48 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("emitProgress", common)
         # The timer stops on session shutdown.
         self.assertIn("stopLiveTimer()", coordinator)
+        # The metrics line and the tool and thinking split (docs/observability.md §3).
+        for needle in ("buildMetricsLine", "showMetrics", "toolSeconds", "toolStartedAt"):
+            self.assertIn(needle, common, needle)
+
+    def test_metrics_pipeline_is_wired(self):
+        # The reducer pairs tool calls by id, and the coordinator persists the
+        # metrics to `attempt --end` (docs/observability.md §2).
+        common = PI_COMMON.read_text(encoding="utf-8")
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        for needle in ("reduceToolStart", "reduceToolEnd", "programName", "topCommands"):
+            self.assertIn(f"export function {needle}", common, needle)
+        for needle in (
+            "tool_seconds",
+            "tool_durations",
+            "slowest_commands",
+        ):
+            self.assertIn(needle, common, needle)
+        for needle in (
+            '"--tool-seconds"',
+            '"--tool-durations"',
+            '"--slowest-commands"',
+            '"--turns"',
+            '"--tokens-in"',
+        ):
+            self.assertIn(needle, coordinator, needle)
+
+    def test_metrics_unit_test(self):
+        # The metrics helpers are pure, so a Node harness drives them with a
+        # fixed event list. Node 22.6+ strips the TypeScript types at run time.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "metrics_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_render_progress_unit_test(self):
         # The renderer is pure, so a Node harness drives it with fixed snapshots
@@ -444,11 +487,13 @@ class PiPackageTests(unittest.TestCase):
         names = {a.name for a in surface.ACTIONS}
         self.assertIn("attempt", names)
         self.assertIn("status", names)
+        self.assertIn("progress", names)
         reference = (REPO_ROOT / "docs" / "reference.md").read_text(encoding="utf-8")
-        for needle in ("`attempt`", "--resume", "--sessions"):
+        for needle in ("`attempt`", "`progress`", "--resume", "--sessions", "--tool-seconds"):
             self.assertIn(needle, reference)
         database = (REPO_ROOT / "docs" / "database.md").read_text(encoding="utf-8")
         self.assertIn("attempts", database)
+        self.assertIn("tool_seconds", database)
 
 
 if __name__ == "__main__":

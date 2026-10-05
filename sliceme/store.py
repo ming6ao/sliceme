@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS attempts (
   turns INTEGER NOT NULL DEFAULT 0,
   tool_calls INTEGER NOT NULL DEFAULT 0,
   tools TEXT,
+  tool_seconds REAL NOT NULL DEFAULT 0,
+  tool_durations TEXT,
+  slowest_commands TEXT,
   tokens_in INTEGER NOT NULL DEFAULT 0,
   tokens_out INTEGER NOT NULL DEFAULT 0,
   cost REAL NOT NULL DEFAULT 0,
@@ -184,6 +187,14 @@ class Store:
         self._ensure_columns("candidates", {"campaign": "TEXT"})
         self._ensure_columns("jobs", {"campaign": "TEXT"})
         self._ensure_columns("attempts", {"campaign": "TEXT"})
+        self._ensure_columns(
+            "attempts",
+            {
+                "tool_seconds": "REAL NOT NULL DEFAULT 0",
+                "tool_durations": "TEXT",
+                "slowest_commands": "TEXT",
+            },
+        )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign)"
         )
@@ -544,14 +555,24 @@ class Store:
         )
 
     def list_jobs(
-        self, *, statuses: Sequence[str] | None = None, limit: int | None = None
+        self,
+        *,
+        statuses: Sequence[str] | None = None,
+        campaign: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM jobs"
         params: list[Any] = []
+        clauses: list[str] = []
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
-            sql += f" WHERE status IN ({placeholders})"
+            clauses.append(f"status IN ({placeholders})")
             params.extend(statuses)
+        if campaign is not None:
+            clauses.append("campaign=?")
+            params.append(campaign)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY priority DESC, requested_at ASC, id ASC"
         if limit:
             sql += " LIMIT ?"
@@ -633,6 +654,9 @@ class Store:
             "turns",
             "tool_calls",
             "tools",
+            "tool_seconds",
+            "tool_durations",
+            "slowest_commands",
             "tokens_in",
             "tokens_out",
             "cost",
@@ -675,6 +699,11 @@ class Store:
         fields.setdefault("finished_at", ts)
         started = float(row.get("started_at") or ts)
         fields.setdefault("duration", ts - started)
+        # The metric columns are TEXT; accept a structured value from a direct
+        # caller (the CLI already sends JSON text).
+        for name, value in list(fields.items()):
+            if isinstance(value, (dict, list)):
+                fields[name] = json.dumps(value)
         sets = ", ".join(f"{name}=?" for name in fields)
         params = list(fields.values()) + [int(attempt_id)]
         self.conn.execute(f"UPDATE attempts SET {sets} WHERE id=?", params)

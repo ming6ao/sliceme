@@ -69,6 +69,7 @@ import {
 	spawnReviewServer,
 	stateDir,
 	statePath,
+	topCommands,
 	writeActiveCampaign,
 	writeJson,
 } from "./common.ts";
@@ -92,6 +93,7 @@ export const CAMPAIGN_ACTIONS = [
 	"exec",
 	"wave",
 	"review",
+	"progress",
 ] as const;
 
 /** Parameter names the `review` action forwards to the engine verb. */
@@ -141,6 +143,9 @@ const EXEC_KEYS = [
 
 /** Parameter names the `wave` action forwards to the engine verb. */
 const WAVE_KEYS = ["open", "record", "wave", "messages", "summary"] as const;
+
+/** Parameter names the `progress` action forwards to the engine verb. */
+const PROGRESS_KEYS = ["node"] as const;
 
 /** Render one engine verb plus its selected params as CLI arguments. */
 function engineArgs(action: string, keys: readonly string[], params: any): string[] {
@@ -447,6 +452,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		"exec",
 		"wave",
 		"attempt",
+		"progress",
 	]);
 
 	function withCampaign(ctx: ExtensionContext, args: string[]): string[] {
@@ -991,6 +997,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				turns: 0,
 				toolCalls: 0,
 				tools: {},
+				toolSeconds: 0,
+				toolDurations: {},
+				commands: {},
 				tokensIn: 0,
 				tokensOut: 0,
 				cost: 0,
@@ -1000,6 +1009,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		};
 		liveAgents.set(live.key, live);
 		ensureLiveTimer(ctx);
+		let lastProgress = live.progress;
 		// P0.6: a spawn streams its own row through the tool update channel.
 		const streamRow = (progress: SubagentProgress) => {
 			if (!opts.onUpdate) return;
@@ -1035,31 +1045,49 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			attempt,
 			heartbeat: heartbeatPath(ctx.cwd, branch, opts.node),
 			onProgress: (progress) => {
+				lastProgress = progress;
 				live.progress = progress;
 				renderLive();
 				streamRow(progress);
 			},
 		});
+		lastProgress = live.progress;
 		live.status = result.interrupted ? "interrupted" : result.exitCode === 0 ? "done" : "failed";
 		live.finishedAt = now();
 		ensureLiveTimer(ctx);
+		const endArgs = [
+			"attempt",
+			"--end",
+			"--node",
+			opts.node,
+			"--attempt",
+			String(attempt),
+			"--status",
+			result.interrupted ? "interrupted" : result.exitCode === 0 ? "ok" : "failed",
+			"--exit-code",
+			String(result.exitCode),
+			"--turns",
+			String(lastProgress.turns),
+			"--tool-calls",
+			String(lastProgress.toolCalls),
+			"--tools",
+			JSON.stringify(lastProgress.tools ?? {}),
+			"--tool-seconds",
+			String(lastProgress.toolSeconds ?? 0),
+			"--tool-durations",
+			JSON.stringify(lastProgress.toolDurations ?? {}),
+			"--slowest-commands",
+			JSON.stringify(topCommands(lastProgress.commands ?? {})),
+			"--tokens-in",
+			String(lastProgress.tokensIn ?? 0),
+			"--tokens-out",
+			String(lastProgress.tokensOut ?? 0),
+			"--cost",
+			String(lastProgress.cost ?? 0),
+		];
+		if (lastProgress.lastTool) endArgs.push("--last-tool", lastProgress.lastTool);
 		try {
-			await sliceme(
-				ctx,
-				[
-					"attempt",
-					"--end",
-					"--node",
-					opts.node,
-					"--attempt",
-					String(attempt),
-					"--status",
-					result.interrupted ? "interrupted" : result.exitCode === 0 ? "ok" : "failed",
-					"--exit-code",
-					String(result.exitCode),
-				],
-				opts.signal,
-			);
+			await sliceme(ctx, endArgs, opts.signal);
 		} catch {
 			/* best-effort */
 		}
@@ -1847,12 +1875,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			store.save(cleanup !== "all");
 			// Terminal immediately: a crash before `session_shutdown` must not leave a
 			// `suspended` descriptor that re-offers a finished campaign on startup.
-			writeSessionDescriptor(
-				ctx,
-				branch,
-				{ status: "completed", reason: "delivered" },
-				state,
-			);
+			// `cleanup: all` also removes the descriptor, so do not write it back.
+			if (cleanup !== "all") {
+				writeSessionDescriptor(
+					ctx,
+					branch,
+					{ status: "completed", reason: "delivered" },
+					state,
+				);
+			}
 			// Delivery merges every approved commit; the review surface is done.
 			stopReviewServer(ctx, branch);
 		} else {
@@ -2073,13 +2104,16 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				}
 				case "exec":
 				case "wave":
-				case "review": {
+				case "review":
+				case "progress": {
 					const keys =
 						params.action === "exec"
 							? EXEC_KEYS
 							: params.action === "wave"
 								? WAVE_KEYS
-								: REVIEW_KEYS;
+								: params.action === "progress"
+									? PROGRESS_KEYS
+									: REVIEW_KEYS;
 					const { json, text } = await sliceme(
 						ctx,
 						engineArgs(String(params.action), keys, params),

@@ -262,8 +262,15 @@ no per-wave cleanup: Sliceme never removes files between waves. The `deliver`
 action takes `--cleanup worktrees`. That option removes the campaign worktree,
 drops the already-merged campaign branch, and clears scratch. It keeps the
 report and the `dag.json` and `state.json` records. `cleanup: all` also removes
-the `dag.json` and `state.json` files and the worker logs, and still keeps the
-report.
+every other campaign file: the `dag.json`, `state.json`, `session.json`,
+`control.json`, and `events.jsonl` records, the `progress_<node>.json`
+heartbeats, and the worker logs.
+
+Every cleanup level keeps the report.
+
+`status --gc` removes the files of every campaign that has finished. It keeps
+the reports. A closed campaign can hold unmerged work, so `gc` keeps its files
+and its branch.
 
 ### GPU arbitration
 
@@ -469,3 +476,16 @@ tool, or drive the CLI directly. Run `start --no-unit --target <branch>`.
 Then run `spawn`, `record`, and `verify` for each ready wave. Finally, run one
 `deliver` after every wave completes and a human approves every accumulated
 commit.
+
+### Time and tool metrics
+
+The coordinator widget shows a live metrics line. The line has the campaign
+elapsed time, the tool and thinking split, and the slowest tool. Each running
+row shows the same split and the age of the active tool call.
+
+Run `sliceme progress` for the durable breakdown. The command reads
+`state.db`, `state.json`, and the heartbeat files.
+
+The output groups the time by agent role, by tool, and by command. The verifier
+tool calls fold into the tool rollup. The executor check time stays in the
+`verification` block. See [observability.md](./observability.md).

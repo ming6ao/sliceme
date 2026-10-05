@@ -24,7 +24,11 @@ function agent(over = {}) {
 		progress: {
 			turns: over.turns ?? 7,
 			toolCalls: over.toolCalls ?? 23,
-			tools: {},
+			tools: over.tools ?? {},
+			toolSeconds: over.toolSeconds ?? 0,
+			toolDurations: over.toolDurations ?? {},
+			commands: over.commands ?? {},
+			toolStartedAt: over.toolStartedAt,
 			tokensIn: 0,
 			tokensOut: 0,
 			cost: 0,
@@ -74,7 +78,8 @@ assert.equal(lines[0], "sliceme · demo");
 assert.ok(lines[1].includes("wave 2/2"), lines[1]);
 assert.ok(lines[1].includes("1/2 done"), lines[1]);
 assert.ok(lines[1].includes("1 running"), lines[1]);
-assert.ok(lines[1].includes("2m00s"), lines[1]);
+const snapshotMetrics = lines.find((line) => line.includes("⏱"));
+assert.ok(snapshotMetrics.includes("2m00s"), snapshotMetrics);
 const row = lines.find((line) => line.includes("b1 worker"));
 assert.ok(row, "the running agent has a row");
 assert.ok(row.includes("2m00s"), row);
@@ -106,11 +111,48 @@ const stalled = renderProgress({
 const stalledRow = stalled.find((line) => line.includes("w1 worker"));
 assert.ok(stalledRow.includes("⚠ stalled"), stalledRow);
 
-// A finished agent keeps its final elapsed time.
+// A finished agent keeps its final elapsed time and its time split.
 assert.equal(
-	renderAgentLine(agent({ status: "done", startedAt: 1000, finishedAt: 1060, now: 9999 })),
-	"✓ w1 worker  1m00s · 7 turns · 23 tools",
+	renderAgentLine(
+		agent({ status: "done", startedAt: 1000, finishedAt: 1060, toolSeconds: 20, now: 9999 }),
+	),
+	"✓ w1 worker  1m00s · 7 turns · 23 tools · tool 20s / thinking 40s",
 );
+
+// The metrics line shows the elapsed time, the tool split, and the slowest tool.
+const measured = renderProgress({
+	waves: [{ index: 0, status: "running", members: ["w1"] }],
+	nodes: [{ id: "w1", status: "running" }],
+	agents: [
+		agent({
+			node: "w1",
+			startedAt: 1000,
+			updatedAt: 1119,
+			toolSeconds: 60,
+			toolDurations: { bash: 45, read: 15 },
+		}),
+	],
+	now: 1120,
+});
+const measuredMetrics = measured.find((line) => line.includes("⏱"));
+assert.ok(measuredMetrics, measured.join("\n"));
+assert.ok(measuredMetrics.includes("2m00s"), measuredMetrics);
+assert.ok(measuredMetrics.includes("tools 50%"), measuredMetrics);
+assert.ok(measuredMetrics.includes("thinking 50%"), measuredMetrics);
+assert.ok(measuredMetrics.includes("slowest bash 45s"), measuredMetrics);
+
+// The active tool call shows its age, so a long build is visible.
+const inFlight = renderAgentLine(
+	agent({
+		node: "w1",
+		lastTool: "bash",
+		lastToolArgs: "make",
+		toolStartedAt: 1060,
+		updatedAt: 1119,
+	}),
+	{ now: 1120 },
+);
+assert.ok(inFlight.includes("bash make (1m00s)"), inFlight);
 
 // The view stays within pi's ten-line widget limit and windows the waves, so
 // the current wave is visible instead of the first four.
@@ -122,7 +164,7 @@ for (let index = 0; index < 13; index += 1) {
 	manyNodes.push({ id: `n${index}`, status });
 }
 const manyAgents = Array.from({ length: 12 }, (_, index) =>
-	agent({ node: `n${index}`, status: index < 3 ? "running" : "done", updatedAt: 1115 }),
+	agent({ node: `n${index}`, status: index < 1 ? "running" : "done", updatedAt: 1115 }),
 );
 const bounded = renderProgress({
 	campaign: "big",

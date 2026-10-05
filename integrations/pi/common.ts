@@ -410,6 +410,13 @@ function agentFrontmatterValue(raw: string, key: string): string | undefined {
  * most once per second (and once more on close) so a resumed campaign can
  * describe what the paused worker was doing.
  */
+/** One grouped shell command: its tool, total seconds, and call count. */
+export interface CommandMetric {
+	tool: string;
+	seconds: number;
+	calls: number;
+}
+
 export interface SubagentProgress {
 	node?: string;
 	unit?: string;
@@ -418,6 +425,10 @@ export interface SubagentProgress {
 	turns: number;
 	toolCalls: number;
 	tools: Record<string, number>;
+	toolSeconds: number;
+	toolDurations: Record<string, number>;
+	commands: Record<string, CommandMetric>;
+	toolStartedAt?: number;
 	lastTool?: string;
 	lastToolArgs?: string;
 	lastText?: string;
@@ -426,6 +437,129 @@ export interface SubagentProgress {
 	cost: number;
 	startedAt: number;
 	updatedAt: number;
+}
+
+/**
+ * The program name of a shell command: the first token, after a leading
+ * `cd <dir> &&` and any `NAME=value` assignments.
+ */
+export function programName(raw: string | undefined): string | undefined {
+	if (!raw) return undefined;
+	let text = raw.split("\n")[0].trim().replace(/\s+/g, " ");
+	if (!text) return undefined;
+	text = text.replace(/^cd\s+\S+\s*&&\s*/, "");
+	const parts = text.split(" ").filter(Boolean);
+	let index = 0;
+	while (index < parts.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(parts[index])) index += 1;
+	return parts[index] || undefined;
+}
+
+/**
+ * The commands with the largest total time. The result is a bounded list for
+ * the heartbeat file and the `attempt --end` call.
+ */
+export function topCommands(
+	commands: Record<string, CommandMetric>,
+	limit = 20,
+): Array<{ command: string; tool: string; seconds: number; calls: number }> {
+	return Object.entries(commands)
+		.map(([command, metric]) => ({
+			command,
+			tool: metric.tool,
+			seconds: Number((metric.seconds ?? 0).toFixed(3)),
+			calls: metric.calls ?? 0,
+		}))
+		.sort((a, b) => b.seconds - a.seconds)
+		.slice(0, limit);
+}
+
+/** Keep the command map small: merge the least costly keys into `(other)`. */
+function boundCommands(commands: Record<string, CommandMetric>, limit = 200): void {
+	const keys = Object.keys(commands);
+	if (keys.length <= limit) return;
+	keys.sort((a, b) => commands[a].seconds - commands[b].seconds);
+	const other = commands["(other)"] ?? { tool: "various", seconds: 0, calls: 0 };
+	for (const key of keys.slice(0, keys.length - limit)) {
+		other.seconds += commands[key].seconds;
+		other.calls += commands[key].calls;
+		delete commands[key];
+	}
+	commands["(other)"] = other;
+}
+
+/** One tool call that started and has not ended yet. */
+export interface ActiveTool {
+	name: string;
+	command?: string;
+	start: number;
+}
+
+/** A short, display-safe form of one tool's arguments. */
+export function summariseArgs(args: unknown): string | undefined {
+	if (args && typeof args === "object") {
+		const record = args as Record<string, unknown>;
+		if (typeof record.command === "string") return record.command;
+		if (typeof record.path === "string") return record.path;
+		if (typeof record.file === "string") return record.file;
+	}
+	try {
+		const text = JSON.stringify(args);
+		return text && text !== "{}" ? text.slice(0, 120) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Fold one `tool_execution_start` into the progress and the active map. */
+export function reduceToolStart(
+	progress: SubagentProgress,
+	activeTools: Map<string, ActiveTool>,
+	event: { toolName?: unknown; toolCallId?: unknown; args?: unknown },
+	now: number,
+): void {
+	progress.toolCalls += 1;
+	const name = String(event.toolName ?? "");
+	progress.lastTool = name;
+	progress.lastToolArgs = summariseArgs(event.args);
+	progress.tools[name] = (progress.tools[name] ?? 0) + 1;
+	const id = String(event.toolCallId ?? "");
+	const args = event.args;
+	const command =
+		args && typeof args === "object" && typeof (args as Record<string, unknown>).command === "string"
+			? String((args as Record<string, unknown>).command)
+			: undefined;
+	if (id) {
+		activeTools.set(id, { name, command, start: now });
+		progress.toolStartedAt = now;
+	}
+}
+
+/** Fold one `tool_execution_end` into the progress and the active map. */
+export function reduceToolEnd(
+	progress: SubagentProgress,
+	activeTools: Map<string, ActiveTool>,
+	event: { toolName?: unknown; toolCallId?: unknown },
+	now: number,
+): void {
+	const id = String(event.toolCallId ?? "");
+	const active = id ? activeTools.get(id) : undefined;
+	const name = active?.name ?? String(event.toolName ?? "");
+	const seconds = Math.max(0, now - (active?.start ?? now));
+	if (id) activeTools.delete(id);
+	progress.toolSeconds += seconds;
+	if (name) {
+		progress.lastTool = name;
+		progress.toolDurations[name] = (progress.toolDurations[name] ?? 0) + seconds;
+	}
+	if (active?.command) {
+		const key = programName(active.command) ?? "(unknown)";
+		const entry = progress.commands[key] ?? { tool: name, seconds: 0, calls: 0 };
+		entry.seconds += seconds;
+		entry.calls += 1;
+		progress.commands[key] = entry;
+		boundCommands(progress.commands);
+	}
+	if (activeTools.size === 0) progress.toolStartedAt = undefined;
 }
 
 export async function runSubagent(options: {
@@ -495,24 +629,35 @@ export async function runSubagent(options: {
 			turns: 0,
 			toolCalls: 0,
 			tools: {},
+			toolSeconds: 0,
+			toolDurations: {},
+			commands: {},
 			tokensIn: 0,
 			tokensOut: 0,
 			cost: 0,
 			startedAt: nowSeconds(),
 			updatedAt: nowSeconds(),
 		};
+		// Parallel tool calls from one assistant message interleave, so pair the
+		// start and the end by `toolCallId`, never by tool name.
+		const activeTools = new Map<string, ActiveTool>();
 		let pendingUsage: any;
 		let lastHeartbeatWrite = 0;
+		const cloneProgress = (updatedAt = nowSeconds()): SubagentProgress => ({
+			...progress,
+			tools: { ...progress.tools },
+			toolDurations: { ...progress.toolDurations },
+			commands: Object.fromEntries(
+				Object.entries(progress.commands).map(([key, value]) => [key, { ...value }]),
+			),
+			updatedAt,
+		});
 		const flushHeartbeat = (force = false) => {
 			if (!options.heartbeat) return;
 			const now = nowSeconds();
 			if (!force && now - lastHeartbeatWrite < 1) return;
 			lastHeartbeatWrite = now;
-			const snapshot: SubagentProgress = {
-				...progress,
-				tools: { ...progress.tools },
-				updatedAt: now,
-			};
+			const snapshot = cloneProgress(now);
 			// On disk the heartbeat uses the `.sliceme/` snake_case convention so the
 			// engine projection and the continuation prompt can read it.
 			const record = {
@@ -526,6 +671,9 @@ export async function runSubagent(options: {
 				turns: snapshot.turns,
 				tool_calls: snapshot.toolCalls,
 				tools: snapshot.tools,
+				tool_seconds: snapshot.toolSeconds,
+				tool_durations: snapshot.toolDurations,
+				slowest_commands: topCommands(snapshot.commands),
 				last_tool: snapshot.lastTool ?? null,
 				last_tool_args: snapshot.lastToolArgs ?? null,
 				last_text: snapshot.lastText ?? null,
@@ -541,26 +689,8 @@ export async function runSubagent(options: {
 		};
 		// The live view needs every event; only the heartbeat file is debounced.
 		const emitProgress = () => {
-			options.onProgress?.({
-				...progress,
-				tools: { ...progress.tools },
-				updatedAt: nowSeconds(),
-			});
+			options.onProgress?.(cloneProgress());
 		};
-		const summariseArgs = (args: any): string | undefined => {
-			if (args && typeof args === "object") {
-				if (typeof args.command === "string") return args.command;
-				if (typeof args.path === "string") return args.path;
-				if (typeof args.file === "string") return args.file;
-			}
-			try {
-				const text = JSON.stringify(args);
-				return text && text !== "{}" ? text.slice(0, 120) : undefined;
-			} catch {
-				return undefined;
-			}
-		};
-
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
 			stream?.write(line + "\n");
@@ -574,16 +704,14 @@ export async function runSubagent(options: {
 				case "turn_start":
 					progress.turns += 1;
 					break;
-				case "tool_execution_start":
-					progress.toolCalls += 1;
-					progress.lastTool = String(event.toolName ?? "");
-					progress.lastToolArgs = summariseArgs(event.args);
-					progress.tools[progress.lastTool] =
-						(progress.tools[progress.lastTool] ?? 0) + 1;
+				case "tool_execution_start": {
+					reduceToolStart(progress, activeTools, event, nowSeconds());
 					break;
-				case "tool_execution_end":
-					if (event.toolName) progress.lastTool = String(event.toolName);
+				}
+				case "tool_execution_end": {
+					reduceToolEnd(progress, activeTools, event, nowSeconds());
 					break;
+				}
 				case "message_update":
 					if (event.usage) pendingUsage = event.usage;
 					break;
@@ -728,6 +856,8 @@ export interface RenderProgressOptions {
 	maxWaves?: number;
 	/** A running row is stale after this many seconds (default 5). */
 	stalledAfterSeconds?: number;
+	/** Show the metrics line: elapsed, tool and thinking percentages, slowest tool. */
+	showMetrics?: boolean;
 	/** Override the clock for `renderAgentLine`. */
 	now?: number;
 }
@@ -831,9 +961,15 @@ export function renderAgentLine(
 	const progress = agent.progress;
 	const now = options.now ?? Date.now() / 1000;
 	const end = agent.status === "running" ? now : (agent.finishedAt ?? progress.updatedAt);
-	const bits = [formatDuration(Math.max(0, end - progress.startedAt))];
+	const elapsed = Math.max(0, end - progress.startedAt);
+	const bits = [formatDuration(elapsed)];
 	if (progress.turns) bits.push(`${progress.turns} turns`);
 	if (progress.toolCalls) bits.push(`${progress.toolCalls} tools`);
+	if (progress.toolCalls && typeof progress.toolSeconds === "number") {
+		const tool = Math.max(0, progress.toolSeconds);
+		const thinking = Math.max(0, elapsed - tool);
+		bits.push(`tool ${formatDuration(tool)} / thinking ${formatDuration(thinking)}`);
+	}
 	let name = "muted";
 	if (agent.status === "running") {
 		const age = Math.max(0, now - progress.updatedAt);
@@ -843,7 +979,14 @@ export function renderAgentLine(
 		} else {
 			name = "accent";
 			const tool = lastToolText(progress);
-			if (tool) bits.push(tool);
+			if (tool) {
+				let label = tool;
+				if (typeof progress.toolStartedAt === "number") {
+					const toolAge = Math.max(0, now - progress.toolStartedAt);
+					if (toolAge >= 1) label = `${tool} (${formatDuration(toolAge)})`;
+				}
+				bits.push(label);
+			}
 		}
 	} else if (agent.status === "done") {
 		name = "success";
@@ -892,8 +1035,46 @@ function waveWindow(
 }
 
 /**
- * Render the whole live view: a header, one aggregate line, one row per
- * subagent, then a window of the wave projection. Pure and allocation-light.
+ * The campaign-level metrics line: elapsed, the tool and thinking split, and
+ * the slowest tool by total time. Returns undefined when there is no data.
+ */
+function buildMetricsLine(
+	agents: ProgressAgent[],
+	elapsed: number,
+	now: number,
+	options: RenderProgressOptions,
+): string | undefined {
+	let wall = 0;
+	let tool = 0;
+	const toolTotals: Record<string, number> = {};
+	for (const agent of agents) {
+		const progress = agent.progress;
+		const end = agent.status === "running" ? now : (agent.finishedAt ?? progress.updatedAt);
+		wall += Math.max(0, end - progress.startedAt);
+		tool += Math.max(0, progress.toolSeconds ?? 0);
+		for (const [name, seconds] of Object.entries(progress.toolDurations ?? {})) {
+			toolTotals[name] = (toolTotals[name] ?? 0) + seconds;
+		}
+	}
+	const bits: string[] = [];
+	if (elapsed >= 1) bits.push(formatDuration(elapsed));
+	if (wall > 0 && tool > 0) {
+		const percent = Math.min(100, Math.max(0, Math.round((tool / wall) * 100)));
+		bits.push(`tools ${percent}%`);
+		bits.push(`thinking ${100 - percent}%`);
+	}
+	const slowest = Object.entries(toolTotals).sort((a, b) => b[1] - a[1])[0];
+	if (slowest && slowest[1] >= 1) {
+		bits.push(`slowest ${slowest[0]} ${formatDuration(slowest[1])}`);
+	}
+	if (!bits.length) return undefined;
+	return `⏱ ${bits.join(" · ")}`;
+}
+
+/**
+ * Render the whole live view: a header, one aggregate line, an optional metrics
+ * line, one row per subagent, then a window of the wave projection. Pure and
+ * allocation-light.
  *
  * The result never exceeds `maxLines` (default 10, pi's widget limit), so the
  * view is never truncated and the current wave is always one of the rows.
@@ -911,6 +1092,7 @@ export function renderProgress(
 	}
 	const now = snapshot.now;
 	const maxLines = Math.max(3, options.maxLines ?? 10);
+	const showMetrics = options.showMetrics ?? true;
 	const running = agents.filter((agent) => agent.status === "running");
 	const finished = agents
 		.filter((agent) => agent.status !== "running")
@@ -922,17 +1104,25 @@ export function renderProgress(
 	const done = counted.filter((item) => item.status === "done").length;
 	const failed = counted.filter((item) => item.status === "failed").length;
 
+	const start = agents.reduce(
+		(min, agent) => Math.min(min, agent.progress.startedAt || now),
+		Number.POSITIVE_INFINITY,
+	);
+	const elapsed = Number.isFinite(start) ? now - start : 0;
+	const metricsLine = showMetrics ? buildMetricsLine(agents, elapsed, now, options) : undefined;
+	const metricsRows = metricsLine ? 1 : 0;
+
 	// Reserve wave rows first: late in a long campaign the current wave is the
 	// most useful line, and pi would otherwise cut it off after the first ten.
 	const statuses = waves.map((wave) => waveStatus(wave, nodes));
 	const activeIndex = statuses.findIndex((status) => status !== "done");
 	const current =
 		snapshot.currentWave ?? (activeIndex >= 0 ? waves[activeIndex].index : waves.length);
-	const waveCap = Math.max(0, Math.min(options.maxWaves ?? 4, maxLines - 2));
+	const waveCap = Math.max(0, Math.min(options.maxWaves ?? 4, maxLines - 2 - metricsRows));
 	const waveRows = waveWindow(waves, current, waveCap);
 	const agentSlots = Math.max(
 		0,
-		Math.min(options.maxAgents ?? 8, maxLines - 2 - waveRows.length),
+		Math.min(options.maxAgents ?? 8, maxLines - 2 - metricsRows - waveRows.length),
 	);
 	const shown = candidates.slice(0, agentSlots);
 
@@ -940,11 +1130,6 @@ export function renderProgress(
 	const header = `sliceme${snapshot.campaign ? ` · ${snapshot.campaign}` : ""}`;
 	lines.push(color("accent", fit(header, options)));
 
-	const start = agents.reduce(
-		(min, agent) => Math.min(min, agent.progress.startedAt || now),
-		Number.POSITIVE_INFINITY,
-	);
-	const elapsed = Number.isFinite(start) ? now - start : 0;
 	const summary: string[] = [];
 	if (waves.length) {
 		summary.push(`wave ${Math.min(current + 1, waves.length)}/${waves.length}`);
@@ -952,8 +1137,9 @@ export function renderProgress(
 	summary.push(`${done}/${total} done`);
 	if (running.length) summary.push(`${running.length} running`);
 	if (failed) summary.push(`${failed} failed`);
-	if (elapsed >= 1) summary.push(formatDuration(elapsed));
+	if (!showMetrics && elapsed >= 1) summary.push(formatDuration(elapsed));
 	lines.push(color("muted", fit(summary.join(" · "), options)));
+	if (metricsLine) lines.push(color("muted", fit(metricsLine, options)));
 
 	const rowWidth = options.width && options.width > 2 ? options.width - 2 : options.width;
 	const rows = shown.map(

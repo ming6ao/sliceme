@@ -8,6 +8,7 @@ Every adapter (CLI, pi extension) calls these functions.  This mirrors the
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -42,6 +43,63 @@ def _subject_line(text: str | None) -> str:
         if collapsed:
             return collapsed
     return ""
+
+
+# A running node is stalled when its heartbeat is older than this many seconds.
+STALLED_AFTER_SECONDS = 5.0
+
+
+def _metric_number(value: Any) -> float:
+    """Parse one metric value; a bad value becomes 0."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _metric_object(value: Any) -> dict[str, Any]:
+    """Parse one JSON object column, as a dict or as JSON text."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _metric_list(value: Any) -> list[Any]:
+    """Parse one JSON list column, as a list or as JSON text."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _metric_duration(row: dict[str, Any], ts: float) -> float:
+    """The wall clock of one attempt row, even while it still runs."""
+    duration = _metric_number(row.get("duration"))
+    if duration > 0:
+        return duration
+    started = _metric_number(row.get("started_at"))
+    if not started:
+        return 0.0
+    finished = row.get("finished_at")
+    end = _metric_number(finished) if finished else ts
+    return max(0.0, end - started)
+
+
+def _read_heartbeat(path: Path) -> dict[str, Any]:
+    """Read one per-node heartbeat file; a bad file becomes empty."""
+    data = read_json(path)
+    return data if isinstance(data, dict) else {}
 
 
 class Service:
@@ -1081,6 +1139,222 @@ class Service:
             "attempts": self.store.list_attempts(
                 node=node, statuses=statuses, campaign=self.campaign_key()
             )
+        }
+
+    def progress(self, *, node: str | None = None) -> dict[str, Any]:
+        """Join attempts, jobs, heartbeats, and the DAG into one metric view.
+
+        This is the durable half of ``docs/observability.md``: the time split,
+        the tool rollup, the command rollup, and the verification cost.  It
+        reads only ``state.db``, ``state.json``, and the heartbeat files, so a
+        second terminal sees the same numbers.
+        """
+        campaign_row = self.campaign
+        if campaign_row is None:
+            raise SlicemeError("no campaign in this plane; run `sliceme start` first")
+        key = str(campaign_row["key"])
+        branch = self.config.get("target_branch") or self.config.get("main_branch")
+        dag = campaign.load_dag(self.root, branch) if branch else None
+        state = campaign.load_state(self.root, branch) if branch else {"nodes": {}}
+        nodes_dag = campaign.node_by_id(dag) if dag else {}
+        waves, _ = self._dag_waves(branch)
+        wave_of: dict[str, int] = {}
+        for wave in waves:
+            for member in wave.get("members", []):
+                wave_of[str(member)] = int(wave.get("wave", 0))
+
+        attempts = self.store.list_attempts(campaign=key)
+        if node:
+            attempts = [a for a in attempts if str(a.get("node")) == node]
+        jobs = self.store.list_jobs(campaign=key)
+        ts = now()
+
+        totals: dict[str, Any] = {
+            "nodes": 0,
+            "done": 0,
+            "running": 0,
+            "pending": 0,
+            "failed": 0,
+            "attempts": len(attempts),
+            "wall_seconds": 0.0,
+            "tool_seconds": 0.0,
+            "thinking_seconds": 0.0,
+            "turns": 0,
+            "tool_calls": 0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cost": 0.0,
+            "queue_wait_seconds": 0.0,
+        }
+        by_agent: dict[str, dict[str, Any]] = {}
+        tool_seconds: dict[str, float] = {}
+        tool_by_agent: dict[str, dict[str, float]] = {}
+        tool_calls: dict[str, int] = {}
+        command_totals: dict[str, dict[str, Any]] = {}
+        earliest: float | None = None
+
+        for attempt in attempts:
+            duration = _metric_duration(attempt, ts)
+            tool = _metric_number(attempt.get("tool_seconds"))
+            thinking = max(0.0, duration - tool)
+            role = str(attempt.get("agent") or "worker")
+            turns = int(attempt.get("turns") or 0)
+            calls = int(attempt.get("tool_calls") or 0)
+            agent_totals = by_agent.setdefault(
+                role,
+                {
+                    "attempts": 0,
+                    "wall_seconds": 0.0,
+                    "tool_seconds": 0.0,
+                    "thinking_seconds": 0.0,
+                    "turns": 0,
+                    "tool_calls": 0,
+                },
+            )
+            agent_totals["attempts"] += 1
+            agent_totals["wall_seconds"] += duration
+            agent_totals["tool_seconds"] += tool
+            agent_totals["thinking_seconds"] += thinking
+            agent_totals["turns"] += turns
+            agent_totals["tool_calls"] += calls
+            totals["wall_seconds"] += duration
+            totals["tool_seconds"] += tool
+            totals["thinking_seconds"] += thinking
+            totals["turns"] += turns
+            totals["tool_calls"] += calls
+            totals["tokens_in"] += int(attempt.get("tokens_in") or 0)
+            totals["tokens_out"] += int(attempt.get("tokens_out") or 0)
+            totals["cost"] += _metric_number(attempt.get("cost"))
+            started = _metric_number(attempt.get("started_at"))
+            if started and (earliest is None or started < earliest):
+                earliest = started
+            for tool_name, seconds in _metric_object(attempt.get("tool_durations")).items():
+                value = _metric_number(seconds)
+                tool_seconds[tool_name] = tool_seconds.get(tool_name, 0.0) + value
+                named = tool_by_agent.setdefault(tool_name, {})
+                named[role] = named.get(role, 0.0) + value
+            for tool_name, count in _metric_object(attempt.get("tools")).items():
+                tool_calls[tool_name] = tool_calls.get(tool_name, 0) + int(count or 0)
+            for entry in _metric_list(attempt.get("slowest_commands")):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("command") or "?")
+                item = command_totals.setdefault(
+                    name,
+                    {"command": name, "tool": entry.get("tool"), "seconds": 0.0, "calls": 0},
+                )
+                item["seconds"] += _metric_number(entry.get("seconds"))
+                item["calls"] += int(entry.get("calls") or 0)
+
+        passed = failed = 0
+        executor_seconds = 0.0
+        for job in jobs:
+            requested = job.get("requested_at")
+            started = job.get("started_at")
+            if requested and started:
+                totals["queue_wait_seconds"] += max(0.0, float(started) - float(requested))
+            executor_seconds += _metric_number(job.get("duration"))
+            if job.get("status") == "passed":
+                passed += 1
+            elif job.get("status") in {"failed", "error", "cancelled"}:
+                failed += 1
+        terminal = passed + failed
+
+        tools = [
+            {
+                "tool": tool_name,
+                "seconds": round(seconds, 3),
+                "calls": tool_calls.get(tool_name, 0),
+                "avg": (
+                    round(seconds / tool_calls[tool_name], 3)
+                    if tool_calls.get(tool_name)
+                    else None
+                ),
+                "by_agent": {
+                    name: round(value, 3)
+                    for name, value in tool_by_agent.get(tool_name, {}).items()
+                },
+            }
+            for tool_name, seconds in tool_seconds.items()
+        ]
+        tools.sort(key=lambda item: item["seconds"], reverse=True)
+        commands = sorted(
+            command_totals.values(), key=lambda item: item["seconds"], reverse=True
+        )[:20]
+        for item in commands:
+            item["seconds"] = round(item["seconds"], 3)
+
+        latest: dict[str, dict[str, Any]] = {}
+        for attempt in attempts:
+            latest[str(attempt.get("node"))] = attempt  # ascending id: last wins
+        selected = [node] if node else list(nodes_dag)
+        node_rows: list[dict[str, Any]] = []
+        for node_id in selected:
+            entry = nodes_dag.get(node_id) or {}
+            status = campaign.node_status(state, node_id)
+            if status in totals:
+                totals[status] += 1
+            attempt_row = latest.get(node_id)
+            duration = _metric_duration(attempt_row, ts) if attempt_row else 0.0
+            tool = _metric_number(attempt_row.get("tool_seconds")) if attempt_row else 0.0
+            heartbeat = _read_heartbeat(campaign.heartbeat_path(self.root, branch, node_id))
+            updated = _metric_number(heartbeat.get("updated_at"))
+            age = max(0.0, ts - updated) if updated else None
+            node_rows.append(
+                {
+                    "id": node_id,
+                    "label": entry.get("label"),
+                    "wave": wave_of.get(node_id),
+                    "status": status,
+                    "attempt": int(attempt_row.get("attempt") or 0) if attempt_row else 0,
+                    "wall_seconds": round(duration, 3),
+                    "tool_seconds": round(tool, 3),
+                    "thinking_seconds": round(max(0.0, duration - tool), 3),
+                    "turns": int(attempt_row.get("turns") or 0) if attempt_row else 0,
+                    "tool_calls": int(attempt_row.get("tool_calls") or 0) if attempt_row else 0,
+                    "tokens_in": int(attempt_row.get("tokens_in") or 0) if attempt_row else 0,
+                    "tokens_out": int(attempt_row.get("tokens_out") or 0) if attempt_row else 0,
+                    "cost": round(_metric_number(attempt_row.get("cost")) if attempt_row else 0.0, 3),
+                    "heartbeat_age": round(age, 3) if age is not None else None,
+                    "stalled": bool(
+                        status == "running"
+                        and age is not None
+                        and age > STALLED_AFTER_SECONDS
+                    ),
+                }
+            )
+
+        totals["nodes"] = len(selected)
+        start_ref = earliest or _metric_number(campaign_row.get("created_at")) or ts
+        totals["elapsed"] = round(max(0.0, ts - start_ref), 3)
+        rounded = {
+            name: round(value, 3) if isinstance(value, float) else value
+            for name, value in totals.items()
+        }
+        by_agent_rounded = {
+            role: {
+                name: round(value, 3) if isinstance(value, float) else value
+                for name, value in data.items()
+            }
+            for role, data in by_agent.items()
+        }
+        return {
+            "campaign": campaign_row.get("name") or key,
+            "campaign_key": key,
+            "now": ts,
+            "totals": rounded,
+            "by_agent": by_agent_rounded,
+            "tools": tools,
+            "commands": commands,
+            "verification": {
+                "executor_seconds": round(executor_seconds, 3),
+                "jobs": len(jobs),
+                "passed": passed,
+                "failed": failed,
+                "pass_rate": round(passed / terminal, 4) if terminal else None,
+            },
+            "nodes": node_rows,
+            "executor": self.store.job_counts(campaign=key),
         }
 
     # ------------------------------------------------------------------

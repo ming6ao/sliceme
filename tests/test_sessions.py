@@ -299,7 +299,6 @@ class DeliveryCleanupTests(SessionsCase):
         # Cleanup is opt-in: the default keeps the worktree for inspection.
         self.assertTrue(Path(unit["worktree"]).exists())
 
-
 class AttemptTests(SessionsCase):
     def test_attempt_begin_and_end_record_metrics(self):
         started = self.svc.begin_attempt(node="w1", unit="campaign", attempt=1)
@@ -311,6 +310,11 @@ class AttemptTests(SessionsCase):
             exit_code=0,
             turns=7,
             tool_calls=23,
+            tool_seconds=42.5,
+            tool_durations={"bash": 30.0, "read": 12.5},
+            slowest_commands=[
+                {"command": "cargo", "tool": "bash", "seconds": 30.0, "calls": 2}
+            ],
             tokens_in=45210,
             tokens_out=3120,
             cost=0.42,
@@ -319,6 +323,7 @@ class AttemptTests(SessionsCase):
         self.assertEqual(finished["status"], "ok")
         self.assertEqual(finished["turns"], 7)
         self.assertEqual(finished["tool_calls"], 23)
+        self.assertEqual(finished["tool_seconds"], 42.5)
         self.assertIsNotNone(finished["duration"])
         self.assertEqual(self.svc.attempts(node="w1")["attempts"][0]["node"], "w1")
 
@@ -357,6 +362,12 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("attempts", tables)
             self.assertIn("review_decisions", tables)
             self.assertIn("comments", tables)
+            columns = {
+                row[1] for row in store.conn.execute("PRAGMA table_info(attempts)")
+            }
+            self.assertIn("tool_seconds", columns)
+            self.assertIn("tool_durations", columns)
+            self.assertIn("slowest_commands", columns)
             store.close()
 
 
