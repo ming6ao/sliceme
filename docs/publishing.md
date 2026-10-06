@@ -79,7 +79,7 @@ sliceme ready                     # current-wave nodes whose deps are done
 sliceme spawn <node>              # one-shot pure editor in the campaign worktree
 sliceme record                    # commit the current wave onto the campaign worktree
 sliceme verify <node>             # executor runs checks; a read-only verifier judges
-sliceme deliver                   # after all waves: approve, then merge to the target
+sliceme deliver                   # after all waves: approve, then open the pull request
 sliceme review --report --narrative "..."  # deterministic report + your summary
 ```
 

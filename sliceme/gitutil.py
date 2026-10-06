@@ -170,6 +170,21 @@ def add_detached_worktree(repo: str | os.PathLike[str], path: Path, commit: str)
     git(repo, "worktree", "add", "--detach", str(path), commit, check=True)
 
 
+def push(
+    repo: str | os.PathLike[str],
+    remote: str,
+    branch: str,
+    *,
+    set_upstream: bool = True,
+) -> GitResult:
+    """Push *branch* to *remote* for pull request delivery."""
+    args = ["push"]
+    if set_upstream:
+        args.append("--set-upstream")
+    args += [remote, branch]
+    return git(repo, *args, check=True)
+
+
 def remove_worktree(repo: str | os.PathLike[str], path: Path, *, force: bool = True) -> None:
     path = Path(path)
     if path.exists():

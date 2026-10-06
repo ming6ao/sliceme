@@ -240,16 +240,16 @@ thinking time (`docs/observability.md`).
 | `actor` | TEXT | who recorded the decision |
 | `note` | TEXT | required for `override` |
 | `created_at` | REAL NOT NULL | |
-| `consumed_at` | REAL | set by a successful merge |
+| `consumed_at` | REAL | set by a successful delivery |
 
 Index: `idx_review_decisions_commit(branch_key, commit_hash, id)`.
 
 Append-only. `Store.add_review_decision` inserts; the newest row for a commit
 wins. `Store.latest_decisions_by_commit` reads the newest row per commit, and
-`Store.consume_review_decisions` sets `consumed_at` after a landed merge. An
-approval binds to one commit hash, so a later commit re-opens the gate and an
-approval can never outlive the diff it approved. A failed check run leaves the
-rows unconsumed, so a retry needs no new review.
+`Store.consume_review_decisions` sets `consumed_at` after a successful delivery.
+An approval binds to one commit hash, so a later commit re-opens the gate and an
+approval can never outlive the diff it approved. A failed check or forge call
+leaves the rows unconsumed, so a retry needs no new review.
 
 ### 5.6 `comments`
 
@@ -287,6 +287,8 @@ a lost ack repeats a comment, never loses it.
 | `name` | TEXT | display name |
 | `design` | TEXT | design document reference |
 | `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, `delivered`, `closed` |
+| `pr_url` | TEXT | the delivery pull request URL |
+| `pr_number` | INTEGER | the delivery pull request number |
 | `created_at` | REAL NOT NULL | |
 | `updated_at` | REAL NOT NULL | |
 
@@ -295,7 +297,8 @@ Index: `idx_campaigns_state(state)`.
 Created by `Service._ensure_legacy_campaign`, `Service._sync_campaign_retarget`,
 and `Store.create_campaign` (idempotent on the key or target). Read by
 `Service.campaign`, `Service.status`, the review server, and the report. A
-legacy plane gets one row on first open. `Service.deliver` sets `delivered`.
+legacy plane gets one row on first open. `Service.deliver` sets `delivered` and
+records `pr_url` / `pr_number`.
 
 ## 6. Row lifecycle
 
@@ -312,9 +315,8 @@ legacy plane gets one row on first open. `Service.deliver` sets `delivered`.
    `Service.review_snapshot` reads the newest terminal job per commit as
    evidence.
 5. **Delivery.** When every wave completes and a human approves every commit,
-   `deliver` merges the campaign worktree branch into the target with
-   `git merge --no-ff`, then `_mark_delivered` sets the candidates and their
-   unit to `landed`.
+   `deliver` pushes the campaign worktree branch and opens a pull request, then
+   `_mark_delivered` sets the candidates and their unit to `landed`.
 6. **Review.** The browser writes `comments` and `review_decisions`; the pi
    relay reads `open` comments and marks them `delivered`.
 7. **Dashboard and report.** `Service.status` reads units, candidates, waves,
@@ -390,7 +392,7 @@ descriptor is the single source of truth.
 ## 12. Local review
 
 `review_decisions` is an append-only approval log: the newest row for a commit
-wins, and `consumed_at` marks a merge that already used the approval. The row
+wins, and `consumed_at` marks a delivery that already used the approval. The row
 binds to one commit hash, so `Service.deliver` refuses until a human approves
 every accumulated commit. `comments` is the review queue: the pi relay reads
 `open`

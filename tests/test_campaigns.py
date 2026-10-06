@@ -10,6 +10,7 @@ These pin the contract of ``docs/multi-campaign.md``:
 * the review server can serve either campaign.
 """
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,8 @@ from pathlib import Path
 from sliceme import campaign
 from sliceme.service import Service
 from sliceme.util import write_json
+
+FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
 
 
 def run(*args, cwd):
@@ -41,6 +44,7 @@ class MultiCampaignCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.remote_tmp = tempfile.TemporaryDirectory()
         run("git", "init", "-q", "-b", "main", cwd=self.root)
         run("git", "config", "user.email", "t@example.com", cwd=self.root)
         run("git", "config", "user.name", "Tester", cwd=self.root)
@@ -50,6 +54,11 @@ class MultiCampaignCase(unittest.TestCase):
         (self.root / "src" / "b" / "y.py").write_text("b = 1\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
+        remote = Path(self.remote_tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        run("git", "remote", "add", "origin", str(remote), cwd=self.root)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
         Service.init_plane(
             self.root,
             target_branch="feat/x",
@@ -69,6 +78,8 @@ class MultiCampaignCase(unittest.TestCase):
         )
 
     def tearDown(self):
+        os.environ["PATH"] = self._old_path
+        self.remote_tmp.cleanup()
         self.tmp.cleanup()
 
     def service(self, ref=None):
@@ -191,9 +202,13 @@ class DeliveryIsolationTests(MultiCampaignCase):
             x.review_decision(action="approve", all_commits=True, actor="test")
             result = x.deliver()
             self.assertEqual([r["status"] for r in result["results"]], ["landed"])
+            self.assertTrue(result["pull_request"]["url"])
+            worktree_branch = x.store.get_campaign("feat--x")["worktree_branch"]
         finally:
             x.close()
-        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 2\n")
+        # The approved work is on the campaign branch; the target is untouched.
+        self.assertEqual(self.file_on(worktree_branch, "src/a/x.py"), "a = 2\n")
+        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
         # The other campaign is untouched.
         self.assertEqual(self.file_on("feat/y", "src/a/x.py"), "a = 1\n")
         y = self.service("feat/y")

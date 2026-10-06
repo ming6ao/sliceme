@@ -227,7 +227,8 @@ Add these methods:
 - Change `_mark_delivered` to take a unit name. Mark only that campaign's
   candidates.
 - Pass `campaign_config` into `deliver` and `plan_waves`.
-- Keep one `_integration` worktree. The plane delivery lock makes this safe.
+- Deliver one pull request per campaign. The plane delivery lock serializes
+  deliveries.
 
 ### 7.3 `sliceme/campaign.py`
 

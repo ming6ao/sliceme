@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   name TEXT,
   design TEXT,
   state TEXT NOT NULL DEFAULT 'working',
+  pr_url TEXT,
+  pr_number INTEGER,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -181,6 +183,9 @@ class Store:
 
     def _migrate(self) -> None:
         """Additive column migrations for planes created by older versions."""
+        self._ensure_columns(
+            "campaigns", {"pr_url": "TEXT", "pr_number": "INTEGER"}
+        )
         self._ensure_columns("jobs", {"timeout": "INTEGER NOT NULL DEFAULT 3600"})
         self._ensure_columns("candidates", {"node": "TEXT"})
         self._ensure_columns("units", {"campaign": "TEXT"})
@@ -310,6 +315,26 @@ class Store:
             " OR unit_name=? OR id=?",
             (state, now(), str(ref), str(ref), str(ref), int(ref) if str(ref).isdigit() else -1),
         )
+        return self.get_campaign(ref)
+
+    def set_campaign_pull_request(
+        self, ref: str | int, *, url: str, number: int | None = None
+    ) -> dict[str, Any] | None:
+        """Record the delivery pull request on a campaign row."""
+        self.conn.execute(
+            "UPDATE campaigns SET pr_url=?, pr_number=?, updated_at=?"
+            " WHERE key=? OR target_branch=? OR unit_name=? OR id=?",
+            (
+                url,
+                number,
+                now(),
+                str(ref),
+                str(ref),
+                str(ref),
+                int(ref) if str(ref).isdigit() else -1,
+            ),
+        )
+        self.conn.commit()
         return self.get_campaign(ref)
 
     def update_campaign_target(

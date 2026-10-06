@@ -278,7 +278,7 @@ class Service:
             "base": base,
             "default_branch": default_branch,
             "checks": checks or [],
-            "policy": {"require_verification": True, "allow_auto_approve": []},
+            "policy": {"require_verification": True, "allow_auto_approve": [], "remote": "origin"},
             "created_at": now(),
         }
         ensure_parent(cfg_file)
@@ -1676,43 +1676,60 @@ class Service:
         *,
         target: str | None = None,
         source: str | None = None,
-        no_ff: bool = True,
         cleanup: str = "none",
         run_checks_flag: bool = True,
     ) -> dict[str, Any]:
-        """Merge the campaign worktree into the target branch (agent-callable).
+        """Push the campaign worktree branch and open the delivery pull request.
 
-        This is the single, end-of-campaign merge.  The target branch is never
-        the default branch and there is no override.
+        This is the single, end-of-campaign delivery.  The target branch is
+        never the default branch and there is no override.  Once the pull
+        request is open, the campaign is done.
         """
         if cleanup not in {"none", "worktrees", "all"}:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
         from .review import packet
 
         target_branch = target or self.config.get("target_branch") or self.config.get("main_branch")
-        source_branch = source or self.config.get("worktree_branch")
-        commits = packet.campaign_commits(self)
-        with _delivery_lock(self.root):
-            override = self.require_all_approved(commits)
-            results = integrate.deliver(
-                self.store,
-                self.root,
-                self.config,
-                campaign=self.campaign_key(),
-                target=target,
-                source=source,
-                no_ff=no_ff,
-                run_checks_flag=run_checks_flag,
-            )
-            if results and all(result.status == "landed" for result in results):
-                self.consume_approvals(commits)
-                if override:
-                    self.store.consume_review_decisions([int(override["id"])])
-                    self.store.conn.commit()
-                key = self.campaign_key()
-                if key:
-                    self.store.set_campaign_state(key, "delivered")
-                    self.store.conn.commit()
+        source_branch = source or self.config.get("worktree_branch") or ""
+        key = self.campaign_key()
+        stored = self.store.get_campaign(key) if key else None
+        if stored and stored.get("pr_url"):
+            # Idempotent: the pull request is open, so the campaign is done.
+            results = [
+                integrate.landed(
+                    f"pull request already open: {stored['pr_url']}",
+                    {"url": stored["pr_url"], "number": stored.get("pr_number")},
+                )
+            ]
+        else:
+            commits = packet.campaign_commits(self)
+            with _delivery_lock(self.root):
+                override = self.require_all_approved(commits)
+                results = integrate.deliver_pull_request(
+                    self.store,
+                    self.root,
+                    self.config,
+                    campaign=key,
+                    target=target,
+                    source=source,
+                    run_checks_flag=run_checks_flag,
+                )
+                if results and all(result.status == "landed" for result in results):
+                    self.consume_approvals(commits)
+                    if override:
+                        self.store.consume_review_decisions([int(override["id"])])
+                        self.store.conn.commit()
+                    if key:
+                        pull_request = results[0].pull_request or {}
+                        if pull_request.get("url"):
+                            self.store.set_campaign_pull_request(
+                                key,
+                                url=str(pull_request["url"]),
+                                number=pull_request.get("number"),
+                            )
+                        self.store.set_campaign_state(key, "delivered")
+                        self.store.conn.commit()
+                    self._campaign = None
         cleanup_result: dict[str, Any] | None = None
         artifacts_removed: list[str] = []
         if cleanup in {"worktrees", "all"}:
@@ -1723,6 +1740,7 @@ class Service:
             "target_branch": target_branch,
             "source": source_branch,
             "results": [r.to_dict() for r in results],
+            "pull_request": results[0].pull_request if results else None,
             "cleanup": cleanup_result,
             "artifacts_removed": artifacts_removed,
         }

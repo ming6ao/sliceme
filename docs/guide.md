@@ -22,8 +22,7 @@ order. Sliceme adds a deterministic layer over git:
 - it assigns each DAG node disjoint **directories** at plan time;
 - it serializes overlapping directory subtrees into waves;
 - it verifies each candidate against a content fingerprint;
-- it delivers the campaign worktree onto a target feature branch in one
-  approved merge.
+- it delivers the campaign as one pull request against a target feature branch.
 
 The model drafts the plan. The model never decides at run time whether a node
 blocks another node.
@@ -221,7 +220,7 @@ wave N ready ──► spawn (<= concurrency) ──► workers edit the campaig
 all nodes done
         │
         ▼
-review (approve every commit) ──► deliver ──► merge campaign worktree -> target
+review (approve every commit) ──► deliver ──► push campaign branch -> pull request
 ```
 
 1. **`start`** asks the user for the **target branch**: the current branch, a
@@ -236,7 +235,7 @@ review (approve every commit) ──► deliver ──► merge campaign worktre
    worktree, so it already contains every earlier wave's files.
 4. **`record`** commits the current wave onto the campaign worktree, with one
    commit per node. Sliceme attributes the commit by owned directories. Nothing
-   merges to the target.
+   lands on the target.
 5. **`verify`** runs the read-only verifier on the recorded commit of the node.
    The verifier submits the acceptance vector of the node to the executor (§6).
    The coordinator marks the node `done` from the verdict.
@@ -247,8 +246,9 @@ review (approve every commit) ──► deliver ──► merge campaign worktre
    coordinator. The coordinator runs it before delivery, so the report is
    reviewable.
 8. **`deliver`** runs after every wave completes and a human approves every
-   commit. It merges the campaign worktree into the target branch with the
-   trusted checks. The target is never the default branch.
+   commit. It runs the trusted checks, pushes the campaign worktree branch, and
+   opens one pull request against the target branch. The target is never the
+   default branch.
 
 The coordinator may invoke the planner again or edit `dag.json` after a
 failure. A coordinator-added `depends_on` edge or a widened `owns` changes the
@@ -260,7 +260,7 @@ waves.
 Cleanup is destructive, so the agent cannot choose it without a flag. There is
 no per-wave cleanup: Sliceme never removes files between waves. The `deliver`
 action takes `--cleanup worktrees`. That option removes the campaign worktree,
-drops the already-merged campaign branch, and clears scratch. It keeps the
+drops the campaign branch, and clears scratch. It keeps the
 report and the `dag.json` and `state.json` records. `cleanup: all` also removes
 every other campaign file: the `dag.json`, `state.json`, `session.json`,
 `control.json`, and `events.jsonl` records, the `progress_<node>.json`
@@ -286,7 +286,7 @@ and Sliceme reports a retryable failure rather than a code failure.
 | Worker produces no candidate / fails acceptance | Node `failed`; coordinator retries (bounded), splits the node, or stops. |
 | Verifier `fail` | Same as above, with the verifier's findings attached to the retry prompt. |
 | A wave record changes a path outside every node's `owns` | The record is rejected; the coordinator widens `owns` or adds a `depends_on` edge and re-spawns. |
-| Merge conflict at `deliver` | Merge aborted; findings surfaced. The target branch is never left half-merged. |
+| Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; findings surfaced. Nothing is pushed. |
 | Orchestrator crash | Workers are child processes of the coordinator and are not detached, so a crash kills them. On resume, a node left `running` becomes `paused` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. Git and `state.db` win over `state.json`. |
 | User suspends (`/suspend`) | The pause flag stops new spawns, records, and verifies. The adapter aborts the in-flight turn, which kills the current worker and any executor subprocess within seconds. The interrupted node becomes `paused`, and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme status --resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree becomes `paused`, the wave is re-recorded, and unchanged candidates re-verify from cache. |
 
@@ -390,7 +390,7 @@ wave --record --wave N  -> conformance-by-ownership -> per-node commits (seriali
 verify                  -> the single executor runs each check vector of the node
 (no merge per wave)     -> nodes marked done; open N+1 in the same worktree
 review --serve          -> the human approves accumulated commits at any time
-deliver                 -> merge the campaign worktree once every commit is approved
+deliver                 -> push the campaign branch and open a pull request once approved
 ```
 
 The recorder (`Service.record_wave`) stages the worktree and attributes every
@@ -401,7 +401,7 @@ the current `HEAD`, so it never re-attributes a change from an earlier wave.
 
 The recorder holds the executor lock, so it serializes recording with check
 runs. Sliceme reuses the worktree, so a later wave already sees every earlier
-wave's files. Nothing merges until the single `deliver` step.
+wave's files. Nothing lands on the target until the single `deliver` step.
 
 Workers are pure editors. They never run `git add` or `git commit`, because the
 shared index is not safe for multiple processes. They never run the suite in
@@ -467,7 +467,7 @@ verifier gets no Sliceme tool at all.
 3. Do **not** run `git`, do **not** commit, and do **not** run the test suite.
    Stop after the edits. The coordinator records the wave and the executor runs
    the acceptance vector.
-4. Never run `deliver` or `git merge`.
+4. Never run `deliver`, `git merge`, or `git push`.
 
 ### Coordinator
 

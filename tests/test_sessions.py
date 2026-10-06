@@ -12,6 +12,7 @@ These pin the session contract from ``docs/sessions.md``:
 * the ``attempts`` table is additive on an older plane.
 """
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -23,6 +24,8 @@ from sliceme import campaign
 from sliceme.service import Service
 from sliceme.store import Store
 from sliceme.util import db_path, write_json
+
+FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
 
 
 def run(*args, cwd):
@@ -52,6 +55,12 @@ class SessionsCase(unittest.TestCase):
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
         run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
+        self.remote_tmp = tempfile.TemporaryDirectory()
+        remote = Path(self.remote_tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        run("git", "remote", "add", "origin", str(remote), cwd=self.root)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
         Service.init_plane(self.root, checks=self.checks)
         self.svc = Service(self.root)
         write_json(
@@ -68,6 +77,8 @@ class SessionsCase(unittest.TestCase):
     def tearDown(self):
         if self.svc is not None:
             self.svc.close()
+        os.environ["PATH"] = self._old_path
+        self.remote_tmp.cleanup()
         self.tmp.cleanup()
 
     # ---- helpers ------------------------------------------------------
@@ -285,8 +296,10 @@ class DeliveryCleanupTests(SessionsCase):
         delivered = self.svc.deliver(cleanup="worktrees")
 
         self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
-        # The approved merge landed on the target...
-        self.assertEqual((self.root / "src" / "a" / "x.py").read_text(), "a = 2\n")
+        # The approved work is opened as a pull request; the target branch is
+        # untouched and the disposable branch is dropped by the cleanup.
+        self.assertTrue(delivered["pull_request"]["url"])
+        self.assertEqual((self.root / "src" / "a" / "x.py").read_text(), "a = 1\n")
         # ...and the worktree and its disposable branch are gone.
         self.assertFalse(worktree.exists())
         self.assertFalse(self.branch_exists(branch))

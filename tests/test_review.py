@@ -12,6 +12,7 @@ These pin the contract from ``docs/review.md``:
 import contextlib
 import io
 import json
+import os
 import shutil
 import sqlite3
 import stat
@@ -40,6 +41,7 @@ from sliceme.util import SlicemeError, db_path, write_json
 
 
 CLI = Path(__file__).resolve().parent.parent / "bin" / "sliceme"
+FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
 
 
 def run(*args, cwd):
@@ -70,6 +72,12 @@ class ReviewCase(unittest.TestCase):
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
         run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
+        self.remote_tmp = tempfile.TemporaryDirectory()
+        remote = Path(self.remote_tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        run("git", "remote", "add", "origin", str(remote), cwd=self.root)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
         Service.init_plane(self.root, checks=self.checks)
         self.svc = Service(self.root)
         write_json(
@@ -85,6 +93,8 @@ class ReviewCase(unittest.TestCase):
 
     def tearDown(self):
         self.svc.close()
+        os.environ["PATH"] = self._old_path
+        self.remote_tmp.cleanup()
         self.tmp.cleanup()
 
     def edit(self, worktree, rel, content):

@@ -15,6 +15,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN = REPO_ROOT / "bin" / "sliceme"
+FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
 
 sys.path.insert(0, str(REPO_ROOT))
 from sliceme import campaign, surface  # noqa: E402
@@ -24,6 +25,7 @@ from sliceme.util import write_json  # noqa: E402
 def run_cli(args, cwd):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT)
+    env["PATH"] = str(FAKE_GH_BIN) + os.pathsep + env.get("PATH", "")
     return subprocess.run(
         [sys.executable, str(BIN), *args],
         cwd=str(cwd),
@@ -188,6 +190,11 @@ class CliTests(unittest.TestCase):
             # Campaign bootstrap: check out the feature branch first; `start`
             # records it as the target and never creates one.
             subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
+            remote_tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(remote_tmp.cleanup)
+            remote = Path(remote_tmp.name) / "origin.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=tmp, check=True)
             out = run_cli(
                 ["--json", "start", "--no-unit", "--check", "ok=true"],
                 root,
@@ -230,20 +237,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             out = run_cli(["--json", "deliver"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            results = json.loads(out.stdout)["results"]
-            self.assertEqual([r["status"] for r in results], ["landed"])
+            delivered = json.loads(out.stdout)
+            self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+            pr = delivered["pull_request"]
+            self.assertTrue(pr and pr["url"])
+            # The campaign branch is pushed; the target branch stays as it was
+            # until a human merges the pull request.
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "show", f"{delivered['source']}:a.txt"],
+                    cwd=tmp,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                "w1\n",
+            )
             self.assertEqual(
                 subprocess.run(
                     ["git", "show", "feat/x:a.txt"], cwd=tmp, capture_output=True, text=True
                 ).stdout,
-                "w1\n",
+                "hi\n",
             )
 
-            # Re-running deliver is an idempotent no-op.
+            # Re-running deliver returns the same pull request, not a new one.
             out = run_cli(["--json", "deliver"], root)
-            rerun = json.loads(out.stdout)["results"]
-            self.assertEqual([r["status"] for r in rerun], ["landed"])
-            self.assertTrue(rerun[0]["already_up_to_date"])
+            rerun = json.loads(out.stdout)
+            self.assertEqual(rerun["pull_request"]["url"], pr["url"])
 
             out = run_cli(["--json", "review", "--report", "--narrative", "landed"], root)
             self.assertEqual(out.returncode, 0, out.stderr)

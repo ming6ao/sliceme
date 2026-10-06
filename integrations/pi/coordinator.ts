@@ -15,11 +15,12 @@
  *   spawn <node>     launch a one-shot worker (pure editor) in the campaign worktree
  *   record           commit the current wave onto the campaign worktree
  *   verify <node>    verifier on the node's recorded commit; record a verdict
- *   deliver          after every wave: ask approval, then merge to the target branch
+ *   deliver          after every wave: ask approval, then open the delivery pull request
  *   report           `sliceme report` plus the coordinator's narrative
  *
- * All waves commit onto one campaign worktree branch; nothing is merged to the
+ * All waves commit onto one campaign worktree branch; nothing lands on the
  * target branch until every wave is done and the user approves `deliver`.
+ * `deliver` pushes the campaign branch and opens a pull request.
  * Workers edit the shared worktree and never run git.  The target branch is
  * never the default branch and there is no override.
  *
@@ -832,8 +833,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Whether the review client is still needed. Delivery merges every approved
-	 * commit, so the review surface stops after a successful delivery.
+	 * Whether the review client is still needed. Delivery opens a pull request for
+	 * every approved commit, so the review surface stops after a successful delivery.
 	 */
 	function reviewNeeded(state: CampaignState): boolean {
 		return hasRecordedCommits(state) && !state.delivered;
@@ -1284,7 +1285,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 
 		// The user chooses the target branch once; it is remembered for the whole
 		// campaign.  Work accumulates on a separate campaign worktree branch and is
-		// only merged to the target after all waves finish and the user approves.
+		// only opened as a pull request after all waves finish and the user approves.
 		// A resume reuses the recorded target instead of asking again.
 		const prior = await existingCampaign(ctx);
 		const resuming = Boolean(
@@ -1807,8 +1808,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			completed_waves: completed.map((w) => w.index),
 		});
 
-		// Nothing is merged per wave.  When every wave is done, try the merge; the
-		// engine refuses until the human approves every commit in the review client.
+		// Nothing lands on the target per wave.  When every wave is done, try the
+		// delivery; the engine refuses until the human approves every commit.
 		let delivery: any = null;
 		if (passed && allWavesDone(state)) {
 			delivery = await tryDelivery(ctx, branch, state, signal);
@@ -1831,10 +1832,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Merge the campaign worktree once every wave is done and every commit is
-	 * approved.  The human approves commits in the review client; the engine
-	 * refuses a merge until then.  A refusal is not an error: the review relay
-	 * retries after the next approval.
+	 * Push the campaign worktree branch and open the pull request once every wave
+	 * is done and every commit is approved.  The human approves commits in the
+	 * review client; the engine refuses delivery until then.  A refusal is not an
+	 * error: the review relay retries after the next approval.
 	 */
 	async function tryDelivery(
 		ctx: ExtensionContext,
@@ -1851,7 +1852,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		try {
 			await sliceme(ctx, ["review", "--report"], signal);
 		} catch {
-			/* the report is evidence for the reviewer, never a merge gate */
+			/* the report is evidence for the reviewer, never a delivery gate */
 		}
 		const cleanup = cleanupOverride !== undefined ? String(cleanupOverride) : "none";
 		const args = ["deliver", "--target", target];
@@ -1892,6 +1893,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		logEvent(ctx.cwd, branch, failed ? "campaign.deliver_failed" : "campaign.delivered", {
 			target,
 			source,
+			pull_request: delivered.json?.pull_request ?? null,
 			results: delivered.json?.results ?? [],
 		});
 		return delivered;

@@ -8,7 +8,7 @@ approves every commit.
 A human reviews the unmerged commits from the campaign worktree in a local
 browser. The reviewer reads the diff and the report, writes comments, and
 approves or rejects individual commits. The design has one safety goal: **no
-merge without a human approval of every reviewed commit.**
+pull request without a human approval of every reviewed commit.**
 
 ## 1. Scope
 
@@ -32,7 +32,7 @@ Out:
 
 - Remote or shared review. The server binds to loopback only.
 - Promotion from the target feature branch to the default branch. That step
-  stays a human `git` step.
+  stays a human act on the forge.
 - Uncommitted working-tree changes. The review unit is commits.
 - Windows. The design uses POSIX locks.
 
@@ -51,7 +51,7 @@ flowchart LR
 ```
 
 The server calls `Service` in process. It does not call `bin/sliceme`. So
-`deliver`, the target guard, `run_checks`, the conflict reset, and cleanup need
+`deliver`, the target guard, `run_checks`, and cleanup need
 no JSON contract to stay in sync. `Service` stays the only owner of state.
 
 The pi extension starts the server as a background child after the first
@@ -63,7 +63,8 @@ is available.
 Server lifecycle:
 
 - The first recorded commit starts the server.
-- A successful delivery stops the server. Delivery merges every approved commit.
+- A successful delivery stops the server. Delivery opens a pull request for
+  every approved commit.
 - `session_shutdown` stops the server.
 - The server stops itself when the parent closes the pipe on standard input. A
   crashed coordinator therefore cannot leave an orphan server.
@@ -100,8 +101,8 @@ reason to open the review page.
 
 Review is **incremental and non-blocking**. A human can open the page after the
 first commit and approve as work lands. Workers keep editing; nothing waits on
-the review. The coordinator merges only when every accumulated commit is
-approved.
+the review. The coordinator opens the pull request only when a human approves
+every accumulated commit.
 
 ## 4. State
 
@@ -121,7 +122,7 @@ design adds no relay audit table.
 Comments stay in SQLite. An optional export writes a portable copy as a git
 note on the commit. Notes are mutable, so SQLite remains the queue.
 
-`gc` prunes rows for campaigns whose branch and merge commit are gone and older
+`gc` prunes rows for campaigns whose branch and delivery are gone and older
 than a retention window. It never prunes a campaign with a descriptor file.
 
 ## 5. Comments and the relay
@@ -158,8 +159,8 @@ on its own.
   approval can never outlive the diff it approved.
 - A `request_changes` row for a commit supersedes an earlier `approve` for that
   commit.
-- A successful merge consumes every approval it used. A failed check run resets
-  the target and leaves the approvals unconsumed, so a retry needs no new
+- A successful delivery consumes every approval it used. A failed check or a
+  failed forge call leaves the approvals unconsumed, so a retry needs no new
   review.
 
 The coordinator does not prompt for a final approval. The browser approvals are
@@ -254,11 +255,15 @@ The client is one page. It has a top bar and three panes.
 4. Type the comment body.
 5. Press `Ctrl+Enter`, or click **Comment**. Press `Esc` to cancel.
 
+To comment on the whole change, click **Add comment** in the Comments panel.
+Use this for a request that is not tied to one line. For example, restructure
+the files, or simplify the code.
+
 The client sends the `comment` action with the anchor. The anchor holds the
 commit, the file, the side, the line, and the line end. A deleted line anchors
 to the `old` side. An added or context line anchors to the `new` side. The
-server stores the anchor with the body. A comment on the report leaves the
-commit empty.
+server stores the anchor with the body. A whole-change comment and a comment on
+the report leave the anchor empty.
 
 A saved comment shows a marker in the gutter. A click on the marker opens the
 comment thread.
@@ -332,9 +337,9 @@ campaign loop:
    mid-delivery.
 2. **Lock.** Take the plane delivery lock at `.sliceme/review.lock`. This lock
    is separate from `executor.lock`.
-3. **Re-check the gate** under the lock and immediately before the merge.
-4. Merge `--no-ff`, run `run_checks`, reset the target on failure, mark the
-   candidates landed, consume the approvals, and clean up.
+3. **Re-check the gate** under the lock and immediately before the push.
+4. Push the campaign branch, open the pull request, mark the candidates landed,
+   consume the approvals, and clean up.
 
 Preconditions, enforced in `Service`:
 

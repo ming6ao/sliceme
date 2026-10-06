@@ -186,7 +186,7 @@ shares the campaign worktree. Each campaign has its own descriptor file, keyed
 by the campaign branch.
 
 A successful `deliver` writes `completed` immediately, so a crash after the
-merge cannot leave a `suspended` descriptor. When every wave finished but
+pull request cannot leave a `suspended` descriptor. When every wave finished but
 delivery did not happen, `session_shutdown` writes `ready`, because no wave
 remains to continue. As a backstop, `session_start` re-derives the plan from the
 engine before it offers or injects a resume. If the plane shows no remaining

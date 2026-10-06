@@ -21,8 +21,8 @@ dark/light themes is at [architecture.html](./architecture.html). The source is
 Sliceme turns a design document into a DAG of work. It packs non-conflicting
 nodes into waves. It runs one pure-editor worker subagent per node in a single
 campaign worktree. One sandboxed executor verifies each candidate against a
-content fingerprint. Sliceme then delivers the campaign worktree onto a target
-feature branch in one approved merge.
+content fingerprint. Sliceme then opens one pull request from the campaign
+worktree branch onto a target feature branch after approval.
 
 A pi coordinator session owns the campaign loop. A dependency-free Python
 engine owns state, isolation, and delivery. The DAG (`dag.json`) is the only
@@ -39,7 +39,7 @@ authored schedule, and waves are a pure projection of it.
 | **One executor.** | All checks go through one runner behind a `flock`, so shared resources (and the GPU) are serialized. Verifiers judge recorded evidence; they do not run commands. |
 | **Verification is pinned to content.** | A verdict is valid only for an exact `(tree, command vector, toolchain, policy, sandbox, executor, source)` fingerprint. |
 | **Git and SQLite win over caches.** | `state.json` is a rebuildable cache. On conflict, git and `state.db` are authoritative. |
-| **Fail closed, fail lastingly.** | A dirty integration worktree, a missing sandbox gate, or a default-branch target aborts before mutation; a failed merge or check resets the target branch. |
+| **Fail closed, fail lastingly.** | A missing sandbox gate or a default-branch target aborts before mutation; a failed check or a forge failure leaves the campaign working. |
 
 ## 3. System context
 
@@ -215,7 +215,7 @@ sequenceDiagram
   C->>C: mark node done (no merge); open wave N+1 in the same worktree
   U->>E: review --decision approve --commit SHA (per commit, any time)
   C->>E: report (deterministic skeleton + narrative)
-  C->>E: deliver when every commit is approved (merge --no-ff into the target)
+  C->>E: deliver when every commit is approved (push + pull request into the target)
 ```
 
 The coordinator is **not** a unit. The plane starts with `--no-unit`, so the
@@ -252,7 +252,7 @@ flowchart TD
 
 Every wave records onto the same campaign worktree. A later wave therefore sees
 the files of the previous wave without a merge or a rebase. Sliceme defers the
-merge to the target branch to the single `deliver` step. `state.json` caches the
+pull request to the single `deliver` step. `state.json` caches the
 projected waves. A planner change that alters `owns` or `depends_on` changes the
 DAG fingerprint and triggers a replan.
 
@@ -290,8 +290,8 @@ Two verification paths share this primitive:
    to the executor; `exec --run` drains the queue under the single lock; the
    verifier judges the recorded job. Dedupe by fingerprint means the executor
    serves an unchanged vector from cache.
-2. **Delivery path (`deliver`).** The plane's trusted checks run on the merged
-   campaign-worktree tree. Sliceme reuses a passed fingerprint.
+2. **Delivery path (`deliver`).** The plane's trusted checks run on the campaign
+   head before the push. Sliceme reuses a passed fingerprint.
 
 `source` is part of the identity, so a `node:w1` acceptance verdict can never
 collide with a plane check. Sliceme folds in the sandbox digest and the executor
@@ -335,6 +335,7 @@ sequenceDiagram
   participant E as Engine (integrate.py)
   participant D as Store
   participant G as Git
+  participant F as Forge (gh)
 
   C->>E: deliver (when every wave is done and every commit is approved)
   E->>E: require a newest unconsumed approve for every accumulated commit
@@ -343,29 +344,32 @@ sequenceDiagram
   alt target already contains the source
     E->>D: mark candidates landed
     E-->>C: no-op (already contained)
+  else pull request already open
+    E->>D: mark candidates landed
+    E-->>C: no-op (existing pull request)
   else
-    E->>G: git merge --no-ff the campaign worktree into the target
+    E->>G: git merge-tree target source (pre-check)
     alt merge conflict
-      E->>G: merge --abort
-      E-->>C: failed: structured conflict
+      E-->>C: failed: structured conflict, nothing pushed
     else merge clean
-      E->>G: run combined-tree checks
-      alt combined checks fail
-        E->>G: reset --hard pre-merge tip
-        E-->>C: failed: target restored
-      else combined checks pass
-        E->>D: candidate=landed, unit=landed (commits kept)
-        E-->>C: delivered with merge commit
+      E->>G: run trusted checks on the campaign head
+      alt checks fail
+        E-->>C: failed: pull request not opened
+      else checks pass
+        E->>G: git push origin source
+        E->>F: gh pr create (body = campaign report)
+        E->>D: candidate=landed, unit=landed, state=delivered
+        E-->>C: delivered with the pull request URL
       end
     end
   end
 ```
 
-Delivery is deterministic and idempotent: re-running skips a target that already
-contains the campaign worktree.  For a generic non-campaign plane with no
-worktree branch, `deliver` falls back to ordered per-candidate merges.  The
-engine mutates the target branch only in the `_integration` worktree. The
-default branch is never a valid target.
+Delivery is deterministic and idempotent. Sliceme returns an open pull request
+as it is. A target that already contains the campaign worktree is a no-op.
+Delivery pushes the campaign worktree branch and opens one pull request with
+`gh`. The engine never merges and never mutates the target branch. The default
+branch is never a valid target.
 
 ## 10. State and persistence
 
@@ -447,7 +451,7 @@ erDiagram
   <branch-key>.progress_<node>.json# per-node subagent heartbeat
   <branch-key>.worker_<id>.log     # one log per worker id
   <branch-key>.events.jsonl        # append-only audit log (extension)
-  worktrees/                       # the single campaign worktree (+ transient unit worktrees)
+  worktrees/                       # the single campaign worktree
   scratch/                         # detached simulation/verification worktrees (transient)
 ```
 
@@ -484,8 +488,8 @@ stateDiagram-v2
 | Worker produces no candidate / fails acceptance | Node `failed`; coordinator retries within `max_attempts`, splits, or stops. |
 | Verifier `fail` | Node `failed`; the verifier's evidence is attached to the retry prompt. |
 | A wave record touches a path outside every node's `owns` | Rejected by plan conformance; the coordinator widens `owns` or adds a `depends_on` edge; waves replan. |
-| Merge conflict at `deliver` | Merge aborted; structured findings returned; the target branch is never half-merged. |
-| Combined checks fail after merge | Target branch reset to its pre-merge tip; candidates not landed. |
+| Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; structured findings returned; nothing is pushed. |
+| Checks fail at `deliver` | The pull request is not opened; candidates are not landed. |
 | Default-branch target | Refused at `start` and at `deliver`; there is no override. |
 | Orchestrator crash | Non-detached workers die. On resume, `running` and `recorded` nodes become `paused` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. Expired executor leases requeue. |
 | Concurrent spawns completing together | Coordinator state is a rebuildable cache; git and `state.db` are the source of truth. (The proposed single-writer state store in [observability.md](./observability.md) §9, suggestion 2, removes the read-modify-write race.) |

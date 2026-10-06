@@ -66,11 +66,11 @@ COORDINATOR (this session)
   by resolved path. A project can override the GPU invocation through its
   sandbox manifest. The target repository owns *how to run tests in isolation*,
   not sliceme's GPU locking policy.
-- Nothing merges per wave. Commits accumulate on the campaign worktree. A human
-  approves individual commits, or all of them, in the local review client
-  (`docs/review.md`), before or after the last wave. When every wave completes
-  and a human approves every commit, the coordinator runs `deliver`
-  automatically and merges with the trusted checks.
+- Nothing lands on the target per wave. Commits accumulate on the campaign
+  worktree. A human approves individual commits, or all of them, in the local
+  review client (`docs/review.md`), before or after the last wave. When every
+  wave completes and a human approves every commit, the coordinator runs
+  `deliver` automatically and opens a pull request with the trusted checks.
 - `wave --record` enforces **plan conformance**: it rejects a changed path
   outside the owned directories of its node. The coordinator then widens `owns`
   or adds a `depends_on` edge (the DAG fingerprint changes, so the next
@@ -118,7 +118,7 @@ sliceme spawn <node>        one-shot pure editor in the campaign worktree
 sliceme record              commit the current wave onto the campaign worktree
 sliceme verify <node>       executor runs checks; a read-only verifier judges
 sliceme review --serve      local review client (per-commit approval)
-sliceme deliver             merge to target once every commit is approved
+sliceme deliver             push the campaign branch and open a pull request
 sliceme review --report     deterministic report (`--narrative` appends the summary)
 ```
 
@@ -140,10 +140,10 @@ waves.
 
 The coordinator's own checkout is **not** an Sliceme unit. `sliceme start`
 bootstraps the plane with `--no-unit` and records the chosen target branch. The
-campaign work commits to a separate worktree branch. `deliver` merges it into
-the target only after every wave completes and a human approves every
-accumulated commit in the review client. Sliceme refuses `main`, `master`, and
-the default branch at both steps.
+campaign work commits to a separate worktree branch. `deliver` pushes that
+branch and opens a pull request against the target. This step waits for every
+wave and for the approval of every accumulated commit in the review client.
+Sliceme refuses `main`, `master`, and the default branch at both steps.
 
 ## Engine actions (both tools)
 
@@ -151,7 +151,7 @@ the default branch at both steps.
 |---|---|
 | `start` | bootstrap the plane; `no_unit: true` for the coordinator's checkout; `target`/`target_mode` chooses the feature branch; `name` + `base` creates a worker unit |
 | `status` | units, candidates, waves; `short`, `unit`, `simulate`, `health`, `gc`; `--sessions` lists registered campaigns; `--resume` reconciles a suspended campaign from git plus `state.db` |
-| `deliver` | merge the campaign worktree into the target feature branch; `target`, `source`, `cleanup`, `no_checks` |
+| `deliver` | push the campaign worktree branch and open the delivery pull request against the target feature branch; `target`, `source`, `cleanup`, `no_checks` |
 | `exec` | the sandboxed executor: `--validate` (sandbox gate), `--submit`/`--run`/`--wait`/`--cancel` check jobs |
 | `wave` | the campaign worktree: `--open` (create/reuse it), `--record --wave N` (per-node commits, conformance) |
 | `review` | local review: `--serve`, `--state`, `--diff`, `--poll`, `--ack`, `--comment`, `--decision` (`--commit` or `--all`); `--report --narrative` writes the deterministic report |
@@ -172,7 +172,7 @@ A spawned worker edits the shared campaign worktree and does nothing else:
 Workers are pure editors: they edit only their owned directories and stop. The
 coordinator runs `wave --record --wave N` to enforce conformance, create
 per-node commits, and run the checks through the single executor. A worker never
-runs the suite, never runs `git`, and never touches the GPU. Nothing merges to
+runs the suite, never runs `git`, and never touches the GPU. Nothing lands on
 the target branch until a human approves every commit and the coordinator runs
 its single `deliver` step.
 

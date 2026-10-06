@@ -98,27 +98,30 @@ candidate or a status other than `pending`. Sliceme reports the result as
 ### `deliver`
 
 ```bash
-sliceme deliver [--target BRANCH] [--source BRANCH] [--ff]
+sliceme deliver [--target BRANCH] [--source BRANCH]
                    [--cleanup none|worktrees|all] [--no-checks]
 ```
 
-- Merges the campaign worktree branch (`--source`, default the recorded
-  `worktree_branch`) into the target branch (`--target`, default the recorded
-  target) with `git merge --no-ff`.
-- Runs the plane's trusted checks on the merged tree; combined checks that fail
-  reset the target branch to its pre-merge tip.
+- Pushes the campaign worktree branch (`--source`, default the recorded
+  `worktree_branch`) to the remote (`policy.remote`, default `origin`).
+- Opens one pull request against the target branch (`--target`, default the
+  recorded target) with the `gh` program. The body is the campaign report.
+- Pre-checks the merge with `git merge-tree`. A conflict returns structured
+  findings before the push.
+- Runs the plane's trusted checks on the campaign head; a failed check stops the
+  delivery before the push.
 - Marks prepared candidates and their unit `landed` without rewriting their
   recorded commits.
 
-It is idempotent: a target that already contains the worktree branch is a
-no-op. A merge conflict aborts the merge and returns structured findings
-without leaving the target half-merged. Delivery needs the campaign worktree
-branch; run `wave --open` first. It refuses until every accumulated commit has
-a newest unconsumed `approve` (or an `override` records a note).
+It is idempotent: Sliceme returns an open pull request as it is, and a target
+that already contains the worktree branch is a no-op. Delivery needs the campaign
+worktree branch; run `wave --open` first. It refuses until every accumulated
+commit has a newest unconsumed `approve` (or an `override` records a note).
+Install `gh` and authenticate it before the first delivery.
 
 **The target is never the repository default branch.** Sliceme refuses `main`,
 `master`, and the recorded default, with **no override**. Promotion from a
-feature branch to the default branch stays a human `git` step.
+feature branch to the default branch stays a human act on the forge.
 
 ### `exec`
 
@@ -239,7 +242,7 @@ See `docs/review.md` for the local review surface.
   plus an optional `--narrative`).
 
 The snapshot includes the generated report even though git ignores it. `deliver`
-refuses a merge until every accumulated commit has a newest unconsumed
+refuses delivery until every accumulated commit has a newest unconsumed
 `approve` (or an `override` records a note). The server binds
 `127.0.0.1`/`::1` only and requires an `X-Sliceme-Token` write token (carried in
 the URL fragment).
@@ -269,12 +272,13 @@ rejected.
 | `sliceme/cli.py` | generated `argparse` CLI (`sliceme`), human + `--json` output |
 | `sliceme/service.py` | **single owner of state**: units, candidates, wave conformance, campaign worktree + recorder, review, and delivery |
 | `sliceme/store.py` | SQLite persistence (WAL) |
-| `sliceme/gitutil.py` | Git plumbing (`worktree`, `merge`, `merge-tree`, `commit`, `branch`, `changed_files`) |
+| `sliceme/gitutil.py` | Git plumbing (`worktree`, `merge`, `merge-tree`, `commit`, `branch`, `push`, `changed_files`) |
 | `sliceme/ownership.py` | Directory ownership (normalization, `owns`, subtree conflicts), the DAG wave projection, and the same-ownership merge |
 | `sliceme/verifier.py` | Fingerprints (plane and node sources) and the sandboxed trusted-check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
 | `sliceme/executor.py` | The single sandboxed executor queue (submit/run/wait/cancel, dedupe, leases) |
-| `sliceme/integrate.py` | Target selection and guards, final delivery, and combined-tree simulation |
+| `sliceme/integrate.py` | Target selection and guards, pull request delivery, and combined-tree simulation |
+| `sliceme/pullrequest.py` | The `gh` forge client: find or create the delivery pull request |
 | `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; deterministic report |
 | `sliceme/review/` | Local review: `server.py` (loopback HTTP), `api.py` (action dispatch), `packet.py` (snapshot + commits + report + file body), `diff.py` (diff parsing), `security.py` (token + loopback), `web/` (client and the safe Markdown renderer) |
 
@@ -305,7 +309,7 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
   feat--x.progress_<node>.json     # per-node subagent heartbeat
   feat--x.worker_<id>.log          # one log per worker id
   feat--x.events.jsonl             # audit log (wave replans, verdicts, resume)
-  worktrees/                       # the single campaign worktree (+ transient unit worktrees)
+  worktrees/                       # the single campaign worktree
   scratch/                         # detached simulation worktrees (transient)
 ```
 
@@ -315,8 +319,8 @@ of tries. On conflict, git and `state.db` are authoritative; `state.json` is a
 rebuildable cache.  Only the pi adapter writes the `.session.json` descriptor;
 the engine reads it (`status --resume`, `status --sessions`).
 
-SQLite tables: `units`, `candidates`, `jobs`, `attempts`, `review_decisions`,
-`comments`.
+SQLite tables: `campaigns`, `units`, `candidates`, `jobs`, `attempts`,
+`review_decisions`, `comments`.
 
 ## 4. Verification
 

@@ -166,8 +166,8 @@ class PiPackageTests(unittest.TestCase):
     def test_retired_actions_are_gone(self):
         # The single-agent path (`handoff`), the old `submit`/`verify` verbs, and
         # the per-wave `integrate` landing action, and the plain-plane `commit`
-        # action are retired; `deliver` is the end-of-campaign merge and `review`
-        # is the local review surface.
+        # action are retired; `deliver` is the end-of-campaign pull request and
+        # `review` is the local review surface.
         names = {a.name for a in surface.ACTIONS}
         for gone in ("submit", "verify", "handoff", "declare", "integrate", "commit"):
             self.assertNotIn(gone, names)

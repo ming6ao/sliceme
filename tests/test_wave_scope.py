@@ -6,6 +6,7 @@ changes, and integration of the wave branch as a unit.
 """
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,8 @@ from pathlib import Path
 from sliceme import campaign
 from sliceme.service import Service
 from sliceme.util import SlicemeError, config_path, write_json
+
+FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
 
 
 def run(*args, cwd):
@@ -32,6 +35,7 @@ class WaveScopeCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.remote_tmp = tempfile.TemporaryDirectory()
         run("git", "init", "-q", "-b", "main", cwd=self.root)
         run("git", "config", "user.email", "t@example.com", cwd=self.root)
         run("git", "config", "user.name", "Tester", cwd=self.root)
@@ -45,6 +49,11 @@ class WaveScopeCase(unittest.TestCase):
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
         run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
+        remote = Path(self.remote_tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        run("git", "remote", "add", "origin", str(remote), cwd=self.root)
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
         Service.init_plane(self.root, checks=self.checks)
         self.svc = Service(self.root)
         write_json(
@@ -60,6 +69,8 @@ class WaveScopeCase(unittest.TestCase):
 
     def tearDown(self):
         self.svc.close()
+        os.environ["PATH"] = self._old_path
+        self.remote_tmp.cleanup()
         self.tmp.cleanup()
 
     def edit(self, worktree, rel, content):
@@ -139,13 +150,25 @@ class WaveIntegrationTests(WaveScopeCase):
         self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
         self.approve()
         delivered = self.svc.deliver()
-        statuses = [r["status"] for r in delivered["results"]]
-        self.assertEqual(statuses, ["landed"])
-        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 2\n")
-        self.assertEqual(self.file_on("feat/x", "src/b/y.py"), "b = 2\n")
-        # The default is a --no-ff merge commit (two parents).
-        parents = run("git", "rev-list", "--parents", "-n", "1", "feat/x", cwd=self.root)
-        self.assertEqual(len(parents.stdout.split()), 3)
+        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+        self.assertTrue(delivered["pull_request"]["url"])
+        # The campaign branch carries the work; the target is unchanged until a
+        # human merges the pull request.
+        self.assertEqual(self.file_on(unit["branch"], "src/a/x.py"), "a = 2\n")
+        self.assertEqual(self.file_on(unit["branch"], "src/b/y.py"), "b = 2\n")
+        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
+        self.assertEqual(self.file_on("feat/x", "src/b/y.py"), "b = 1\n")
+
+    def test_deliver_is_idempotent(self):
+        unit = self.svc.create_wave_workspace(0, base="feat/x")
+        self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
+        self.svc.record_wave(0, messages={"w1": "test"})
+        self.approve()
+        first = self.svc.deliver()
+        second = self.svc.deliver()
+        self.assertEqual(
+            first["pull_request"]["url"], second["pull_request"]["url"]
+        )
 
     def test_later_wave_reuses_the_same_worktree(self):
         first = self.svc.create_wave_workspace(0, base="feat/x")
@@ -161,12 +184,13 @@ class WaveIntegrationTests(WaveScopeCase):
         self.edit(second["worktree"], "src/c/z.py", "c = 2\n")
         self.svc.record_wave(1, messages={"w3": "test"})
 
-        # Still nothing on the target until delivery.
+        # Still nothing on the target until the pull request merges.
         self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
         self.approve()
         self.svc.deliver()
-        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 2\n")
-        self.assertEqual(self.file_on("feat/x", "src/c/z.py"), "c = 2\n")
+        self.assertEqual(self.file_on(first["branch"], "src/a/x.py"), "a = 2\n")
+        self.assertEqual(self.file_on(first["branch"], "src/c/z.py"), "c = 2\n")
+        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
 
     def test_deliver_refuses_the_default_branch(self):
         from sliceme.util import config_path

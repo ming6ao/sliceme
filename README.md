@@ -4,8 +4,8 @@
 
 Sliceme turns a design document into a DAG of work. It runs the non-conflicting
 nodes in parallel and verifies each node against a content fingerprint. It
-delivers the results onto a target feature branch. Sliceme decides ownership at
-plan time, so parallel agents never author the same files.
+delivers the results as a pull request against a target feature branch. Sliceme
+decides ownership at plan time, so parallel agents never author the same files.
 
 - **Plan-time ownership** — nodes own directories; overlapping subtrees are
   serialized into waves.
@@ -14,11 +14,12 @@ plan time, so parallel agents never author the same files.
   persist.
 - **One executor** — a single serialized, sandboxed runner drains a check queue,
   so verifiers judge recorded evidence instead of each running the suite.
-- **Approved delivery** — Sliceme merges nothing per wave. Commits accumulate,
-  and a human approves each commit in the local review client. When every wave
-  finishes and a human approves every commit, the coordinator runs one `--no-ff`
-  merge into the target feature branch. Sliceme refuses the default branch
-  (`main`, `master`, or the repository default) with no override.
+- **Approved delivery** — Sliceme merges nothing. Commits accumulate, and a
+  human approves each commit in the local review client. When every wave
+  finishes and a human approves every commit, Sliceme pushes the campaign branch
+  and opens one pull request against the target feature branch. Sliceme refuses
+  the default branch (`main`, `master`, or the repository default) with no
+  override.
 
 ## Install
 
@@ -44,7 +45,7 @@ sliceme spawn <node>        one-shot pure editor in the campaign worktree
 sliceme record              commit the current wave onto the campaign worktree
 sliceme verify <node>       the executor runs checks; a read-only verifier judges
 sliceme review --serve      local review client (per-commit approval)
-sliceme deliver             merge to the target once every commit is approved
+sliceme deliver             push the campaign branch and open a pull request
 sliceme report              deterministic report plus the narrative
 ```
 

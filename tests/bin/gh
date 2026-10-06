@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""A minimal `gh` stand-in for tests (pull request view and create only).
+
+The fake records pull requests in a JSON file.  The path comes from
+``FAKE_GH_STATE``, or defaults to ``.fake-gh.json`` in the working directory.
+Sliceme runs ``gh`` with the repository root as the working directory, so the
+default keeps each test's state inside its own temporary repository.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+state = Path(os.environ.get("FAKE_GH_STATE", ".fake-gh.json"))
+
+
+def load():
+    if state.is_file():
+        return json.loads(state.read_text())
+    return {"prs": {}}
+
+
+def save(data):
+    state.write_text(json.dumps(data))
+
+
+def main(argv):
+    if len(argv) >= 3 and argv[0] == "pr" and argv[1] == "view":
+        pr = load()["prs"].get(argv[2])
+        if not pr:
+            print("no pull requests found", file=sys.stderr)
+            return 1
+        print(json.dumps({"url": pr["url"], "number": pr.get("number"), "state": "OPEN"}))
+        return 0
+    if len(argv) >= 2 and argv[0] == "pr" and argv[1] == "create":
+        args = argv[2:]
+        head = args[args.index("--head") + 1]
+        base = args[args.index("--base") + 1]
+        title = args[args.index("--title") + 1]
+        body = args[args.index("--body") + 1]
+        data = load()
+        prs = data.setdefault("prs", {})
+        pr = prs.get(head)
+        if pr is None:
+            number = len(prs) + 1
+            pr = {
+                "url": f"https://example.test/pull/{number}",
+                "number": number,
+                "base": base,
+                "title": title,
+                "body": body,
+            }
+            prs[head] = pr
+            save(data)
+        print(pr["url"])
+        return 0
+    print("unsupported gh invocation: " + " ".join(argv), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

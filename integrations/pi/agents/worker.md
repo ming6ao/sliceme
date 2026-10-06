@@ -20,9 +20,9 @@ edit files and nothing else.
 
 - Ownership is by directory subtree, decided at plan time. The coordinator
   rejects a change outside your owned directories when it records the wave.
-- Never use the GPU, never run `git merge`, never call `sliceme-unit`
-  `deliver`, and never call the `sliceme` coordinator tool; the coordinator owns
-  recording and delivery.
+- Never use the GPU, never run `git merge` or `git push`, never call
+  `sliceme-unit` `deliver`, and never call the `sliceme` coordinator tool; the
+  coordinator owns recording and delivery.
 - Everything you write stays in the one shared campaign worktree, so a later
   wave can read it without any merge or rebase.
 - End with a concise report: what you changed, and which owned directories hold it.

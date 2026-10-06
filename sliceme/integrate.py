@@ -1,21 +1,19 @@
 """Agent-callable integration onto a campaign's feature branch.
 
-``integrate`` lands prepared candidates on the plane's ``main_branch`` (the
-campaign feature branch):
+``integrate`` opens the delivery pull request for a campaign:
 
-* candidates are ordered by the existing wave planner, then merged with
-  ``git merge --no-ff`` (one merge commit per unit, branches kept);
-* the plane's trusted checks run on the combined tree, fingerprint-cached;
+* every approved commit accumulates on one campaign worktree branch;
+* delivery pushes that branch and opens one pull request against the target
+  feature branch with the ``gh`` program;
+* a ``git merge-tree`` pre-check refuses a conflicting merge before the push;
+* the plane's trusted checks run on the campaign head before the push;
 * candidates move to ``landed`` and units to ``landed``, keeping branches for
   provenance;
-* a merge conflict aborts the merge and returns structured findings, never
-  leaving the feature branch half-merged;
-* re-running is a no-op: landed candidates are skipped, and a candidate whose
-  branch is already contained in the feature branch is marked landed.
+* re-running is a no-op: an open pull request is returned as is.
 
-A **safety rail** refuses to integrate when ``main_branch`` equals the plane's
-recorded default branch (captured once at init, §6.1).  Promotion to the
-default branch stays a human ``git`` step.
+A **safety rail** refuses delivery when the target equals the plane's recorded
+(default) branch (captured once at init, §6.1).  Promotion to the default
+branch stays a human act on the forge.
 
 When ``check_only`` is set (the orchestrator's ``verify`` step), the node's
 acceptance commands run at the candidate commit, the verdict is recorded with
@@ -33,16 +31,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import campaign, gitutil
+from . import campaign, gitutil, pullrequest
 from .ownership import DEFAULT_WAVE_SIZE, plan_dag_waves
 from .store import Store
-from .util import SlicemeError, scratch_dir, worktrees_dir
+from .util import SlicemeError, scratch_dir
 from .verifier import CheckResult, run_checks
 
 __all__ = [
     "LandResult",
     "Wave",
-    "deliver",
+    "deliver_pull_request",
     "found_default_branch",
     "is_default_branch",
     "plan_waves",
@@ -56,24 +54,16 @@ __all__ = [
 # ---------------------------------------------------------------------------
 @dataclass
 class LandResult:
-    candidate_id: int
-    unit_name: str
-    branch: str
-    status: str  # landed | failed | skipped
+    status: str  # landed | failed
     detail: str = ""
-    merge_commit: str | None = None
+    pull_request: dict[str, Any] | None = None
     checks: list[CheckResult] = field(default_factory=list)
-    already_up_to_date: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "candidate": self.candidate_id,
-            "unit": self.unit_name,
-            "branch": self.branch,
             "status": self.status,
             "detail": self.detail,
-            "merge_commit": self.merge_commit,
-            "already_up_to_date": self.already_up_to_date,
+            "pull_request": self.pull_request,
             "checks": [c.to_dict() for c in self.checks],
         }
 
@@ -93,35 +83,6 @@ def target_branch_of(config: dict[str, Any]) -> str:
 
 # Backwards-compatible name (the target branch used to be called main_branch).
 main_branch_of = target_branch_of
-
-
-def main_worktree(root: Path, branch: str) -> tuple[Path, bool]:
-    """Return the worktree checked out at *branch*, creating ``_integration``.
-
-    The second element is ``True`` when the worktree was just created.
-    """
-    entry = gitutil.worktree_for_branch(root, branch)
-    if entry is not None:
-        return entry.path, False
-    path = worktrees_dir(root) / "_integration"
-    # Clear any leftover directory *and* stale metadata before (re)creating it,
-    # otherwise ``git worktree add`` fails with "already registered".
-    gitutil.cleanup_worktree(root, path)
-    gitutil.add_worktree(root, path, branch=branch, base=branch, new_branch=False)
-    return path, True
-
-
-def conflict_summary(result: gitutil.GitResult) -> str:
-    text = (result.stderr or "") + "\n" + (result.stdout or "")
-    for line in text.splitlines():
-        line = line.strip()
-        if (
-            line.startswith("CONFLICT")
-            or "Automatic merge failed" in line
-            or "would be overwritten" in line
-        ):
-            return line
-    return text.strip().splitlines()[-1] if text.strip() else "merge failed"
 
 
 def found_default_branch(root: Path, *, exclude: str | None = None) -> str:
@@ -170,13 +131,13 @@ def is_default_branch(
 
 
 # ---------------------------------------------------------------------------
-# Final delivery: merge the campaign worktree into the target branch
+# Final delivery: push the campaign branch and open a pull request
 # ---------------------------------------------------------------------------
 def _mark_delivered(store: Store, campaign: str | None = None) -> None:
     """Mark this campaign's prepared candidates as landed.
 
-    The candidate's ``head_commit`` is provenance (the node's commit on the
-    campaign worktree), so delivery must not overwrite it with the merge commit.
+    The candidate's ``head_commit`` stays as provenance (the node's commit on
+    the campaign worktree).
     """
     for candidate in store.list_candidates(statuses=["prepared"], campaign=campaign):
         store.update_candidate(int(candidate["id"]), status="landed")
@@ -186,90 +147,29 @@ def _mark_delivered(store: Store, campaign: str | None = None) -> None:
     store.conn.commit()
 
 
-def _deliver_branch(
-    store: Store,
-    root: Path,
-    config: dict[str, Any],
+def landed(
+    detail: str,
+    pull_request: dict[str, Any] | None = None,
     *,
-    target: str,
-    source: str,
-    no_ff: bool,
-    run_checks_flag: bool,
-    campaign: str | None = None,
-) -> list[LandResult]:
-    """Merge a single campaign worktree branch onto the target branch."""
-    wt_path, _created = main_worktree(root, target)
-    if not gitutil.is_clean(wt_path):
-        raise SlicemeError(
-            f"integration worktree {wt_path} is dirty; commit or discard changes before deliver"
-        )
-    source_head = gitutil.rev_parse(root, source)
-    target_head = gitutil.head_commit(wt_path)
-    if gitutil.merge_base(root, target_head, source_head) == source_head:
-        _mark_delivered(store, campaign)
-        return [
-            LandResult(
-                candidate_id=0,
-                unit_name="campaign",
-                branch=source,
-                status="landed",
-                detail=f"already contained in {target}",
-                merge_commit=target_head,
-                already_up_to_date=True,
-            )
-        ]
-
-    pre_merge = target_head
-    merge = gitutil.merge_into(
-        wt_path,
-        source,
-        message=f"sliceme deliver {source}",
-        no_ff=no_ff,
+    checks: list[CheckResult] | None = None,
+) -> LandResult:
+    return LandResult(
+        status="landed",
+        detail=detail,
+        pull_request=pull_request,
+        checks=checks or [],
     )
-    if not merge.ok:
-        gitutil.merge_abort(wt_path)
-        return [
-            LandResult(
-                candidate_id=0,
-                unit_name="campaign",
-                branch=source,
-                status="failed",
-                detail="merge conflict: " + conflict_summary(merge),
-            )
-        ]
-
-    merge_commit = gitutil.head_commit(wt_path)
-    checks: list[CheckResult] = []
-    if run_checks_flag:
-        status, checks, _duration = run_checks(root, config, merge_commit)
-        if status != "passed":
-            gitutil.reset_hard(wt_path, pre_merge)
-            return [
-                LandResult(
-                    candidate_id=0,
-                    unit_name="campaign",
-                    branch=source,
-                    status="failed",
-                    detail="combined checks failed; target branch restored",
-                    checks=checks,
-                )
-            ]
-
-    _mark_delivered(store, campaign)
-    return [
-        LandResult(
-            candidate_id=0,
-            unit_name="campaign",
-            branch=source,
-            status="landed",
-            detail=f"merged into {target}",
-            merge_commit=merge_commit,
-            checks=checks,
-        )
-    ]
 
 
-def deliver(
+def _conflict_detail(outcome: gitutil.MergeOutcome) -> str:
+    if outcome.conflicts:
+        return "merge conflict: " + "; ".join(outcome.conflicts[:5])
+    text = (outcome.output or "").strip()
+    last = text.splitlines()[-1] if text else "merge failed"
+    return "merge conflict: " + last
+
+
+def deliver_pull_request(
     store: Store,
     root: Path,
     config: dict[str, Any],
@@ -277,10 +177,9 @@ def deliver(
     campaign: str | None = None,
     target: str | None = None,
     source: str | None = None,
-    no_ff: bool = True,
     run_checks_flag: bool = True,
 ) -> list[LandResult]:
-    """Merge the campaign worktree into the target feature branch.
+    """Push the campaign worktree branch and open the delivery pull request.
 
     Called once, after every wave is recorded and every commit is approved.
     The target branch is never the default branch: there is no override.
@@ -288,24 +187,68 @@ def deliver(
     target = target or target_branch_of(config)
     if is_default_branch(root, target, config):
         raise SlicemeError(
-            f"refusing to merge into the default branch '{target}'; "
-            "sliceme never commits to main or master"
+            f"refusing to deliver onto the default branch '{target}'; "
+            "sliceme opens a pull request against a feature branch only"
         )
     source = source or config.get("worktree_branch")
     if not source or not gitutil.branch_exists(root, source):
         raise SlicemeError(
             "no campaign worktree branch to deliver; run `sliceme wave --open` first"
         )
-    return _deliver_branch(
-        store,
-        root,
-        config,
-        target=target,
-        source=str(source),
-        no_ff=no_ff,
-        run_checks_flag=run_checks_flag,
-        campaign=campaign,
-    )
+    source = str(source)
+    if not gitutil.branch_exists(root, target):
+        raise SlicemeError(f"target branch '{target}' does not exist")
+
+    source_head = gitutil.rev_parse(root, source)
+    target_head = gitutil.rev_parse(root, target)
+    if gitutil.merge_base(root, target_head, source_head) == source_head:
+        _mark_delivered(store, campaign)
+        return [landed(f"already contained in {target}")]
+
+    outcome = gitutil.merge_tree(root, target_head, source_head)
+    if not outcome.clean:
+        return [
+            LandResult(
+                status="failed",
+                detail=_conflict_detail(outcome),
+            )
+        ]
+
+    checks: list[CheckResult] = []
+    if run_checks_flag:
+        status, checks, _duration = run_checks(root, config, source_head)
+        if status != "passed":
+            return [
+                LandResult(
+                    status="failed",
+                    detail="checks failed; pull request not opened",
+                    checks=checks,
+                )
+            ]
+
+    remote = (config.get("policy") or {}).get("remote") or "origin"
+    gitutil.push(root, remote, source)
+
+    found = pullrequest.find(root, source)
+    if found is None:
+        # Local import avoids the parameter named ``campaign`` shadowing the module.
+        from .campaign import pull_request_content
+
+        title, body = pull_request_content(
+            root, config, store, campaign=campaign
+        )
+        found = pullrequest.create(
+            root, head=source, base=target, title=title, body=body
+        )
+
+    _mark_delivered(store, campaign)
+    return [
+        landed(
+            f"pull request opened: {found['url']}",
+            found,
+            checks=checks,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

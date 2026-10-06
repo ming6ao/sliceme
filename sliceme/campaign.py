@@ -163,6 +163,7 @@ __all__ = [
     "load_state",
     "node_by_id",
     "node_status",
+    "pull_request_content",
     "render",
     "report_path",
     "session_path",
@@ -351,3 +352,39 @@ def write_report(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return {"path": str(path), "content": content, "skeleton": skeleton}
+
+
+def pull_request_content(
+    root: Path,
+    config: dict[str, Any],
+    store: Store,
+    *,
+    campaign: str | None = None,
+) -> tuple[str, str]:
+    """The title and body of the delivery pull request.
+
+    The body is the deterministic campaign report.  When the report is missing,
+    generate it first.  A short footer names the campaign branch and the target
+    branch.
+    """
+    branch = config_branch(config)
+    path = report_path(root, branch)
+    if not path.is_file():
+        write_report(root, config, store, branch=branch, campaign=campaign)
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError:
+        body = ""
+    name = (
+        config.get("campaign_name")
+        or (load_dag(root, branch) or {}).get("campaign")
+        or config.get("campaign_key")
+        or branch
+    )
+    title = f"sliceme: {name}"
+    footer = (
+        "\n---\n\n"
+        f"Campaign branch: `{config.get('worktree_branch')}`\n\n"
+        f"Target branch: `{branch}`\n"
+    )
+    return title, body.rstrip() + "\n" + footer

@@ -88,11 +88,10 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="deliver",
-        summary="merge the campaign worktree into the target feature branch (after approval)",
+        summary="push the campaign worktree and open the delivery pull request (after approval)",
         params=(
-            Param("target", "string", "target branch to merge into (default: recorded target)"),
+            Param("target", "string", "target feature branch for the pull request (default: recorded target)"),
             Param("source", "string", "campaign worktree branch (default: recorded worktree branch)"),
-            Param("ff", "boolean", "allow a fast-forward instead of a merge commit"),
             Param("cleanup", "string", "cleanup after delivery", choices=("none", "worktrees", "all")),
             Param("no_checks", "boolean", "skip the plane's trusted checks"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -305,7 +304,6 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
     return service.deliver(
         target=p.get("target"),
         source=p.get("source"),
-        no_ff=not bool(p.get("ff")),
         cleanup=p.get("cleanup") or "none",
         run_checks_flag=not p.get("no_checks"),
     )
