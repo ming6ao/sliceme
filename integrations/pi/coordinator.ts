@@ -438,7 +438,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(`sliceme: starting a campaign from ${design}`, "info");
 			pi.sendUserMessage(
 				`Start a Sliceme campaign for the design document "${design}". ` +
-					`Use the sliceme tool with action "start".`,
+					`Use the sliceme tool with action "start", then drive the campaign ` +
+					`without asking for permission: call "ready" and "spawn" every ready ` +
+					`node of wave 0, then record, verify, and continue through the waves. ` +
+					`Stop only at the human gates: the target-branch choice, an explicit ` +
+					`user suspension, a failed sandbox gate, and the final commit ` +
+					`review before delivery.`,
 			);
 		},
 	});
@@ -1937,6 +1942,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"plan is the only schedule; waves are a projection of it.",
 		promptSnippet: "Drive an Sliceme campaign (start → spawn → record → verify → deliver)",
 		promptGuidelines: [
+			"Drive the campaign continuously. After `start` returns the DAG, call `ready` and " +
+				"`spawn` the current wave in the same turn, then record, verify, and advance to the " +
+				"next wave. Do not stop to ask for permission between steps. Pause only at the " +
+				"human gates: the target-branch choice, an explicit user suspension, a failed " +
+				"sandbox gate, and the final commit review before delivery.",
 			"The target (feature) branch is chosen once at start and is never main, master, or " +
 				"the repository default branch. There is no override; refuse and re-choose instead.",
 			"The DAG in dag.json is the only authored schedule; waves are its deterministic " +
