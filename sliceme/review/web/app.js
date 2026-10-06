@@ -25,6 +25,7 @@ const els = {
 	evidence: document.getElementById("evidence"),
 	comments: document.getElementById("comments"),
 	commentCount: document.getElementById("comment-count"),
+	commentAdd: document.getElementById("comment-add"),
 	commentForm: document.getElementById("comment-form"),
 	commentAnchor: document.getElementById("comment-anchor"),
 	commentBody: document.getElementById("comment-body"),
@@ -294,7 +295,7 @@ function renderComments() {
 		const where = document.createElement("div");
 		where.className = "muted";
 		const parts = [
-			comment.commit_hash ? shortHash(comment.commit_hash) : "report",
+			comment.commit_hash ? shortHash(comment.commit_hash) : "general",
 			comment.file,
 			comment.line ? `${comment.side}:${comment.line}` : null,
 		]
@@ -454,10 +455,13 @@ function togglePreview() {
 }
 
 function openComment(anchor) {
-	view.anchor = anchor;
-	view.range = view.range && view.range.side === anchor.side ? view.range : null;
+	view.anchor = anchor || null;
+	view.range =
+		anchor && view.range && view.range.side === anchor.side ? view.range : null;
 	els.commentForm.hidden = false;
-	els.commentAnchor.textContent = `${view.file}:${anchor.side}:${anchor.line}`;
+	els.commentAnchor.textContent = anchor
+		? `${view.file}:${anchor.side}:${anchor.line}`
+		: "the whole change";
 	els.commentBody.focus();
 	markAnchor(els.diff, view.anchor, view.range);
 }
@@ -468,13 +472,14 @@ async function submitComment() {
 		notice("write a comment first", true);
 		return;
 	}
+	const anchor = view.report ? null : view.anchor;
 	try {
 		await apiPost("comment", {
-			commit: view.report ? null : view.commit || null,
-			file: view.report ? null : view.file || null,
-			side: view.report ? null : view.anchor?.side || null,
-			line: view.report ? null : view.anchor?.line ?? null,
-			line_end: view.report ? null : view.range?.line ?? view.anchor?.line ?? null,
+			commit: anchor ? view.commit || null : null,
+			file: anchor ? view.file || null : null,
+			side: anchor?.side || null,
+			line: anchor?.line ?? null,
+			line_end: anchor ? (view.range?.line ?? anchor.line) : null,
 			body,
 		});
 		els.commentBody.value = "";
@@ -600,6 +605,7 @@ async function poll() {
 els.approveAll.addEventListener("click", approveAll);
 els.deliver.addEventListener("click", deliver);
 els.viewToggle.addEventListener("click", togglePreview);
+els.commentAdd.addEventListener("click", () => openComment(null));
 els.campaignSelect.addEventListener("change", () => {
 	view.campaign = els.campaignSelect.value;
 	view.commit = "";

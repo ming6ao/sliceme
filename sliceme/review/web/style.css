@@ -395,6 +395,18 @@ main {
 	font-size: 12px;
 }
 
+.section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.section-head h2 {
+	margin: 0;
+}
+
 #comment-form {
 	display: flex;
 	flex-direction: column;
