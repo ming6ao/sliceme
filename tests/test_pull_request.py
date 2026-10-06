@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from sliceme import campaign
+from sliceme import pullrequest
 from sliceme.service import Service
 from sliceme.util import SlicemeError, write_json
 
@@ -142,6 +143,20 @@ class PullRequestCase(unittest.TestCase):
         self.assertIn("not-approved", str(ctx.exception))
         self.assertIsNone(self.campaign_row()["pr_url"])
 
+    def test_deliver_finds_gh_outside_the_process_path(self):
+        # A process started from a desktop launcher or a service has a small
+        # PATH. The GitHub CLI is installed, so delivery must still work.
+        unit = self.record_one()
+        self.approve()
+        with mock.patch.object(pullrequest, "_which", return_value=None):
+            with mock.patch.object(pullrequest, "_COMMON_BIN_DIRS", (str(FAKE_GH_BIN),)):
+                with mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
+                    result = self.svc.deliver()
+        self.assertEqual(result["results"][0]["status"], "landed")
+        self.assertTrue(result["pull_request"]["url"].startswith("https://example.test/pull/"))
+        self.assertEqual(self.campaign_row()["state"], "delivered")
+        self.assertIn(unit["branch"], self.remote_heads())
+
     def test_conflict_refuses_before_push(self):
         unit = self.record_one()
         # Advance the target branch with a conflicting change.
@@ -154,6 +169,65 @@ class PullRequestCase(unittest.TestCase):
         self.assertIn("conflict", result["results"][0]["detail"])
         self.assertIsNone(self.campaign_row()["pr_url"])
         self.assertNotIn(unit["branch"], self.remote_heads())
+
+
+class GhResolverTests(unittest.TestCase):
+    """``gh`` resolves from ``SLICEME_GH``, then ``PATH``, then common dirs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bin = Path(self.tmp.name)
+        env = mock.patch.dict(os.environ, {"PATH": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("SLICEME_GH", None)
+
+    def fake_gh(self, name: str = "gh") -> Path:
+        path = self.bin / name
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+        return path
+
+    def test_env_override_wins(self):
+        program = self.fake_gh()
+        os.environ["SLICEME_GH"] = str(program)
+        with mock.patch.object(pullrequest, "_which", return_value=None), mock.patch.object(
+            pullrequest, "_COMMON_BIN_DIRS", ()
+        ), mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
+            self.assertEqual(pullrequest.resolve(), str(program))
+
+    def test_path_is_searched_first(self):
+        program = self.fake_gh()
+        os.environ["PATH"] = str(self.bin)
+        with mock.patch.object(pullrequest, "_COMMON_BIN_DIRS", ()), mock.patch.object(
+            pullrequest, "_WINDOWS_GH_PATHS", ()
+        ):
+            self.assertEqual(pullrequest.resolve(), str(program))
+
+    def test_common_directory_is_a_fallback(self):
+        # A minimal process PATH (desktop launcher, service) omits the
+        # directory that holds the user-local `gh`.
+        program = self.fake_gh()
+        with mock.patch.object(pullrequest, "_which", return_value=None), mock.patch.object(
+            pullrequest, "_COMMON_BIN_DIRS", (str(self.bin),)
+        ), mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
+            self.assertEqual(pullrequest.resolve(), str(program))
+
+    def test_missing_program_resolves_to_none(self):
+        with mock.patch.object(pullrequest, "_which", return_value=None), mock.patch.object(
+            pullrequest, "_COMMON_BIN_DIRS", ()
+        ), mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
+            self.assertIsNone(pullrequest.resolve())
+
+    def test_require_raises_the_clear_error(self):
+        with mock.patch.object(pullrequest, "_which", return_value=None), mock.patch.object(
+            pullrequest, "_COMMON_BIN_DIRS", ()
+        ), mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
+            with self.assertRaises(SlicemeError) as ctx:
+                pullrequest.require()
+        self.assertIn("SLICEME_GH", str(ctx.exception))
+        self.assertIn("gh", str(ctx.exception))
 
 
 if __name__ == "__main__":

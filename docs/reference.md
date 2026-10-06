@@ -119,6 +119,17 @@ worktree branch; run `wave --open` first. It refuses until every accumulated
 commit has a newest unconsumed `approve` (or an `override` records a note).
 Install `gh` and authenticate it before the first delivery.
 
+Sliceme resolves `gh` in this order:
+
+1. the `SLICEME_GH` environment variable, when set;
+2. the process `PATH`;
+3. the common install directories (`~/.local/bin`, Homebrew, MacPorts,
+   `snap`, `/usr/local/bin`, `/usr/bin`).
+
+Step 3 covers a process that starts from a desktop launcher or a service and
+has a small `PATH`. Set `SLICEME_GH` when `gh` lives elsewhere. Sliceme validates
+`gh` before the push, so a missing program leaves the campaign working.
+
 **The target is never the repository default branch.** Sliceme refuses `main`,
 `master`, and the recorded default, with **no override**. Promotion from a
 feature branch to the default branch stays a human act on the forge.

@@ -199,6 +199,10 @@ def deliver_pull_request(
     if not gitutil.branch_exists(root, target):
         raise SlicemeError(f"target branch '{target}' does not exist")
 
+    # Fail before the push (and the checks) when the forge client is absent, so
+    # a missing program never leaves a pushed branch without a pull request.
+    pullrequest.require()
+
     source_head = gitutil.rev_parse(root, source)
     target_head = gitutil.rev_parse(root, target)
     if gitutil.merge_base(root, target_head, source_head) == source_head:
