@@ -1,9 +1,9 @@
 """Action dispatch for the review surface, shared by HTTP and the CLI.
 
 The HTTP route accepts only ``state``, ``diff``, ``file``, ``comment``,
-``decision``, ``poll``, ``ack``, and ``deliver``.  Each handler validates its
-parameters and calls :class:`sliceme.service.Service`, so the adapter stays thin
-and every action stays agent-callable.
+``reply``, ``addressed``, ``decision``, ``poll``, ``ack``, and ``deliver``.
+Each handler validates its parameters and calls :class:`sliceme.service.Service`,
+so the adapter stays thin and every action stays agent-callable.
 """
 
 from __future__ import annotations
@@ -47,7 +47,28 @@ def comment(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
         line=_optional_int(params.get("line")),
         line_end=_optional_int(params.get("line_end")),
         node=_optional(params.get("node")),
+        parent_comment_id=_optional_int(params.get("parent_comment_id")),
     )
+
+
+def reply(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
+    return service.review_reply(
+        parent_comment_id=_required_int(params, "reply"),
+        body=str(params.get("body") or ""),
+        node=_optional(params.get("node")),
+        addressing_commit=_optional(params.get("addressing_commit")),
+    )
+
+
+def addressed(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
+    return service.review_mark_addressed(
+        _required_int(params, "addressed"),
+        addressing_commit=_optional(params.get("addressing_commit")),
+    )
+
+
+def resolve(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
+    return service.review_resolve(_required_int(params, "resolve"))
 
 
 def decision(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
@@ -75,10 +96,7 @@ def poll(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
 
 
 def ack(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
-    comment_id = params.get("comment_id")
-    if comment_id is None:
-        raise SlicemeError("review --ack requires --comment-id")
-    return service.review_ack(int(comment_id))
+    return service.review_ack(_required_int(params, "ack"))
 
 
 def deliver(service: "Service", params: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +111,9 @@ _HANDLERS = {
     "diff": diff,
     "file": file,
     "comment": comment,
+    "reply": reply,
+    "addressed": addressed,
+    "resolve": resolve,
     "decision": decision,
     "report": report,
     "poll": poll,
@@ -118,6 +139,13 @@ def _optional(value: Any) -> str | None:
 def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
+    return int(value)
+
+
+def _required_int(params: dict[str, Any], action: str) -> int:
+    value = params.get("comment_id")
+    if value is None:
+        raise SlicemeError(f"review --{action} requires --comment-id")
     return int(value)
 
 

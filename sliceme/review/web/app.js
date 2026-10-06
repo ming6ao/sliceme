@@ -1,4 +1,4 @@
-// Sliceme review client: per-commit approvals, the report, and the action calls.
+// Sliceme review client: one campaign-level approval, the report, and the action calls.
 //
 // No build step and no framework. The write token arrives in the URL fragment
 // (`#token=...`) and is sent as `X-Sliceme-Token` on every write. Selection
@@ -7,31 +7,37 @@
 import { markAnchor, renderDiff } from "/diff.js";
 import { renderMarkdown } from "/markdown.js";
 
+// The client is a browser module. The Node test harness imports this file too,
+// so the DOM lookup and the bootstrap stay behind the `browser` guard.
+const browser = typeof document !== "undefined";
+const el = (id) => (browser ? document.getElementById(id) : null);
+
 const els = {
-	targetName: document.getElementById("target-name"),
-	campaignSelect: document.getElementById("campaign-select"),
-	tips: document.getElementById("tips"),
-	approvalState: document.getElementById("approval-state"),
-	stale: document.getElementById("stale"),
-	approveAll: document.getElementById("approve-all"),
-	deliver: document.getElementById("deliver"),
-	commitList: document.getElementById("commit-list"),
-	fileTree: document.getElementById("file-tree"),
-	diffHeader: document.getElementById("diff-header"),
-	diff: document.getElementById("diff"),
-	report: document.getElementById("report"),
-	preview: document.getElementById("preview"),
-	viewToggle: document.getElementById("view-toggle"),
-	evidence: document.getElementById("evidence"),
-	comments: document.getElementById("comments"),
-	commentCount: document.getElementById("comment-count"),
-	commentAdd: document.getElementById("comment-add"),
-	commentForm: document.getElementById("comment-form"),
-	commentAnchor: document.getElementById("comment-anchor"),
-	commentBody: document.getElementById("comment-body"),
-	commentCancel: document.getElementById("comment-cancel"),
-	statusbar: document.getElementById("statusbar"),
-	notice: document.getElementById("notice"),
+	targetName: el("target-name"),
+	campaignSelect: el("campaign-select"),
+	tips: el("tips"),
+	approvalState: el("approval-state"),
+	stale: el("stale"),
+	approveCampaign: el("approve-campaign"),
+	requestChanges: el("request-changes"),
+	deliver: el("deliver"),
+	commitList: el("commit-list"),
+	fileTree: el("file-tree"),
+	diffHeader: el("diff-header"),
+	diff: el("diff"),
+	report: el("report"),
+	preview: el("preview"),
+	viewToggle: el("view-toggle"),
+	evidence: el("evidence"),
+	comments: el("comments"),
+	commentCount: el("comment-count"),
+	commentAdd: el("comment-add"),
+	commentForm: el("comment-form"),
+	commentAnchor: el("comment-anchor"),
+	commentBody: el("comment-body"),
+	commentCancel: el("comment-cancel"),
+	statusbar: el("statusbar"),
+	notice: el("notice"),
 };
 
 const view = {
@@ -118,6 +124,47 @@ function isMarkdown(path) {
 }
 
 // ---------------------------------------------------------------------------
+// Pure helpers (exported for the Node test harness)
+// ---------------------------------------------------------------------------
+
+/** Group comment rows so each reply sits under its root comment. */
+export function threadComments(comments) {
+	const roots = [];
+	const byId = new Map();
+	for (const comment of comments || []) {
+		if (comment.parent_comment_id == null) {
+			const root = { ...comment, replies: [] };
+			roots.push(root);
+			byId.set(String(comment.id), root);
+		}
+	}
+	for (const comment of comments || []) {
+		if (comment.parent_comment_id == null) continue;
+		const parent = byId.get(String(comment.parent_comment_id));
+		// A reply whose root was pruned still surfaces as its own row.
+		if (parent) parent.replies.push(comment);
+		else roots.push({ ...comment, replies: [] });
+	}
+	return roots;
+}
+
+/** The campaign-level approval state that the top bar shows. */
+export function campaignApproval(snapshot) {
+	const decision = snapshot?.approval ?? snapshot?.override ?? null;
+	const approved = Boolean(snapshot?.all_approved);
+	let label = "not approved";
+	if (approved) label = "campaign approved";
+	else if (decision?.action === "request_changes") label = "changes requested";
+	return { approved, action: decision?.action ?? null, label };
+}
+
+/** The action params for the one campaign-level approval control. */
+export function decisionRequest(kind, note) {
+	if (kind === "approve") return { decision: "approve", all: true };
+	return { decision: "request_changes", note: note ?? null };
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 function renderCampaignSelect() {
@@ -145,14 +192,12 @@ function renderTopbar() {
 	renderCampaignSelect();
 	els.targetName.textContent = `sliceme review · ${snapshot.feature_branch}`;
 	els.tips.textContent = `${shortHash(snapshot.source_tip)} → ${shortHash(snapshot.target_tip)}`;
-	const unapproved = (snapshot.commits || []).filter((commit) => !commit.approved).length;
-	els.approvalState.textContent = snapshot.all_approved
-		? "all commits approved"
-		: `${unapproved} unapproved`;
+	const approval = campaignApproval(snapshot);
+	els.approvalState.textContent = approval.label;
 	els.stale.hidden = !view.refreshPending;
 	els.stale.textContent = "new commits — refresh";
-	els.approveAll.disabled = unapproved === 0;
-	els.deliver.hidden = !snapshot.all_approved;
+	els.approveCampaign.disabled = approval.approved;
+	els.deliver.hidden = !approval.approved;
 }
 
 function renderCommits() {
@@ -164,24 +209,26 @@ function renderCommits() {
 		row.className = "commit-row";
 		if (commit.hash === view.commit) row.classList.add("selected");
 
-		const toggle = document.createElement("button");
-		toggle.type = "button";
-		toggle.className = "approve-toggle";
-		toggle.textContent = commit.approved ? "✓" : "○";
-		toggle.title = commit.approved ? "Approved; click to request changes" : "Approve this commit";
-		toggle.setAttribute("aria-pressed", String(commit.approved));
-		toggle.addEventListener("click", (event) => {
-			event.stopPropagation();
-			toggleCommit(commit);
-		});
-
 		const label = document.createElement("button");
 		label.type = "button";
 		label.className = "commit-label";
-		label.textContent = `${commit.short} ${commit.subject}`;
+
+		const subject = document.createElement("span");
+		subject.textContent = `${commit.short || shortHash(commit.hash)} ${commit.subject}`;
+
+		const meta = document.createElement("span");
+		meta.className = "commit-meta muted";
+		meta.textContent = [
+			commit.author,
+			commit.date ? String(commit.date).slice(0, 10) : null,
+		]
+			.filter(Boolean)
+			.join(" · ");
+
+		label.append(subject, meta);
 		label.addEventListener("click", () => selectCommit(commit.hash));
 
-		row.append(toggle, label);
+		row.append(label);
 		els.commitList.append(row);
 	}
 }
@@ -284,27 +331,53 @@ function evidenceCard(hash, evidence) {
 	return card;
 }
 
+function commentWhere(comment) {
+	const parts = [
+		comment.commit_hash ? shortHash(comment.commit_hash) : "general",
+		comment.file,
+		comment.line ? `${comment.side}:${comment.line}` : null,
+	]
+		.filter(Boolean)
+		.join(" ");
+	return parts || "general";
+}
+
+function commentCard(comment, { reply = false } = {}) {
+	const card = document.createElement("div");
+	card.className = reply ? "comment comment-reply" : "comment";
+	const where = document.createElement("div");
+	where.className = "muted";
+	const parts = [commentWhere(comment), reply ? "reply" : null].filter(Boolean);
+	where.textContent = `${parts.join(" · ")} · ${comment.status}`;
+	if (reply) {
+		const answer = document.createElement("span");
+		answer.className = "reply-hash";
+		answer.textContent = comment.addressing_commit
+			? `addressed in ${shortHash(comment.addressing_commit)}`
+			: "no code";
+		where.append(" · ", answer);
+	}
+	const body = document.createElement("div");
+	body.textContent = comment.body;
+	card.append(where, body);
+	return card;
+}
+
 function renderComments() {
 	const snapshot = view.snapshot;
 	els.comments.textContent = "";
 	const comments = snapshot?.comments || [];
 	els.commentCount.textContent = comments.length ? `(${comments.length})` : "";
-	for (const comment of comments) {
-		const card = document.createElement("div");
-		card.className = "comment";
-		const where = document.createElement("div");
-		where.className = "muted";
-		const parts = [
-			comment.commit_hash ? shortHash(comment.commit_hash) : "general",
-			comment.file,
-			comment.line ? `${comment.side}:${comment.line}` : null,
-		]
-			.filter(Boolean)
-			.join(" ");
-		where.textContent = `${parts || "general"} · ${comment.status}`;
-		const body = document.createElement("div");
-		body.textContent = comment.body;
-		card.append(where, body);
+	for (const root of threadComments(comments)) {
+		const card = commentCard(root);
+		if (root.replies.length) {
+			const replies = document.createElement("div");
+			replies.className = "comment-replies";
+			for (const reply of root.replies) {
+				replies.append(commentCard(reply, { reply: true }));
+			}
+			card.append(replies);
+		}
 		els.comments.append(card);
 	}
 }
@@ -491,31 +564,30 @@ async function submitComment() {
 	}
 }
 
-async function toggleCommit(commit) {
+async function approveCampaign() {
+	if (!view.snapshot) return;
+	const ok = window.confirm("Approve the whole campaign commit set?");
+	if (!ok) return;
 	try {
-		if (commit.approved) {
-			const note = window.prompt("Request changes: describe what must change.");
-			if (note === null) return;
-			await apiPost("decision", { decision: "request_changes", commit: commit.hash, note });
-		} else {
-			await apiPost("decision", { decision: "approve", commit: commit.hash });
-		}
+		await apiPost("decision", decisionRequest("approve"));
+		notice("campaign approved");
 		await poll();
 	} catch (error) {
 		notice(error.message, true);
 	}
 }
 
-async function approveAll() {
-	const snapshot = view.snapshot;
-	if (!snapshot) return;
-	const ok = window.confirm(
-		`Approve all ${(snapshot.commits || []).filter((c) => !c.approved).length} unapproved commits?`,
-	);
-	if (!ok) return;
+async function requestChanges() {
+	if (!view.snapshot) return;
+	const note = window.prompt("Request changes: describe what must change.");
+	if (note === null) return;
+	if (!note.trim()) {
+		notice("a request for changes needs a note", true);
+		return;
+	}
 	try {
-		await apiPost("decision", { decision: "approve", all: true });
-		notice("all commits approved");
+		await apiPost("decision", decisionRequest("request_changes", note.trim()));
+		notice("changes requested");
 		await poll();
 	} catch (error) {
 		notice(error.message, true);
@@ -602,42 +674,47 @@ async function poll() {
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
-els.approveAll.addEventListener("click", approveAll);
-els.deliver.addEventListener("click", deliver);
-els.viewToggle.addEventListener("click", togglePreview);
-els.commentAdd.addEventListener("click", () => openComment(null));
-els.campaignSelect.addEventListener("change", () => {
-	view.campaign = els.campaignSelect.value;
-	view.commit = "";
-	view.file = "";
-	view.report = false;
-	view.preview = false;
-	view.previewKey = "";
-	view.anchor = null;
-	view.range = null;
-	writeHash();
-	void poll();
-});
-els.commentForm.addEventListener("submit", (event) => {
-	event.preventDefault();
-	submitComment();
-});
-els.commentCancel.addEventListener("click", () => {
-	els.commentForm.hidden = true;
-	if (view.refreshPending) void poll();
-});
-els.commentBody.addEventListener("keydown", (event) => {
-	if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+function start() {
+	els.approveCampaign.addEventListener("click", approveCampaign);
+	els.requestChanges.addEventListener("click", requestChanges);
+	els.deliver.addEventListener("click", deliver);
+	els.viewToggle.addEventListener("click", togglePreview);
+	els.commentAdd.addEventListener("click", () => openComment(null));
+	els.campaignSelect.addEventListener("change", () => {
+		view.campaign = els.campaignSelect.value;
+		view.commit = "";
+		view.file = "";
+		view.report = false;
+		view.preview = false;
+		view.previewKey = "";
+		view.anchor = null;
+		view.range = null;
+		writeHash();
+		void poll();
+	});
+	els.commentForm.addEventListener("submit", (event) => {
 		event.preventDefault();
 		submitComment();
-	}
-	if (event.key === "Escape") {
-		event.preventDefault();
+	});
+	els.commentCancel.addEventListener("click", () => {
 		els.commentForm.hidden = true;
-	}
-});
+		if (view.refreshPending) void poll();
+	});
+	els.commentBody.addEventListener("keydown", (event) => {
+		if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+			event.preventDefault();
+			submitComment();
+		}
+		if (event.key === "Escape") {
+			event.preventDefault();
+			els.commentForm.hidden = true;
+		}
+	});
 
-readHash();
-writeHash();
-poll();
-setInterval(poll, 3000);
+	readHash();
+	writeHash();
+	poll();
+	setInterval(poll, 3000);
+}
+
+if (browser) start();

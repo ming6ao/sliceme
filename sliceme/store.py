@@ -150,6 +150,8 @@ CREATE TABLE IF NOT EXISTS comments (
   body TEXT NOT NULL,
   node TEXT,
   status TEXT NOT NULL DEFAULT 'open',
+  parent_comment_id INTEGER,
+  addressing_commit TEXT,
   created_at REAL NOT NULL,
   addressed_at REAL
 );
@@ -199,6 +201,10 @@ class Store:
                 "tool_durations": "TEXT",
                 "slowest_commands": "TEXT",
             },
+        )
+        self._ensure_columns(
+            "comments",
+            {"parent_comment_id": "INTEGER", "addressing_commit": "TEXT"},
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign)"
@@ -899,6 +905,34 @@ class Store:
                 c.execute("SELECT * FROM comments WHERE id=last_insert_rowid()").fetchone()
             )  # type: ignore[return-value]
 
+    def add_reply(
+        self,
+        *,
+        branch_key: str,
+        parent_comment_id: int,
+        body: str,
+        node: str | None = None,
+        addressing_commit: str | None = None,
+    ) -> dict[str, Any]:
+        """Insert one reply row.  A reply is ``addressed`` when recorded."""
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO comments(branch_key, parent_comment_id, body, node,"
+                " addressing_commit, status, created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    branch_key,
+                    int(parent_comment_id),
+                    body,
+                    node,
+                    addressing_commit,
+                    "addressed",
+                    now(),
+                ),
+            )
+            return _dict(
+                c.execute("SELECT * FROM comments WHERE id=last_insert_rowid()").fetchone()
+            )  # type: ignore[return-value]
+
     def get_comment(self, comment_id: str | int) -> dict[str, Any] | None:
         return _dict(
             self.conn.execute(
@@ -911,6 +945,7 @@ class Store:
         *,
         branch_key: str | None = None,
         statuses: Sequence[str] | None = None,
+        roots_only: bool = False,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM comments"
         clauses: list[str] = []
@@ -922,17 +957,32 @@ class Store:
             placeholders = ",".join("?" for _ in statuses)
             clauses.append(f"status IN ({placeholders})")
             params.extend(statuses)
+        if roots_only:
+            clauses.append("parent_comment_id IS NULL")
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
 
     def set_comment_status(
-        self, comment_id: int, status: str, *, addressed_at: float | None = None
+        self,
+        comment_id: int,
+        status: str,
+        *,
+        addressed_at: float | None = None,
+        addressing_commit: str | None = None,
     ) -> dict[str, Any] | None:
+        fields = ["status=?"]
+        params: list[Any] = [status]
+        if addressed_at is not None:
+            fields.append("addressed_at=?")
+            params.append(addressed_at)
+        if addressing_commit is not None:
+            fields.append("addressing_commit=?")
+            params.append(addressing_commit)
+        params.append(int(comment_id))
         self.conn.execute(
-            "UPDATE comments SET status=?, addressed_at=? WHERE id=?",
-            (status, addressed_at, int(comment_id)),
+            f"UPDATE comments SET {', '.join(fields)} WHERE id=?", params
         )
         return self.get_comment(comment_id)
 

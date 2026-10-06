@@ -1,13 +1,14 @@
 # Sliceme local review design
 
 Status: implemented. Commits accumulate while the campaign runs. A human
-approves them one by one or all at once. Sliceme includes the report even though
+approves the whole campaign commit set. Sliceme includes the report even though
 git ignores it. The coordinator proceeds to delivery automatically once a human
-approves every commit.
+approves the campaign and every delivered comment is addressed.
 
 A human reviews the unmerged commits from the campaign worktree in a local
 browser. The reviewer reads the diff and the report, writes comments, and
-approves or rejects individual commits. The design has one safety goal: **no
+approves or requests changes on the campaign. The design has one safety goal:
+**no
 pull request without a human approval of every reviewed commit.**
 
 ## 1. Scope
@@ -20,11 +21,13 @@ In:
   last wave.
 - The generated report (`.sliceme/<branch-key>.report.md`), even though it is
   git-ignored, shown next to the diff.
-- One approval per commit, plus "approve all".
+- One campaign-level approval for the whole commit set.
 - Comments that attach to a commit, the report, a file, and a line range.
+- Replies under a comment, with an optional addressing commit.
+- The comment-addressing status: `open`, `delivered`, `addressed`.
 - The verification evidence for each reviewed commit.
 - A non-blocking review: workers never wait for the human, and the coordinator
-  proceeds automatically when a human approves every commit.
+  proceeds automatically when a human approves the campaign.
 - Several planes under configured roots.
 - Several campaigns in one plane, with a campaign selector in the client.
 
@@ -85,10 +88,11 @@ existing npm `files` entry.
 - A review packet is the diff `target_tip...source_tip`, the commit list, the
   report, the comments, and the verification evidence.
 - The server reads the diff from git and the report from disk.
-- The reviewer approves or rejects one commit at a time, or approves every
-  unapproved commit at once.
-- An approval is one row keyed by `(branch_key, commit_hash)`. The newest row
-  for a commit wins.
+- The reviewer approves or requests changes on the whole campaign commit set.
+- An approval is one row keyed by `(branch_key, commit_hash)` with a null
+  `commit_hash`. The newest unconsumed campaign decision wins, and a
+  `request_changes` supersedes an earlier `approve`. An `override` stays a
+  separate campaign-level decision.
 
 The **report** is a virtual file. It is git-ignored, so it is not a commit. The
 packet carries its path, its content, and its update time. The reviewer can read
@@ -110,11 +114,18 @@ Two additive tables in `.sliceme/state.db`, following the existing
 `CREATE TABLE IF NOT EXISTS` and `_migrate` pattern.
 
 - **`review_decisions`** — `branch_key`, `commit_hash`, `action`, `actor`,
-  `note`, `created_at`, `consumed_at`. Append-only. The newest row for a commit
-  wins. A null `commit_hash` is a campaign-level `override`.
+  `note`, `created_at`, `consumed_at`. Append-only. A campaign-level decision
+  uses a null `commit_hash`; the newest unconsumed decision wins.
 - **`comments`** — `branch_key`, `commit_hash`, `file`, `side`, `line`,
-  `line_end`, `body`, `node`, `status`, `created_at`, `addressed_at`. Status is
-  `open`, `delivered`, or `addressed`.
+  `line_end`, `body`, `node`, `status`, `parent_comment_id`,
+  `addressing_commit`, `created_at`, `addressed_at`. Status is `open`,
+  `delivered`, or `addressed`.
+
+A **reply** is a row in `comments` with a `parent_comment_id` and a status of
+`addressed` when recorded. It carries `addressing_commit` only when it answers
+with code; a no-code conversation turn leaves it null. A reply never changes
+the parent status. A **root** comment moves `open` -> `delivered` ->
+`addressed`, and `addressed_at` is stamped when it becomes `addressed`.
 
 The design writes audit events to `.sliceme/<branch-key>.events.jsonl`. The
 design adds no relay audit table.
@@ -133,11 +144,18 @@ acknowledge cycle.
 1. The `comment` action inserts a row with status `open`.
 2. The extension runs `sliceme review --poll` at session start, between waves,
    and on a timer.
-3. The poll returns the open comments, the unapproved commits, and whether a
-   human approves every commit.
+3. The poll returns the open comments, the delivered comments that are not yet
+   addressed, and whether a human approves the campaign.
 4. The extension sends each comment to the session with `pi.sendUserMessage`.
-5. The extension runs `sliceme review --ack --comment <id>` for each comment.
+5. The extension runs `sliceme review --ack --comment-id <id>` for each comment.
    The ack sets the status to `delivered`.
+
+A `delivered` comment is **pending** until the addressing pass answers it. A
+restart re-relays every pending comment, so the relay is idempotent. The
+addressing subagent resolves the comment to a node with `review --resolve`, then
+either records a reply row (`review --reply`) or marks the root comment
+addressed (`review --addressed`). A root comment that resolves to no node may
+only receive a reply row; it must not spawn a node.
 
 A duplicate comment is safe. A lost comment is not. The design delivers at
 least once, so a crash repeats a comment at most.
@@ -145,27 +163,30 @@ least once, so a crash repeats a comment at most.
 The design does not use a lease. A lease adds rows and timers. At-least-once
 delivery gives the same safety with less code.
 
-Routing targets the coordinator session from `<branch-key>.session.json`. Node
-attribution is bundle metadata, not a routing decision.
+The relay targets the coordinator session from `<branch-key>.session.json`. A
+dedicated addressing subagent owns one persistent session per campaign and
+holds the thread context across comments. Node attribution is the engine's
+`--resolve` decision, not bundle metadata.
 
 ## 6. The approval gate
 
-Delivery proceeds only when every commit in the packet has a newest, unconsumed
+Delivery proceeds only when the newest campaign decision is an unconsumed
 `approve`, or a campaign-level `override` records a note. Otherwise delivery
 refuses with a `not-approved` finding. The engine never asks for approval again
-on its own.
+on its own. Delivery also refuses while any root comment is `delivered` but not
+`addressed`, with an `unaddressed-comments` finding.
 
-- A new commit starts unapproved, so a later commit re-opens the gate. An
-  approval can never outlive the diff it approved.
-- A `request_changes` row for a commit supersedes an earlier `approve` for that
-  commit.
-- A successful delivery consumes every approval it used. A failed check or a
-  failed forge call leaves the approvals unconsumed, so a retry needs no new
+- An addressing commit changes the reviewed diff, so marking a comment
+  addressed consumes the campaign approval and re-opens the gate.
+- A `request_changes` campaign decision supersedes an earlier `approve`.
+- A successful delivery consumes the campaign approval it used. A failed check
+  or a failed forge call leaves the approval unconsumed, so a retry needs no new
   review.
 
 The coordinator does not prompt for a final approval. The browser approvals are
-the trigger: when `review --poll` reports that a human approves every commit and
-every wave has completed, the coordinator runs `deliver`.
+the trigger: when `review --poll` reports that a human approves the campaign,
+no comment is pending, and every wave has completed, the coordinator runs
+`deliver`.
 
 ## 7. HTTP surface
 
@@ -197,10 +218,10 @@ design uses no Server-Sent Events, so it needs no stream token and no replay
 logic.
 
 The action route accepts a JSON body: `{"action": "...", "params": {...}}`. The
-route accepts only three actions: `comment`, `decision`, and `deliver`. The
-server validates each action and dispatches it to `Service`. This pattern
-mirrors `surface.dispatch`, so the HTTP adapter stays thin and every action
-stays agent-callable.
+route accepts only five actions: `comment`, `reply`, `addressed`, `decision`,
+and `deliver`. The server validates each action and dispatches it to `Service`.
+This pattern mirrors `surface.dispatch`, so the HTTP adapter stays thin and
+every action stays agent-callable.
 
 ## 8. The user interface
 
@@ -223,15 +244,16 @@ The client is one page. It has a top bar and three panes.
 
 - **Top bar.** The feature branch, the two tips, the approval state, and
   **Approve all**.
-- **Left pane.** The commit list with an approval toggle per commit, then the
-  files of the selected commit and the report.
+- **Left pane.** The commit list with its hash, subject, author, and date, then
+  the files of the selected commit and the report.
 - **Center pane.** The diff, or the report text.
-- **Right pane.** The evidence and the comment list.
+- **Right pane.** The evidence and the comment threads, a reply nested under
+  its root comment with the addressing commit short hash.
 
 ### 8.1 Selecting a commit, a file, and a line
 
-- **Commit.** The left pane holds the accumulated commit list. Each row shows an
-  approval toggle, a short hash, and the subject. The default is the newest
+- **Commit.** The left pane holds the accumulated commit list. Each row shows a
+  short hash, the subject, the author, and the date. The default is the newest
   commit.
 - **File.** The left pane holds a file tree for the selected commit. A file row
   shows the path, the status, and the addition and deletion counts. A click
@@ -270,13 +292,12 @@ comment thread.
 
 ### 8.3 Recording an approval
 
-- The left pane holds one toggle per commit. A click approves the commit, or
-  requests changes on an approved commit.
-- The top bar holds **Approve all**, which approves every unapproved commit.
+- The top bar holds **Approve all**, which approves the whole campaign commit
+  set.
 - **Request changes** needs a note, or at least one open comment.
 - **Override** is an advanced option at the campaign level. It needs a note.
-- The engine records the commit hash the client shows, so the approval binds to
-  the reviewed commit.
+- One campaign-level decision covers the commit set; it does not bind to one
+  commit hash.
 
 ### 8.4 Evidence panel
 
@@ -295,8 +316,8 @@ refreshed`.
 A refresh must not move the diff under an open comment. When a comment form is
 open, the client keeps the diff and the anchor stable. The top bar shows `new
 commits — refresh`. The client applies the packet after the reviewer submits or
-cancels the comment. The approval controls stay enabled, because an approval
-binds to one commit hash.
+cancels the comment. The approval control stays enabled, because the campaign
+approval is one decision for the whole commit set.
 
 ### 8.6 Rendering and accessibility
 
@@ -329,9 +350,9 @@ travels in the snapshot because it is one small Markdown file.
 
 ## 9. Delivery
 
-The coordinator triggers delivery after every wave completes and a human
-approves every commit. The design orders delivery to avoid a race with the
-campaign loop:
+The coordinator triggers delivery after every wave completes, a human approves
+the campaign, and every delivered comment is addressed. The design orders
+delivery to avoid a race with the campaign loop:
 
 1. **Quiesce.** The poll runs only while the agent is idle, so no worker commits
    mid-delivery.
@@ -346,7 +367,9 @@ Preconditions, enforced in `Service`:
 - every wave is `done`, or an `override` decision records a note;
 - the campaign worktree has no uncommitted changes;
 - the target worktree is clean;
-- a human approved every reviewed commit, or an override records a note;
+- a human approved the whole campaign commit set, or an override records a
+  note;
+- no root comment is `delivered` without being `addressed`;
 - if `policy.require_verification`, no candidate is `failed` or `blocked`,
   unless an override records a note.
 
@@ -363,8 +386,9 @@ Override is a human decision, not an agent action.
   SQLite row locks.
 
 `review` joins `ACTIONS` and `SLICEME_ACTIONS`. Starting the server, reading
-snapshots, and polling are agent-callable. The `comment` and `decision` actions
-are agent-callable too, but the UI treats them as human acts.
+snapshots, polling, and resolving a comment are agent-callable. The `comment`,
+`reply`, `addressed`, and `decision` actions are agent-callable too, but the UI
+treats the approval control as a human act.
 
 ## 11. Security
 
@@ -408,7 +432,7 @@ coordinator uses this file to show the URL in a stable place.
 4. The foreground server, the security checks, and the read-only client.
 5. The action route, the browser approval, and the delivery lock.
 6. The `comment` action and the `review --poll` / `--ack` consumer.
-7. Automatic delivery after a human approves every commit, retention, and
+7. Automatic delivery after a human approves the campaign, retention, and
    cleanup.
 
 ## 13. Trade-offs and accepted risks
@@ -424,9 +448,10 @@ An explicit concurrency model. A larger test surface.
 
 Accepted risks:
 
-- A human can change the worktree or branch with `git` during a review. A new
-  commit starts unapproved, so the gate re-opens. The clean check catches a
-  dirty tree. Sliceme does not own the user's shell.
+- A human can change the worktree or branch with `git` during a review. The
+  clean check catches a dirty tree. An addressing commit consumes the campaign
+  approval, so the gate re-opens for the whole campaign. Sliceme does not own
+  the user's shell.
 - The server is POSIX only.
 - A foreground server needs a terminal. The user must keep that terminal open.
 

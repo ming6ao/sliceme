@@ -483,6 +483,85 @@ class PiPackageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_addressing_subagent_is_wired(self):
+        # The comment-addressing loop (docs/review-plan.md §10) runs on a
+        # dedicated, persistent addressing subagent: a comment that resolves to
+        # a node reuses that node after the last wave, and a comment with no
+        # resolved node only records a reply row.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        common = PI_COMMON.read_text(encoding="utf-8")
+        addressing = PI_DIR / "agents" / "addressing.md"
+        self.assertTrue(
+            addressing.is_file(), "integrations/pi/agents/addressing.md is required"
+        )
+        front = _frontmatter(addressing.read_text(encoding="utf-8"))
+        self.assertEqual(front.get("name"), "addressing")
+        tools = [t.strip() for t in front.get("tools", "").split(",")]
+        self.assertIn("sliceme-unit", tools)
+        self.assertNotIn("sliceme", tools, "the addressing subagent is not a coordinator")
+        self.assertIn("edit", tools)
+
+        # One persistent pi session per campaign, reused for every comment and
+        # turn (`pi --session-id <id>`).
+        self.assertIn("export function addressingSessionId", common)
+        self.assertIn('"--session-id"', common)
+        self.assertIn("sessionId?: string", common)
+        self.assertIn("sessionId: addressingSessionId(branch)", coordinator)
+
+        # Batching by resolved node, and the resolve / reply / addressed writes.
+        self.assertIn("export function addressingBatches", common)
+        self.assertIn("addressingBatches(", coordinator)
+        for needle in (
+            "function spawnAddressing",
+            "function reopenNodeWave",
+            "function recordReply",
+            "function recordAddressingCommit",
+            '["review", "--resolve"',
+            '"--reply"',
+            '"--addressed"',
+            '"--addressing-commit"',
+            "outside the `max_attempts` cap",
+            "addressing: true",
+        ):
+            self.assertIn(needle, coordinator, needle)
+
+        # The events log records the comment, the spawn, the wave record, the
+        # reply, and the addressing (docs/review-plan.md §10.4).
+        for needle in (
+            '"review.comment"',
+            '"node.spawn"',
+            '"wave.recorded"',
+            '"review.reply"',
+            '"review.addressed"',
+        ):
+            self.assertIn(needle, coordinator, needle)
+
+        # The delivery gate stays honest: a delivered-but-unaddressed comment
+        # blocks automatic delivery, and the engine's unaddressed finding is a
+        # transient gate, never a hard block.
+        self.assertIn("payload?.pending", coordinator)
+        self.assertIn("gate?.pending", coordinator)
+        self.assertIn("unaddressed-comments", coordinator)
+        self.assertIn("gate?.all_approved && !unaddressed.length", coordinator)
+
+    def test_addressing_helpers_unit_test(self):
+        # `addressingSessionId` and `addressingBatches` are pure, so a Node
+        # harness drives them with fixed inputs. Node 22.6+ strips the
+        # TypeScript types at run time.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "addressing_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_docs_document_the_session_actions(self):
         names = {a.name for a in surface.ACTIONS}
         self.assertIn("attempt", names)

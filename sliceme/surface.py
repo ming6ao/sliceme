@@ -148,12 +148,17 @@ ACTIONS: tuple[Action, ...] = (
             Param("state", "boolean", "print one review snapshot"),
             Param("diff", "boolean", "print one file diff"),
             Param("comment", "boolean", "record a comment"),
+            Param("reply", "boolean", "record a reply row (requires --comment-id and --body)"),
+            Param("addressed", "boolean", "mark a root comment addressed (requires --comment-id)"),
+            Param("resolve", "boolean", "route one comment to a node (requires --comment-id)"),
             Param("decision", "string", "record a decision", choices=("approve", "request_changes", "override")),
-            Param("all", "boolean", "with --decision approve: approve every unapproved commit"),
+            Param("all", "boolean", "with --decision approve: approve the whole campaign commit set"),
             Param("report", "boolean", "write the deterministic campaign report"),
             Param("narrative", "string", "report: what-changed/risks text"),
             Param("design", "string", "report: design document reference"),
-            Param("comment_id", "int", "comment id for --ack"),
+            Param("comment_id", "int", "comment id for --ack/--reply/--addressed/--resolve"),
+            Param("parent_comment_id", "int", "with --comment: create a reply under this comment"),
+            Param("addressing_commit", "string", "commit that answers the comment"),
             Param("target", "string", "deliver: target branch override"),
             Param("commit", "string", "commit to review or approve"),
             Param("file", "string", "file path"),
@@ -443,6 +448,12 @@ def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
         return review_api.poll(service, p)
     if p.get("ack"):
         return review_api.ack(service, p)
+    if p.get("reply"):
+        return review_api.reply(service, p)
+    if p.get("addressed"):
+        return review_api.addressed(service, p)
+    if p.get("resolve"):
+        return review_api.resolve(service, p)
     if p.get("comment"):
         return review_api.comment(service, p)
     if p.get("decision"):

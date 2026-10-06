@@ -50,6 +50,8 @@ import type { AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
+	addressingBatches,
+	addressingSessionId,
 	branchKey,
 	CampaignStateStore,
 	clearActiveCampaign,
@@ -75,6 +77,9 @@ import {
 	writeJson,
 } from "./common.ts";
 import type {
+	AddressingBatch,
+	AddressingComment,
+	AddressingResolve,
 	ProgressAgent,
 	ProgressSnapshot,
 	ReviewServerHandle,
@@ -110,6 +115,11 @@ const REVIEW_KEYS = [
 	"narrative",
 	"design",
 	"comment_id",
+	"parent_comment_id",
+	"addressing_commit",
+	"reply",
+	"addressed",
+	"resolve",
 	"target",
 	"commit",
 	"file",
@@ -738,7 +748,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	}
 
 	// ------------------------------------------------------------------
-	// Review relay (docs/review.md)
+	// Review relay (docs/review.md, docs/review-plan.md §10)
 	// ------------------------------------------------------------------
 	// A comment is delivered at least once: the ack is best-effort, so a crash
 	// repeats a comment rather than losing it.  The in-process set only avoids a
@@ -750,6 +760,300 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	let reviewTimer: ReturnType<typeof setInterval> | undefined;
 	let reviewCtx: ExtensionContext | undefined;
 	let reviewServer: ReviewServerHandle | undefined;
+
+	/**
+	 * Reopen the wave that owns *node* so an addressing attempt can spawn after
+	 * the last wave. The node is reset to pending and its wave becomes the
+	 * current wave; `spawnAddressing` restores the node to done after the record
+	 * so `allWavesDone` stays true for the delivery gate.
+	 */
+	function reopenNodeWave(state: CampaignState, node: string): number {
+		const wave = (state.waves ?? []).find((entry) => entry.members.includes(node));
+		if (!wave) throw new Error(`addressing: node '${node}' is not in a wave`);
+		state.current_wave = wave.index;
+		wave.status = "pending";
+		state.nodes[node] = { ...(state.nodes[node] ?? {}), status: "pending" };
+		return wave.index;
+	}
+
+	/** The task prompt for one addressing turn (comment text plus node scope). */
+	function addressingTask(
+		branch: string,
+		node: string | null,
+		spec: CampaignNode | undefined,
+		comments: AddressingComment[],
+	): string {
+		const lines: string[] = [];
+		if (node) {
+			lines.push(
+				`You are the dedicated addressing subagent for campaign branch "${branch}". ` +
+					`A review comment resolved to node "${node}" (${spec?.label ?? ""}). ` +
+					`Goal: ${spec?.goal ?? ""}. You own these directories: ` +
+					`${(spec?.owns ?? []).join(", ")}. Edit ONLY files inside your owned ` +
+					`directories, then stop. Do NOT run git, do not commit, and do not run ` +
+					`the test suite: the coordinator records one commit for this batch.`,
+			);
+		} else {
+			lines.push(
+				`You are the dedicated addressing subagent for campaign branch "${branch}". ` +
+					`A review comment resolved to no node (a general or outside-owns ` +
+					`comment). Do NOT edit any file and do NOT create a DAG node. Reply ` +
+					`with the answer text only; the coordinator records one reply row per ` +
+					`comment.`,
+			);
+		}
+		lines.push("");
+		for (const comment of comments) {
+			const where = [comment.file, comment.line]
+				.filter((value) => value !== null && value !== undefined)
+				.join(":");
+			lines.push(
+				`Comment #${comment.id}${where ? ` (${where})` : ""}: ${String(comment.body ?? "")}`,
+			);
+		}
+		lines.push(
+			"",
+			"This session is persistent: the earlier turns hold the thread, so use them " +
+				"as context and answer the new comment(s) above.",
+		);
+		return lines.join("\n");
+	}
+
+	/** The reply text for a batch: the addressing subagent's final report. */
+	function addressingReplyBody(result: SubagentResult, comments: AddressingComment[]): string {
+		const text = String(result.output ?? "").trim();
+		if (text) return text;
+		return `Addressed ${comments.map((comment) => `#${comment.id}`).join(", ")}.`;
+	}
+
+	/**
+	 * One addressing turn in the campaign's persistent addressing session.
+	 *
+	 * The session id is stable per campaign (`addressingSessionId`), so pi reopens
+	 * the same session for every comment and the subagent keeps the thread context
+	 * across comments and turns (`pi --session-id <id>`). The turn runs in the
+	 * campaign worktree, so a code answer edits the same tree the wave record
+	 * commits.
+	 */
+	async function runAddressingTurn(
+		ctx: ExtensionContext,
+		branch: string,
+		worktree: string,
+		node: string | null,
+		spec: CampaignNode | undefined,
+		comments: AddressingComment[],
+		signal?: AbortSignal,
+		attempt?: number,
+	): Promise<SubagentResult> {
+		const state: any = stateStore(ctx, branch).read();
+		return await runTracked(ctx, branch, {
+			agent: "addressing",
+			node: node ?? "addressing",
+			unit: node ? String(state.nodes?.[node]?.unit ?? "campaign") : "addressing",
+			attempt: attempt ?? 1,
+			task: addressingTask(branch, node, spec, comments),
+			cwd: worktree,
+			log: path.join(stateDir(ctx.cwd), `${branchKey(branch)}.addressing.log`),
+			sessionId: addressingSessionId(branch),
+			signal,
+		});
+	}
+
+	/**
+	 * Write one reply row and mark its root comment addressed (contract C).
+	 * `commit` is set only when the reply answers with code.
+	 */
+	async function recordReply(
+		ctx: ExtensionContext,
+		branch: string,
+		commentId: number,
+		body: string,
+		node: string | null,
+		commit: string | null,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const replyArgs = ["review", "--reply", "--comment-id", String(commentId), "--body", body];
+		if (node) replyArgs.push("--node", node);
+		if (commit) replyArgs.push("--addressing-commit", commit);
+		await sliceme(ctx, replyArgs, signal);
+		logEvent(ctx.cwd, branch, "review.reply", {
+			comment: commentId,
+			node: node ?? null,
+			commit: commit ?? null,
+		});
+		const addressedArgs = ["review", "--addressed", "--comment-id", String(commentId)];
+		if (commit) addressedArgs.push("--addressing-commit", commit);
+		await sliceme(ctx, addressedArgs, signal);
+		logEvent(ctx.cwd, branch, "review.addressed", {
+			comment: commentId,
+			commit: commit ?? null,
+		});
+	}
+
+	/** Record one reply row per comment in a batch (contract C). */
+	async function replyBatch(
+		ctx: ExtensionContext,
+		branch: string,
+		comments: AddressingComment[],
+		result: SubagentResult,
+		node: string | null,
+		commit: string | null,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const body = addressingReplyBody(result, comments);
+		for (const comment of comments) {
+			await recordReply(ctx, branch, comment.id, body, node, commit, signal);
+		}
+	}
+
+	/** Record one commit that answers a batch of comments on the same node. */
+	async function recordAddressingCommit(
+		ctx: ExtensionContext,
+		branch: string,
+		waveIndex: number,
+		node: string,
+		result: SubagentResult,
+		comments: AddressingComment[],
+		signal?: AbortSignal,
+	): Promise<{
+		commit: string | null;
+		candidate: any;
+		branch?: string;
+		worktree?: string;
+		candidates: any[];
+	}> {
+		const ids = comments.map((comment) => `#${comment.id}`).join(", #");
+		const description = workerDescription(result.output) || `address review comment ${ids}`;
+		const recorded = await sliceme(
+			ctx,
+			[
+				"wave",
+				"--record",
+				"--wave",
+				String(waveIndex),
+				"--messages",
+				JSON.stringify({ [node]: description }),
+			],
+			signal,
+		);
+		const candidates: any[] = recorded.json?.candidates ?? [];
+		const candidate = candidates.find((entry) => String(entry.node) === node);
+		return {
+			commit: candidate ? String(candidate.head_commit) : null,
+			candidate: candidate ?? null,
+			branch: candidate?.branch,
+			worktree: recorded.json?.worktree,
+			candidates: candidates.map((entry) => ({ node: entry.node, commit: entry.head_commit })),
+		};
+	}
+
+	/**
+	 * Answer one addressing batch.
+	 *
+	 * A comment that resolves to a node reuses that node after the last wave: the
+	 * wave is reopened, the node reset, and one addressing attempt is spawned
+	 * outside the `max_attempts` cap (§10.0 item 2). No DAG node is added. The
+	 * worker edits only its owned directories; the coordinator then records one
+	 * commit for the batch and writes one reply row per comment. A comment with no
+	 * resolved node only records reply rows; it never spawns a node.
+	 */
+	async function spawnAddressing(
+		ctx: ExtensionContext,
+		branch: string,
+		batch: AddressingBatch,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const node = batch.node;
+		const comments = batch.comments;
+		if (!node) {
+			// A general or outside-owns comment: reply rows only, no node spawn.
+			const worktree = await ensureCampaignWorktree(ctx, signal);
+			const result = await runAddressingTurn(ctx, branch, worktree, null, undefined, comments, signal);
+			if (result.interrupted || result.exitCode !== 0) {
+				throw new Error(`addressing: reply-only turn exited ${result.exitCode}`);
+			}
+			await replyBatch(ctx, branch, comments, result, null, null, signal);
+			return;
+		}
+
+		const store = stateStore(ctx, branch);
+		const state: any = store.read();
+		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
+		const spec = (dag.nodes ?? []).find((entry) => entry.id === node);
+		if (!spec) throw new Error(`addressing: unknown node '${node}'`);
+		await ensureWaves(ctx, branch, dag, state);
+
+		const waveIndex = reopenNodeWave(state, node);
+		const attempt = Number(state.nodes[node]?.attempts ?? 0) + 1;
+		state.nodes[node] = { ...(state.nodes[node] ?? {}), status: "running", attempts: attempt };
+		refreshWaves(state);
+		store.save();
+		logEvent(ctx.cwd, branch, "node.spawn", {
+			node,
+			attempt,
+			addressing: true,
+			wave: waveIndex,
+			comments: comments.map((comment) => comment.id),
+		});
+
+		const restore = () => {
+			state.nodes[node] = { ...(state.nodes[node] ?? {}), status: "done", attempts: attempt };
+			refreshWaves(state);
+			store.save();
+		};
+
+		const worktree = await ensureCampaignWorktree(ctx, signal);
+		let result: SubagentResult;
+		try {
+			result = await runAddressingTurn(
+				ctx,
+				branch,
+				worktree,
+				node,
+				spec,
+				comments,
+				signal,
+				attempt,
+			);
+		} catch (error) {
+			restore();
+			throw error;
+		}
+		if (result.interrupted || result.exitCode !== 0) {
+			restore();
+			throw new Error(`addressing: node '${node}' attempt ${attempt} failed`);
+		}
+
+		const recorded = await recordAddressingCommit(
+			ctx,
+			branch,
+			waveIndex,
+			node,
+			result,
+			comments,
+			signal,
+		);
+		const commit: string | null = recorded.commit;
+		state.nodes[node] = {
+			...(state.nodes[node] ?? {}),
+			status: "done",
+			attempts: attempt,
+			...(recorded.candidate !== null ? { candidate: recorded.candidate } : {}),
+			...(commit !== null
+				? { commit, branch: recorded.branch, worktree: recorded.worktree }
+				: {}),
+		};
+		refreshWaves(state);
+		store.save();
+		logEvent(ctx.cwd, branch, "wave.recorded", {
+			wave: waveIndex,
+			addressing: true,
+			node,
+			candidates: recorded.candidates,
+		});
+
+		await replyBatch(ctx, branch, comments, result, node, commit, signal);
+	}
 
 	async function relayReviewComments(
 		ctx: ExtensionContext,
@@ -770,33 +1074,99 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		} catch {
 			return;
 		}
-		const comments: any[] = payload?.comments ?? [];
-		for (const comment of comments) {
+		// Open comments still need a first relay; `pending` comments were delivered
+		// but not addressed, so a restart re-relays them (the re-relay is
+		// idempotent). Both go to the dedicated addressing subagent.
+		const open: AddressingComment[] = payload?.comments ?? [];
+		const pending: AddressingComment[] = payload?.pending ?? [];
+		const queue: Array<{ comment: AddressingComment; ack: boolean }> = [
+			...open.map((comment) => ({ comment, ack: true })),
+			...pending.map((comment) => ({ comment, ack: false })),
+		];
+		const fresh = queue.filter(({ comment }) => {
 			const id = Number(comment.id);
-			if (!id || relayedComments.has(id)) continue;
-			relayedComments.add(id);
-			const where = [
-				comment.commit_hash ? String(comment.commit_hash).slice(0, 7) : null,
-				comment.file,
-				comment.line,
-			]
-				.filter((value) => value !== null && value !== undefined)
-				.join(" ");
-			pi.sendUserMessage(
-				`Review comment${where ? ` on ${where}` : ""}: ${String(comment.body ?? "")}`,
-			);
-			try {
-				await sliceme(ctx, ["review", "--ack", "--comment-id", String(id)], signal);
-			} catch {
-				/* at-least-once: a failed ack repeats the comment, never loses it */
+			return id && !relayedComments.has(id);
+		});
+
+		let processed = false;
+		if (fresh.length) {
+			const resolves: AddressingResolve[] = [];
+			for (const { comment } of fresh) {
+				const id = Number(comment.id);
+				let resolved: any = { comment: id, node: null, reason: "general" };
+				try {
+					resolved =
+						(await sliceme(ctx, ["review", "--resolve", "--comment-id", String(id)], signal))
+							.json ?? resolved;
+				} catch {
+					/* routing failed: the addressing subagent records a reply row only */
+				}
+				resolves.push({
+					comment: id,
+					node: resolved?.node ?? null,
+					reason: resolved?.reason ?? "general",
+				});
+				logEvent(ctx.cwd, branch, "review.comment", {
+					comment: id,
+					node: resolved?.node ?? null,
+					reason: resolved?.reason ?? null,
+					file: comment.file ?? null,
+					relayed: true,
+				});
+			}
+			// Deliver first, then address: `delivered` must not regress `addressed`.
+			for (const { comment, ack } of fresh) {
+				if (!ack) continue;
+				try {
+					await sliceme(
+						ctx,
+						["review", "--ack", "--comment-id", String(Number(comment.id))],
+						signal,
+					);
+				} catch {
+					/* at-least-once: a failed ack repeats the comment, never loses it */
+				}
+			}
+			for (const { comment } of fresh) relayedComments.add(Number(comment.id));
+			for (const batch of addressingBatches(
+				fresh.map((entry) => entry.comment),
+				resolves,
+			)) {
+				if (isPaused(ctx, branch)) break;
+				try {
+					await spawnAddressing(ctx, branch, batch, signal);
+					processed = true;
+				} catch (error) {
+					// Leave the comment eligible for the next poll.
+					for (const comment of batch.comments) relayedComments.delete(Number(comment.id));
+					logEvent(ctx.cwd, branch, "review.addressing_failed", {
+						node: batch.node,
+						comments: batch.comments.map((comment) => comment.id),
+						error: String((error as Error)?.message ?? error),
+					});
+				}
 			}
 		}
-		// Nothing is left to review once every commit is approved and no wave
-		// will add a commit, so stop showing the URL even before delivery.
-		if (payload?.all_approved && allWavesDone(state)) stopReviewServer(ctx, branch);
-		// When every commit is approved and every wave is done, proceed
-		// automatically; the human approval is the trigger, not a prompt.
-		if (payload?.all_approved && ctx.isIdle()) {
+
+		// An addressing commit re-opens the campaign approval, so read the gate
+		// again after a pass; otherwise the stale poll would deliver early.
+		let gate = payload;
+		if (processed) {
+			try {
+				gate = (await sliceme(ctx, ["review", "--poll"], signal)).json ?? payload;
+			} catch {
+				/* keep the stale payload; the next tick re-polls */
+			}
+		}
+		const unaddressed: any[] = gate?.pending ?? [];
+		// Nothing is left to review once the campaign is approved, no comment is
+		// delivered-but-unaddressed, and no wave will add a commit.
+		if (gate?.all_approved && !unaddressed.length && allWavesDone(state)) {
+			stopReviewServer(ctx, branch);
+		}
+		// Deliver only when the campaign is approved and no comment is pending
+		// (section D). The human approval is the trigger, not a prompt.
+		if (gate?.all_approved && !unaddressed.length && ctx.isIdle()) {
 			if (allWavesDone(state) && !state.delivered && !deliveryBlocked.has(branch)) {
 				try {
 					await tryDelivery(ctx, branch, state, signal);
@@ -852,13 +1222,14 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	 */
 	async function ensureReviewServer(ctx: ExtensionContext, branch: string): Promise<void> {
 		if (reviewServer && reviewServer.child.exitCode === null) return;
-		// Do not restart the review surface once every commit is approved and no
-		// wave remains. A delivery from the review client does not update
-		// state.json, so the engine poll is the source of truth here.
+		// Do not restart the review surface once the campaign is approved, no
+		// comment is delivered-but-unaddressed, and no wave remains. A delivery
+		// from the review client does not update state.json, so the engine poll is
+		// the source of truth here.
 		if (allWavesDone(stateStore(ctx, branch).read<CampaignState>())) {
 			try {
 				const payload = (await sliceme(ctx, ["review", "--poll"])).json;
-				if (payload?.all_approved) return;
+				if (payload?.all_approved && !(payload?.pending ?? []).length) return;
 			} catch {
 				/* fall through and start the server */
 			}
@@ -982,6 +1353,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			log?: string;
 			signal?: AbortSignal;
 			onUpdate?: AgentToolUpdateCallback;
+			/** Reopen this pi session instead of `--no-session` (addressing subagent). */
+			sessionId?: string;
 		},
 	): Promise<SubagentResult> {
 		const attempt = opts.attempt ?? 1;
@@ -1049,6 +1422,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			node: opts.node,
 			unit: opts.unit,
 			attempt,
+			sessionId: opts.sessionId,
 			heartbeat: heartbeatPath(ctx.cwd, branch, opts.node),
 			onProgress: (progress) => {
 				lastProgress = progress;
@@ -1867,8 +2241,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			delivered = await sliceme(ctx, args, signal);
 		} catch (error) {
 			const message = String((error as Error)?.message ?? error);
-			if (!message.includes("not-approved")) throw error;
-			// Not approved yet: stay ready for the next review poll.
+			// Not approved, or a comment is delivered but not addressed: both are
+			// transient gates; stay ready for the next review poll.
+			if (!message.includes("not-approved") && !message.includes("unaddressed-comments")) {
+				throw error;
+			}
 			state.ready_to_deliver = true;
 			store.save();
 			return null;
@@ -2047,6 +2424,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			),
 			ack: Type.Optional(Type.Boolean({ description: "review: acknowledge one comment" })),
 			comment: Type.Optional(Type.Boolean({ description: "review: record a comment" })),
+			reply: Type.Optional(
+				Type.Boolean({ description: "review: record a reply row for a comment" }),
+			),
+			addressed: Type.Optional(
+				Type.Boolean({ description: "review: mark a root comment addressed" }),
+			),
+			resolve: Type.Optional(
+				Type.Boolean({ description: "review: resolve one comment to a node" }),
+			),
 			decision: Type.Optional(
 				StringEnum(["approve", "request_changes", "override"] as const, {
 					description: "review: record a decision",
@@ -2063,6 +2449,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			note: Type.Optional(Type.String({ description: "review: decision note" })),
 			actor: Type.Optional(Type.String({ description: "review: who recorded the decision" })),
 			comment_id: Type.Optional(Type.Number({ description: "review: comment id for --ack" })),
+			parent_comment_id: Type.Optional(
+				Type.Number({ description: "review: replied-to root comment id" }),
+			),
+			addressing_commit: Type.Optional(
+				Type.String({ description: "review: commit that answers a comment" }),
+			),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			switch (params.action as (typeof CAMPAIGN_ACTIONS)[number]) {

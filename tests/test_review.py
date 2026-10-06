@@ -1,10 +1,13 @@
-"""Local review: per-commit approvals, the report, the relay, and the server.
+"""Local review: campaign approval, comments, replies, routing, and the server.
 
 These pin the contract from ``docs/review.md``:
 
-* two additive tables hold comments and append-only per-commit decisions;
-* delivery refuses until every accumulated commit is approved;
-* a new commit after an approval makes delivery refuse again;
+* two additive tables hold comments and append-only decisions;
+* one campaign-level approval covers the whole commit set;
+* delivery refuses until the campaign is approved and every delivered comment
+  is addressed;
+* a reply is a comment row with a parent id and an optional addressing commit;
+* `--resolve` routes a comment to a node or to no node;
 * the report is included in the packet even though it is git-ignored;
 * the loopback server serves a snapshot and refuses an unauthenticated write.
 """
@@ -106,11 +109,6 @@ class ReviewCase(unittest.TestCase):
         self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
         return self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
 
-    def record_wave1(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
-        self.edit(unit["worktree"], "src/c/z.py", "c = 2\n")
-        return self.svc.record_wave(1, messages={"w3": "test"})
-
     def approve_all(self):
         return self.svc.review_decision(action="approve", all_commits=True, actor="test")
 
@@ -126,6 +124,26 @@ class SchemaTests(ReviewCase):
             }
         self.assertIn("review_decisions", names)
         self.assertIn("comments", names)
+
+    def test_comment_columns_migrate_additively(self):
+        # An older plane has a comments table without the reply columns.
+        with sqlite3.connect(str(db_path(self.root))) as conn:
+            conn.execute("DROP TABLE IF EXISTS comments")
+            conn.execute(
+                "CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " branch_key TEXT NOT NULL, body TEXT NOT NULL, status TEXT,"
+                " created_at REAL NOT NULL, addressed_at REAL)"
+            )
+            conn.commit()
+        with Store(self.root) as store:
+            columns = {
+                row["name"]
+                for row in store.conn.execute(
+                    "PRAGMA table_info(comments)"
+                ).fetchall()
+            }
+        self.assertIn("parent_comment_id", columns)
+        self.assertIn("addressing_commit", columns)
 
     def test_migration_on_an_older_plane(self):
         with sqlite3.connect(str(db_path(self.root))) as conn:
@@ -156,13 +174,102 @@ class CommentRelayTests(ReviewCase):
         self.assertEqual(comment["status"], "open")
         polled = self.svc.review_poll()
         self.assertEqual([c["id"] for c in polled["comments"]], [comment["id"]])
+        self.assertEqual(polled["pending"], [])
         acked = self.svc.review_ack(int(comment["id"]))
         self.assertEqual(acked["status"], "delivered")
-        self.assertEqual(self.svc.review_poll()["comments"], [])
+        polled = self.svc.review_poll()
+        self.assertEqual(polled["comments"], [])
+        # A delivered comment is pending until the addressing pass answers it.
+        self.assertEqual([c["id"] for c in polled["pending"]], [comment["id"]])
 
     def test_comment_needs_a_body(self):
         with self.assertRaises(SlicemeError):
             self.svc.review_comment(body="   ")
+
+    def test_a_reply_row_records_parent_and_addressing_commit(self):
+        root = self.svc.review_comment(body="root", file="src/a/x.py")
+        reply = self.svc.review_reply(
+            parent_comment_id=int(root["id"]),
+            body="fixed in this commit",
+            addressing_commit="deadbeef",
+        )
+        self.assertEqual(reply["status"], "addressed")
+        self.assertEqual(reply["parent_comment_id"], root["id"])
+        self.assertEqual(reply["addressing_commit"], "deadbeef")
+        # The reply never changes the parent status.
+        self.assertEqual(self.svc.store.get_comment(int(root["id"]))["status"], "open")
+
+    def test_comment_with_a_parent_creates_a_reply(self):
+        root = self.svc.review_comment(body="root", file="src/a/x.py")
+        reply = self.svc.review_comment(
+            body="a conversation turn", parent_comment_id=int(root["id"])
+        )
+        self.assertEqual(reply["parent_comment_id"], root["id"])
+        self.assertIsNone(reply["addressing_commit"])
+        comments = self.svc.review_snapshot()["comments"]
+        self.assertIn(int(reply["id"]), [c["id"] for c in comments])
+
+    def test_mark_addressed_sets_status_time_and_commit(self):
+        root = self.svc.review_comment(body="root", file="src/a/x.py")
+        self.svc.review_ack(int(root["id"]))
+        updated = self.svc.review_mark_addressed(
+            int(root["id"]), addressing_commit="cafef00d"
+        )
+        self.assertEqual(updated["status"], "addressed")
+        self.assertIsNotNone(updated["addressed_at"])
+        self.assertEqual(updated["addressing_commit"], "cafef00d")
+        reply = self.svc.review_reply(
+            parent_comment_id=int(root["id"]), body="done", addressing_commit="cafef00d"
+        )
+        # Only a root comment can be marked addressed.
+        with self.assertRaises(SlicemeError):
+            self.svc.review_mark_addressed(int(reply["id"]))
+
+
+class ResolveTests(ReviewCase):
+    def test_explicit_node_wins(self):
+        comment = self.svc.review_comment(body="x", file="src/a/x.py", node="w3")
+        self.assertEqual(
+            self.svc.review_resolve(int(comment["id"])),
+            {"comment": comment["id"], "node": "w3", "reason": "explicit"},
+        )
+
+    def test_owns_routes_to_the_longest_owned_directory(self):
+        write_json(
+            campaign.dag_path(self.root, "feat/x"),
+            {
+                "campaign": "review",
+                "feature_branch": "feat/x",
+                "base": "main",
+                "concurrency": 3,
+                "nodes": [
+                    {"id": "wide", "owns": ["dir:src"], "depends_on": [], "acceptance": ["true"]},
+                    {"id": "deep", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
+                ],
+            },
+        )
+        comment = self.svc.review_comment(body="x", file="src/a/x.py")
+        resolved = self.svc.review_resolve(int(comment["id"]))
+        self.assertEqual(resolved["node"], "deep")
+        self.assertEqual(resolved["reason"], "owns")
+
+    def test_general_comment_has_no_node(self):
+        comment = self.svc.review_comment(body="restructure everything")
+        self.assertEqual(
+            self.svc.review_resolve(int(comment["id"])),
+            {"comment": comment["id"], "node": None, "reason": "general"},
+        )
+
+    def test_outside_owns_has_no_node(self):
+        comment = self.svc.review_comment(body="x", file="docs/readme.md")
+        self.assertEqual(
+            self.svc.review_resolve(int(comment["id"])),
+            {"comment": comment["id"], "node": None, "reason": "outside_owns"},
+        )
+
+    def test_unknown_comment_refuses(self):
+        with self.assertRaises(SlicemeError):
+            self.svc.review_resolve(9999)
 
 
 class ApprovalTests(ReviewCase):
@@ -172,49 +279,72 @@ class ApprovalTests(ReviewCase):
             self.svc.deliver()
         self.assertIn("not-approved", str(ctx.exception))
 
-    def test_approve_one_commit_leaves_the_rest_unapproved(self):
+    def test_one_approval_covers_the_whole_campaign(self):
         self.record_wave0()
         commits = [c["hash"] for c in self.svc.review_snapshot()["commits"]]
         self.assertGreaterEqual(len(commits), 2)
-        self.svc.review_decision(action="approve", commit=commits[0], actor="test")
-        unapproved = self.svc.unapproved_commits()
-        self.assertIn(commits[1], unapproved)
-        self.assertNotIn(commits[0], unapproved)
+        decision = self.svc.review_decision(action="approve", actor="test")
+        # The decision is campaign-level: it does not bind to one commit.
+        self.assertIsNone(decision["commit_hash"])
+        self.assertTrue(self.svc.review_snapshot()["all_approved"])
+        self.assertEqual(self.svc.unapproved_commits(), [])
 
     def test_approve_all_admits_delivery_and_consumes(self):
         self.record_wave0()
         self.approve_all()
-        self.assertTrue(self.svc.review_snapshot()["all_approved"])
+        self.assertTrue(self.svc.review_poll()["campaign_approved"])
         delivered = self.svc.deliver()
         self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
-        # The landed merge consumes every approval it used.
-        decisions = self.svc.store.latest_decisions_by_commit("feat--x")
-        self.assertTrue(decisions)
-        self.assertTrue(all(d["consumed_at"] is not None for d in decisions.values()))
+        # The landed merge consumes the campaign approval, so re-admission
+        # refuses until the reviewer approves the campaign again.
+        decision = self.svc.campaign_decision()
+        self.assertIsNotNone(decision)
+        self.assertIsNotNone(decision["consumed_at"])
+        self.assertFalse(self.svc.campaign_approved())
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.require_all_approved()
+        self.assertIn("not-approved", str(ctx.exception))
 
-    def test_a_new_commit_makes_delivery_refuse_again(self):
+    def test_a_delivered_comment_blocks_delivery(self):
         self.record_wave0()
         self.approve_all()
-        self.record_wave1()
+        comment = self.svc.review_comment(body="please fix", file="src/a/x.py")
+        self.svc.review_ack(int(comment["id"]))
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.deliver()
+        self.assertIn("unaddressed-comments", str(ctx.exception))
+
+    def test_addressing_a_comment_reopens_the_gate(self):
+        self.record_wave0()
+        self.approve_all()
+        comment = self.svc.review_comment(body="please fix", file="src/a/x.py")
+        self.svc.review_ack(int(comment["id"]))
+        self.svc.review_reply(
+            parent_comment_id=int(comment["id"]),
+            body="addressed in abc1234",
+            addressing_commit="abc1234",
+        )
+        self.svc.review_mark_addressed(int(comment["id"]), addressing_commit="abc1234")
+        # The addressing commit changed the diff, so the approval is stale.
         self.assertFalse(self.svc.review_snapshot()["all_approved"])
+        self.assertFalse(self.svc.review_poll()["campaign_approved"])
+        self.assertEqual(self.svc.review_poll()["pending"], [])
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
         self.assertIn("not-approved", str(ctx.exception))
 
     def test_request_changes_supersedes_an_approval(self):
         self.record_wave0()
-        commits = [c["hash"] for c in self.svc.review_snapshot()["commits"]]
-        self.svc.review_decision(action="approve", commit=commits[0], actor="test")
-        self.svc.review_decision(
-            action="request_changes", commit=commits[0], note="not yet"
-        )
-        self.assertIn(commits[0], self.svc.unapproved_commits())
+        self.svc.review_decision(action="approve", actor="test")
+        self.svc.review_decision(action="request_changes", note="not yet")
+        self.assertFalse(self.svc.campaign_approved())
+        self.assertTrue(self.svc.unapproved_commits())
 
     def test_request_changes_needs_a_note_or_open_comment(self):
         with self.assertRaises(SlicemeError):
-            self.svc.review_decision(action="request_changes", commit="abc")
+            self.svc.review_decision(action="request_changes")
         self.svc.review_comment(body="fix this")
-        self.svc.review_decision(action="request_changes", commit="abc")
+        self.svc.review_decision(action="request_changes")
 
     def test_override_admits_delivery_and_needs_a_note(self):
         self.record_wave0()
@@ -233,6 +363,47 @@ class ApprovalTests(ReviewCase):
         delivered = self.svc.deliver()
         self.assertEqual(delivered["results"][0]["status"], "failed")
         self.assertTrue(self.svc.review_snapshot()["all_approved"])
+
+
+class SurfaceDispatchTests(ReviewCase):
+    def test_dispatch_routes_the_new_review_flags(self):
+        comment = self.svc.review_comment(body="please fix", file="src/a/x.py")
+        resolved = surface.dispatch(
+            self.svc, "review", {"resolve": True, "comment_id": comment["id"]}
+        )
+        self.assertEqual(resolved["node"], "w1")
+        reply = surface.dispatch(
+            self.svc,
+            "review",
+            {
+                "reply": True,
+                "comment_id": comment["id"],
+                "body": "done",
+                "addressing_commit": "abc1234",
+            },
+        )
+        self.assertEqual(reply["parent_comment_id"], comment["id"])
+        self.assertEqual(reply["addressing_commit"], "abc1234")
+        addressed = surface.dispatch(
+            self.svc,
+            "review",
+            {
+                "addressed": True,
+                "comment_id": comment["id"],
+                "addressing_commit": "abc1234",
+            },
+        )
+        self.assertEqual(addressed["status"], "addressed")
+        self.assertEqual(addressed["addressing_commit"], "abc1234")
+
+    def test_comment_with_a_parent_creates_a_reply(self):
+        root = self.svc.review_comment(body="root", file="src/a/x.py")
+        reply = surface.dispatch(
+            self.svc,
+            "review",
+            {"comment": True, "body": "a turn", "parent_comment_id": root["id"]},
+        )
+        self.assertEqual(reply["parent_comment_id"], root["id"])
 
 
 class PacketTests(ReviewCase):
@@ -375,6 +546,48 @@ class ServerTests(ReviewCase):
                 self.assertTrue(json.loads(response.read())["ok"])
             with self._request("GET", f"{base}/api/state") as response:
                 self.assertTrue(json.loads(response.read())["all_approved"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_server_accepts_reply_and_addressed(self):
+        comment = self.svc.review_comment(body="please fix", file="src/a/x.py")
+        server, thread = self._start()
+        port = server.server_address[1]
+        base = f"http://127.0.0.1:{port}"
+        try:
+            with self._request(
+                "POST",
+                f"{base}/api/action",
+                {
+                    "action": "reply",
+                    "params": {
+                        "comment_id": comment["id"],
+                        "body": "fixed",
+                        "addressing_commit": "abc1234",
+                    },
+                },
+                token=server.token,
+            ) as response:
+                result = json.loads(response.read())
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["parent_comment_id"], comment["id"])
+            with self._request(
+                "POST",
+                f"{base}/api/action",
+                {
+                    "action": "addressed",
+                    "params": {
+                        "comment_id": comment["id"],
+                        "addressing_commit": "abc1234",
+                    },
+                },
+                token=server.token,
+            ) as response:
+                result = json.loads(response.read())
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["status"], "addressed")
         finally:
             server.shutdown()
             server.server_close()

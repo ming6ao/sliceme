@@ -168,6 +168,21 @@ export function branchKey(branch: string): string {
 	return (branch || "main").trim().replace(/\//g, "--") || "main";
 }
 
+/**
+ * The stable session id of one campaign's dedicated addressing subagent.
+ *
+ * The id is derived from the branch key, so every comment and every turn of
+ * one campaign reopens the same pi session (`pi --session-id <id>`) and the
+ * addressing subagent keeps the thread context.  Session ids must start and
+ * end with a letter or digit and accept only letters, digits, `.`, `_`, and
+ * `-`, so the branch key is sanitized before it is embedded.
+ */
+export function addressingSessionId(branch: string): string {
+	const key = branchKey(branch).replace(/[^A-Za-z0-9._-]/g, "-");
+	const trimmed = key.replace(/^[^A-Za-z0-9]+/, "").replace(/[^A-Za-z0-9]+$/, "");
+	return `sliceme-addressing-${trimmed || "campaign"}`;
+}
+
 export function stateDir(cwd: string): string {
 	return path.join(cwd, ".sliceme");
 }
@@ -562,6 +577,57 @@ export function reduceToolEnd(
 	if (activeTools.size === 0) progress.toolStartedAt = undefined;
 }
 
+/** One root comment queued for the dedicated addressing subagent. */
+export interface AddressingComment {
+	id: number;
+	body?: string;
+	file?: string | null;
+	line?: number | null;
+}
+
+/** The engine's `review --resolve` answer for one comment (contract C). */
+export interface AddressingResolve {
+	comment: number;
+	node: string | null;
+	reason: "explicit" | "owns" | "general" | "outside_owns";
+}
+
+/** One addressing pass: the resolved node (or null) plus its comments. */
+export interface AddressingBatch {
+	node: string | null;
+	comments: AddressingComment[];
+}
+
+/**
+ * Group resolved comments into addressing batches.
+ *
+ * Comments that resolve to the same node form one batch, so the coordinator
+ * records a single commit that answers all of them.  A comment with no resolved
+ * node is its own batch (and its own conversation turn), because the addressing
+ * subagent may only record a reply row for it.  The first-seen order is kept.
+ */
+export function addressingBatches(
+	comments: AddressingComment[],
+	resolves: AddressingResolve[],
+): AddressingBatch[] {
+	const resolvedOf = new Map<number, AddressingResolve>();
+	for (const resolve of resolves) resolvedOf.set(Number(resolve.comment), resolve);
+	const batches: AddressingBatch[] = [];
+	const byKey = new Map<string, AddressingBatch>();
+	for (const comment of comments) {
+		const node = resolvedOf.get(Number(comment.id))?.node ?? null;
+		const key = node ? `node:${node}` : `comment:${comment.id}`;
+		let batch = byKey.get(key);
+		if (!batch) {
+			batch = { node, comments: [] };
+			byKey.set(key, batch);
+			batches.push(batch);
+		}
+		batch.comments.push(comment);
+	}
+	return batches;
+}
+
 export async function runSubagent(options: {
 	agent: string;
 	task: string;
@@ -572,10 +638,18 @@ export async function runSubagent(options: {
 	unit?: string;
 	attempt?: number;
 	heartbeat?: string;
+	/**
+	 * Reopen this project session id instead of `--no-session`.  The dedicated
+	 * addressing subagent uses one stable id per campaign, so its conversation
+	 * history survives across comments and turns.
+	 */
+	sessionId?: string;
 	onProgress?: (progress: SubagentProgress) => void;
 }): Promise<SubagentResult> {
 	const agentFile = findAgentFile(options.agent);
-	const args = ["--mode", "json", "-p", "--no-session"];
+	const args = ["--mode", "json", "-p"];
+	if (options.sessionId) args.push("--session-id", options.sessionId);
+	else args.push("--no-session");
 	let promptPath: string | undefined;
 	if (agentFile) {
 		const raw = fs.readFileSync(agentFile, "utf8");

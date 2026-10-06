@@ -1,9 +1,9 @@
 """Build one review snapshot: the accumulated commits and the report.
 
 The review unit is the campaign worktree.  Commits accumulate as waves land, so
-a human can review and approve them one by one, before or after the campaign
-finishes.  An approval is stored per commit hash; delivery proceeds only when
-every commit in the packet has a newest unconsumed ``approve``.
+a human can review and approve them before or after the campaign finishes.  One
+campaign-level approval covers the whole commit set; delivery proceeds only
+while the newest campaign decision is an unconsumed ``approve``.
 
 The report (``.sliceme/<branch-key>.report.md``) is git-ignored, so it is read
 from disk and included in the packet as a virtual file.  Comments can attach to
@@ -114,16 +114,9 @@ def report_info(service: "Service") -> dict[str, Any]:
     }
 
 
-def _decision_state(
-    decisions: dict[str, dict[str, Any]], commit_hash: str
-) -> dict[str, Any]:
-    decision = decisions.get(commit_hash)
-    approved = bool(
-        decision
-        and decision.get("action") == "approve"
-        and decision.get("consumed_at") is None
-    )
-    return {"approved": approved, "decision": decision}
+def _campaign_approval(service: "Service") -> tuple[dict[str, Any] | None, bool]:
+    """The latest campaign-level decision and whether it is an approve."""
+    return service.campaign_decision(), service.campaign_approved()
 
 
 def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, Any]:
@@ -135,12 +128,11 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
     branch_key = campaign_branch_key(service)
 
     commits: list[dict[str, Any]] = []
-    decisions: dict[str, dict[str, Any]] = {}
     if source_tip and target_tip:
         commits = diff.commits(service.root, target_tip, source_tip)
-        decisions = service.store.latest_decisions_by_commit(branch_key)
+    approval, approved = _campaign_approval(service)
     for row in commits:
-        row.update(_decision_state(decisions, row["hash"]))
+        row["approved"] = approved
 
     base, head = target_tip, source_tip
     if commit:
@@ -156,8 +148,8 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
         "target_tip": target_tip,
         "commit": commit,
         "commits": commits,
-        "all_approved": bool(commits) and all(row["approved"] for row in commits),
-        "override": service.store.latest_review_decision(branch_key, None),
+        "all_approved": approved,
+        "override": approval,
         "files": diff.file_index(service.root, base, head) if base and head else [],
         "comments": service.store.list_comments(branch_key=branch_key),
         "evidence": _evidence_map(service, {row["hash"] for row in commits}),

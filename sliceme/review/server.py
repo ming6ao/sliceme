@@ -322,7 +322,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "body must be JSON")
             return
         action = str(body.get("action") or "")
-        if action not in {"comment", "decision", "deliver"}:
+        if action not in {"comment", "reply", "addressed", "decision", "deliver"}:
             self._error(HTTPStatus.BAD_REQUEST, f"unknown write action: {action}")
             return
         params = body.get("params") or {}

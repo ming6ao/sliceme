@@ -1386,10 +1386,17 @@ class Service:
         line: int | None = None,
         line_end: int | None = None,
         node: str | None = None,
+        parent_comment_id: int | None = None,
     ) -> dict[str, Any]:
-        """Record one comment against a commit (or the report), file, and line."""
+        """Record one comment (or one reply when a parent is given)."""
         from .review import packet
 
+        if parent_comment_id is not None:
+            if any(item is not None for item in (commit, file, side, line, line_end)):
+                raise SlicemeError("a reply cannot carry a commit or a line anchor")
+            return self.review_reply(
+                parent_comment_id=int(parent_comment_id), body=body, node=node
+            )
         if not (body or "").strip():
             raise SlicemeError("a comment needs a body")
         if side and side not in {"old", "new"}:
@@ -1411,6 +1418,115 @@ class Service:
         )
         return comment
 
+    def review_reply(
+        self,
+        *,
+        parent_comment_id: int,
+        body: str,
+        node: str | None = None,
+        addressing_commit: str | None = None,
+    ) -> dict[str, Any]:
+        """Record one reply row under a root comment.
+
+        The parent status does not change.  ``addressing_commit`` is set only
+        when the reply answers with code.
+        """
+        from .review import packet
+
+        if not (body or "").strip():
+            raise SlicemeError("a reply needs a body")
+        parent = self.store.get_comment(int(parent_comment_id))
+        if parent is None:
+            raise SlicemeError(f"unknown comment: {parent_comment_id}")
+        reply = self.store.add_reply(
+            branch_key=packet.campaign_branch_key(self),
+            parent_comment_id=int(parent_comment_id),
+            body=body.strip(),
+            node=node or parent.get("node"),
+            addressing_commit=addressing_commit,
+        )
+        self.store.conn.commit()
+        self._log_review_event(
+            "reply",
+            {
+                "comment": int(reply["id"]),
+                "parent": int(parent_comment_id),
+                "commit": addressing_commit,
+            },
+        )
+        return reply
+
+    def review_mark_addressed(
+        self, comment_id: int, *, addressing_commit: str | None = None
+    ) -> dict[str, Any]:
+        """Move one root comment to ``addressed`` and stamp ``addressed_at``."""
+        comment = self.store.get_comment(int(comment_id))
+        if comment is None:
+            raise SlicemeError(f"unknown comment: {comment_id}")
+        if comment.get("parent_comment_id") is not None:
+            raise SlicemeError("only a root comment can be marked addressed")
+        updated = self.store.set_comment_status(
+            int(comment_id),
+            "addressed",
+            addressed_at=now(),
+            addressing_commit=addressing_commit,
+        )
+        # A new addressing commit changes the reviewed diff, so the campaign
+        # approval is stale and the gate re-opens for the whole campaign.
+        decision = self.campaign_decision()
+        if self._is_approved(decision):
+            self.store.consume_review_decisions([int(decision["id"])])
+        self.store.conn.commit()
+        self._log_review_event(
+            "addressed", {"comment": int(comment_id), "commit": addressing_commit}
+        )
+        return updated  # type: ignore[return-value]
+
+    def review_resolve(self, comment_id: int) -> dict[str, Any]:
+        """Route one comment to a node, or to no node.
+
+        The comment node wins.  Otherwise the node whose ``owns`` contains the
+        comment path and has the longest matching owned directory wins.  A
+        general comment (no file) and a path outside every ``owns`` resolve to
+        a null node, so the addressing subagent may only write a reply row.
+        """
+        comment = self.store.get_comment(int(comment_id))
+        if comment is None:
+            raise SlicemeError(f"unknown comment: {comment_id}")
+        explicit = comment.get("node")
+        if explicit:
+            return {
+                "comment": int(comment_id),
+                "node": str(explicit),
+                "reason": "explicit",
+            }
+        path = comment.get("file")
+        if not path:
+            return {"comment": int(comment_id), "node": None, "reason": "general"}
+        branch = self.config.get("target_branch") or self.config.get("main_branch")
+        dag = campaign.load_dag(self.root, branch) if branch else None
+        best_node: str | None = None
+        best_length = -1
+        for node in (dag or {}).get("nodes", []):
+            node_id = str(node.get("id") or "")
+            if not node_id:
+                continue
+            for directory in node_owns(node):
+                if path_within_owns(str(path), [directory]) and len(directory) > best_length:
+                    best_length = len(directory)
+                    best_node = node_id
+        if best_node is None:
+            return {
+                "comment": int(comment_id),
+                "node": None,
+                "reason": "outside_owns",
+            }
+        return {
+            "comment": int(comment_id),
+            "node": best_node,
+            "reason": "owns",
+        }
+
     def review_decision(
         self,
         *,
@@ -1420,7 +1536,12 @@ class Service:
         actor: str | None = None,
         note: str | None = None,
     ) -> dict[str, Any]:
-        """Append one decision for one commit, or approve every commit at once."""
+        """Append one campaign-level decision (``commit_hash`` is NULL).
+
+        One approval controls the whole campaign commit set, so ``approve``
+        and ``request_changes`` never bind to one commit.  ``override`` stays
+        a separate campaign-level decision that admits delivery.
+        """
         from .review import packet
 
         if action not in {"approve", "request_changes", "override"}:
@@ -1428,15 +1549,11 @@ class Service:
                 "decision must be one of: approve, request_changes, override"
             )
         branch_key = packet.campaign_branch_key(self)
-        if all_commits:
-            if action != "approve":
-                raise SlicemeError("only approve can apply to all commits")
+        if action == "approve":
             return self._approve_all(branch_key, actor=actor, note=note)
-        if commit is None and action != "override":
-            raise SlicemeError("a decision needs --commit <sha>, --all, or an override")
         if action == "request_changes":
             open_comments = self.store.list_comments(
-                branch_key=branch_key, statuses=["open"]
+                branch_key=branch_key, statuses=["open"], roots_only=True
             )
             if not (note or "").strip() and not open_comments:
                 raise SlicemeError(
@@ -1446,7 +1563,7 @@ class Service:
             raise SlicemeError("override needs a note")
         decision = self.store.add_review_decision(
             branch_key=branch_key,
-            commit_hash=commit,
+            commit_hash=None,
             action=action,
             actor=actor,
             note=note,
@@ -1454,46 +1571,63 @@ class Service:
         self.store.conn.commit()
         self._log_review_event(
             "decision",
-            {"decision": int(decision["id"]), "action": action, "commit": commit},
+            {"decision": int(decision["id"]), "action": action, "commit": None},
         )
         return decision
 
     def _approve_all(
         self, branch_key: str, *, actor: str | None, note: str | None
     ) -> dict[str, Any]:
-        approved = [
-            self.store.add_review_decision(
-                branch_key=branch_key,
-                commit_hash=commit,
-                action="approve",
-                actor=actor,
-                note=note,
-            )
-            for commit in self.unapproved_commits()
-        ]
+        """Record ONE campaign-level approve decision."""
+        decision = self.store.add_review_decision(
+            branch_key=branch_key,
+            commit_hash=None,
+            action="approve",
+            actor=actor,
+            note=note,
+        )
         self.store.conn.commit()
         self._log_review_event(
-            "decision", {"action": "approve", "all": True, "count": len(approved)}
+            "decision",
+            {"decision": int(decision["id"]), "action": "approve", "all": True},
         )
-        return {"action": "approve", "all": True, "approved": len(approved)}
+        return decision
+
+    def campaign_decision(self) -> dict[str, Any] | None:
+        """The latest campaign-level decision (``commit_hash`` is NULL)."""
+        from .review import packet
+
+        return self.store.latest_review_decision(
+            packet.campaign_branch_key(self), None
+        )
+
+    def campaign_approved(self) -> bool:
+        """Whether the newest campaign-level decision is an unconsumed approve."""
+        return self._is_approved(self.campaign_decision())
 
     def review_poll(self) -> dict[str, Any]:
-        """Open comments plus the approval state, for the pi relay."""
+        """Open comments, delivered-but-unaddressed comments, and the campaign
+        approval state, for the pi relay."""
         from .review import packet
 
         branch_key = packet.campaign_branch_key(self)
-        unapproved = self.unapproved_commits()
+        approval = self.campaign_decision()
+        approved = self._is_approved(approval)
         return {
             "branch_key": branch_key,
             "comments": self.store.list_comments(
-                branch_key=branch_key, statuses=["open"]
+                branch_key=branch_key, statuses=["open"], roots_only=True
             ),
-            "unapproved": unapproved,
-            "all_approved": not unapproved,
+            "pending": self.store.list_comments(
+                branch_key=branch_key, statuses=["delivered"], roots_only=True
+            ),
+            "campaign_approved": approved,
+            "all_approved": approved,
+            "approval": approval,
         }
 
     def review_ack(self, comment_id: int) -> dict[str, Any]:
-        """Mark one comment delivered to the coordinator session."""
+        """Mark one root comment delivered to the coordinator session."""
         comment = self.store.get_comment(int(comment_id))
         if comment is None:
             raise SlicemeError(f"unknown comment: {comment_id}")
@@ -1502,16 +1636,16 @@ class Service:
         return updated  # type: ignore[return-value]
 
     def unapproved_commits(self) -> list[str]:
-        """Campaign commits with no valid, unconsumed approval."""
+        """Campaign commits that still need approval.
+
+        Approval is campaign-level, so either every commit is unapproved or
+        none is.
+        """
         from .review import packet
 
-        branch_key = packet.campaign_branch_key(self)
-        decisions = self.store.latest_decisions_by_commit(branch_key)
-        return [
-            commit
-            for commit in packet.review_commits(self)
-            if not self._is_approved(decisions.get(commit))
-        ]
+        if self.campaign_approved():
+            return []
+        return packet.review_commits(self)
 
     @staticmethod
     def _is_approved(decision: dict[str, Any] | None) -> bool:
@@ -1524,44 +1658,55 @@ class Service:
     def require_all_approved(
         self, commits: list[str] | None = None
     ) -> dict[str, Any] | None:
-        """Refuse delivery unless every commit is approved (or an override).
+        """Refuse delivery unless the campaign is approved (or overridden).
 
         Returns the override decision when one admitted delivery, else ``None``.
         """
         from .review import packet
 
-        branch_key = packet.campaign_branch_key(self)
         commits = commits if commits is not None else packet.campaign_commits(self)
-        decisions = self.store.latest_decisions_by_commit(branch_key)
-        unapproved = [c for c in commits if not self._is_approved(decisions.get(c))]
-        if not unapproved:
+        if not commits:
             return None
-        override = self.store.latest_review_decision(branch_key, None)
+        decision = self.campaign_decision()
+        if self._is_approved(decision):
+            return None
         if (
-            override
-            and override.get("action") == "override"
-            and (override.get("note") or "").strip()
+            decision
+            and decision.get("action") == "override"
+            and (decision.get("note") or "").strip()
         ):
-            return override
-        listing = ", ".join(commit[:7] for commit in unapproved)
+            return decision
+        listing = ", ".join(commit[:7] for commit in commits)
         raise SlicemeError(
-            f"not-approved: {listing} not approved; open `sliceme review` and approve them"
+            f"not-approved: {listing} not approved; open `sliceme review`"
+            " and approve the campaign"
         )
 
     def consume_approvals(self, commits: list[str] | None = None) -> None:
-        """Mark the approvals for *commits* consumed after a landed merge."""
+        """Mark the latest campaign decision consumed after a landed delivery."""
+        decision = self.campaign_decision()
+        if decision is not None:
+            self.store.consume_review_decisions([int(decision["id"])])
+            self.store.conn.commit()
+
+    def unaddressed_comments(self) -> list[int]:
+        """Root comments delivered but not yet addressed."""
         from .review import packet
 
-        branch_key = packet.campaign_branch_key(self)
-        commits = commits if commits is not None else packet.campaign_commits(self)
-        decisions = self.store.latest_decisions_by_commit(branch_key)
-        ids = [
-            int(decisions[commit]["id"])
-            for commit in commits
-            if commit in decisions and self._is_approved(decisions[commit])
-        ]
-        self.store.consume_review_decisions(ids)
-        self.store.conn.commit()
+        rows = self.store.list_comments(
+            branch_key=packet.campaign_branch_key(self),
+            statuses=["delivered"],
+            roots_only=True,
+        )
+        return [int(row["id"]) for row in rows]
+
+    def require_comments_addressed(self) -> None:
+        """Refuse delivery while a delivered comment is not addressed."""
+        ids = self.unaddressed_comments()
+        if ids:
+            raise SlicemeError(
+                "unaddressed-comments: " + ",".join(str(item) for item in ids)
+            )
 
     def _log_review_event(self, kind: str, data: dict[str, Any]) -> None:
         """Append one review audit line to ``.sliceme/<branch-key>.events.jsonl``."""
@@ -1705,6 +1850,7 @@ class Service:
             commits = packet.campaign_commits(self)
             with _delivery_lock(self.root):
                 override = self.require_all_approved(commits)
+                self.require_comments_addressed()
                 results = integrate.deliver_pull_request(
                     self.store,
                     self.root,
