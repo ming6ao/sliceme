@@ -150,6 +150,18 @@ class PiPackageTests(unittest.TestCase):
         self.assertNotIn("tools/gpu.sh", verifier)
         self.assertIn("executor", verifier)
 
+    def test_coordinator_forwards_the_dense_status(self):
+        # The coordinator's `status` action can request the engine's dense
+        # summary: it forwards `--dense --json` and uses the returned lines.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"status", "--dense", "--json"', coordinator)
+        self.assertIn("params.dense", coordinator)
+        self.assertIn("json?.lines", coordinator)
+        # The coordinator has no nested-dump renderer, so it must not advertise
+        # a dead `verbose` status param; the CLI owns `--verbose`.
+        self.assertNotIn("params.verbose", coordinator)
+        self.assertNotIn("full nested status dump", coordinator)
+
     def test_no_console_scripts(self):
         # The engine is internal: it is invoked from the package, never
         # installed as a user-facing `sliceme` command.

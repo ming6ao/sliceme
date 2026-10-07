@@ -181,6 +181,8 @@ def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
 
     if action == "status" and getattr(args, "short", False) and not as_json:
         print(result["unit"] if isinstance(result, dict) else result)
+    elif action == "status" and not as_json and isinstance(result, dict) and result.get("lines"):
+        print("\n".join(result["lines"]))
     else:
         _print(result, as_json)
     return 0

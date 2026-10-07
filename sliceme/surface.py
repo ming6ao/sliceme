@@ -76,6 +76,8 @@ ACTIONS: tuple[Action, ...] = (
         params=(
             Param("unit", "string", "show one unit instead of the summary"),
             Param("short", "boolean", "print only the current unit name"),
+            Param("dense", "boolean", "print the compact status summary (default)"),
+            Param("verbose", "boolean", "print the full nested status dump"),
             Param("simulate", "boolean", "plan waves and verify the combined tree"),
             Param("health", "boolean", "check git/plane health"),
             Param("gc", "boolean", "prune worktrees and landed-unit branches"),
@@ -313,7 +315,13 @@ def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
         return {"unit": service.current_unit()["name"]}
     if p.get("unit"):
         return service.unit_detail(p["unit"])
-    return service.status()
+    if p.get("verbose"):
+        return service.status()
+    if p.get("dense"):
+        return service.status_summary()
+    if p.get("json"):
+        return service.status()
+    return service.status_summary()
 
 
 def _dispatch_plan(service: "Service", p: dict[str, Any]) -> Any:

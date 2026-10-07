@@ -121,6 +121,30 @@ Abridged output:
 }
 ```
 
+### 4.1 The dense status summary
+
+The default human `sliceme status` output is the **dense summary**, mirroring the
+pi coordinator's `summarise`: a header, one line per node in DAG order, and one
+line per wave. Its node and wave lines derive from `dag.json` and `state.json`
+(the same plan the scheduler uses); the header's `target`/`worktree` come from
+the plane config, so a second terminal sees the same plan.
+
+```text
+campaign: dense
+target:   feat/x  worktree: sliceme/feat-x  base: main
+design:   DESIGN.md
+nodes:    2  wave size: 2
+  w0 w1 [build] done — parser
+  w1 w2 [-] running
+wave 0 [done]: w1
+wave 1 [pending]: w2
+```
+
+`--dense` asks for it explicitly; `--verbose` prints the full nested dump.
+With `--json` the default is the nested dump, while `--dense --json` emits the
+summary as JSON (the `lines` array is the same text). A plane with no single
+campaign falls back to a compact per-campaign plane list.
+
 ## 5. Stalled detection
 
 Sliceme marks a running node stalled when its heartbeat is older than five
@@ -142,6 +166,7 @@ not change `state.json` and does not fail a node.
 - `tests/render_progress_test.mjs` drives the renderer with fixed snapshots.
 - `tests/metrics_test.mjs` drives the reducer helpers with a fixed event list.
 - `tests/test_progress.py` drives the `progress` projection.
+- `tests/test_status_summary.py` drives the dense `status` summary.
 - `tests/test_sessions.py` covers the `attempts` columns and the migration.
 - `tests/test_cli.py` drives `attempt --end` and `progress`.
 - `tests/test_pi_package.py` checks the wiring and the action lockstep.

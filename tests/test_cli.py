@@ -553,6 +553,182 @@ class CliTests(unittest.TestCase):
                 {"feat/x", "feat/y"},
             )
 
+    def test_status_default_is_dense_and_verbose_is_nested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "a.txt").write_text("hi\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
+            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            write_json(
+                campaign.dag_path(root, "feat/x"),
+                {
+                    "campaign": "cli",
+                    "feature_branch": "feat/x",
+                    "base": "main",
+                    "nodes": [
+                        {"id": "w1", "owns": ["dir:src/a"], "depends_on": []},
+                        {"id": "w2", "owns": ["dir:src/b"], "depends_on": ["w1"]},
+                    ],
+                },
+            )
+            write_json(
+                campaign.state_path(root, "feat/x"),
+                {
+                    "wave_size": 1,
+                    "waves": [
+                        {"index": 0, "members": ["w1"], "status": "done"},
+                        {"index": 1, "members": ["w2"], "status": "pending"},
+                    ],
+                    "nodes": {"w1": {"status": "done"}},
+                },
+            )
+
+            # The default human output is the dense summary, not the nested dump.
+            out = run_cli(["status"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("campaign: cli", out.stdout)
+            self.assertIn("  w0 w1 [-] done", out.stdout)
+            self.assertIn("  w1 w2 [-] pending", out.stdout)
+            self.assertIn("wave 1 [pending]: w2", out.stdout)
+            self.assertNotIn("campaign_key:", out.stdout)
+
+            # --verbose restores the full nested dump.
+            out = run_cli(["status", "--verbose"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("campaign_key:", out.stdout)
+            self.assertNotIn("  w0 w1 [-]", out.stdout)
+
+            # --json stays the nested dump and carries no lines key.
+            out = run_cli(["status", "--json"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertNotIn("lines", json.loads(out.stdout))
+
+            # --verbose --json is still the nested dump, with no lines key.
+            out = run_cli(["status", "--verbose", "--json"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("campaign_key", json.loads(out.stdout))
+            self.assertNotIn("lines", json.loads(out.stdout))
+
+            # --dense --json emits the summary and its lines.
+            out = run_cli(["status", "--dense", "--json"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            lines = json.loads(out.stdout)["lines"]
+            self.assertEqual(lines[0], "campaign: cli")
+            self.assertIn("  w0 w1 [-] done", lines)
+            self.assertIn("  w1 w2 [-] pending", lines)
+            self.assertIn("wave 1 [pending]: w2", lines)
+
+            # --short still prints only the unit name, from inside its worktree;
+            # it also wins over --dense (both are explicit status views).
+            out = run_cli(
+                ["--json", "start", "--name", "alpha", "--base", "feat/x"], root
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            worktree = Path(json.loads(out.stdout)["worktree"])
+            out = run_cli(["status", "--short"], worktree)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout.strip(), "alpha")
+            out = run_cli(["status", "--dense", "--short"], worktree)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout.strip(), "alpha")
+
+    def test_status_plane_human_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "a.txt").write_text("hi\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+            first = run_cli(
+                [
+                    "--json",
+                    "start",
+                    "--target",
+                    "feat/x",
+                    "--target-mode",
+                    "new",
+                    "--no-unit",
+                    "--check",
+                    "ok=true",
+                ],
+                root,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            second = run_cli(
+                [
+                    "--json",
+                    "init",
+                    "--target",
+                    "feat/y",
+                    "--target-mode",
+                    "new",
+                    "--no-unit",
+                    "--base",
+                    "main",
+                ],
+                root,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+
+            # Two campaigns bind no single one, so the default human output is
+            # the compact plane list, not a dense single-campaign summary.
+            out = run_cli(["status"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout.splitlines()[0], "campaigns: 2")
+            self.assertIn("feat--x [working]", out.stdout)
+            self.assertIn("feat--y [working]", out.stdout)
+
+    def test_status_secondary_modes_keep_the_human_dump(self):
+        # --health/--gc/--simulate/--sessions/--resume are dispatched before the
+        # dense default; the CLI must print their own human dump, never lines.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "a.txt").write_text("hi\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
+            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            write_json(
+                campaign.dag_path(root, "feat/x"),
+                {
+                    "campaign": "cli",
+                    "feature_branch": "feat/x",
+                    "base": "main",
+                    "nodes": [{"id": "w1", "owns": ["dir:src"], "depends_on": []}],
+                },
+            )
+            write_json(
+                campaign.state_path(root, "feat/x"),
+                {"nodes": {"w1": {"status": "running", "attempts": 1}}},
+            )
+
+            cases = [
+                (["status", "--health"], "checks:"),
+                (["status", "--gc"], "removed_worktrees:"),
+                (["status", "--simulate", "--no-checks"], "candidate_count:"),
+                (["status", "--sessions"], "sessions:"),
+                (["status", "--resume", "--plan-only"], "resume_plan:"),
+            ]
+            for argv, marker in cases:
+                out = run_cli(argv, root)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn(marker, out.stdout)
+                # The dense summary's header line is the tell that the CLI took
+                # the lines branch instead of each mode's own dump.
+                self.assertNotIn("wave size:", out.stdout)
+
     def test_cli_surface_matches_registry(self):
         """The CLI subcommands are exactly the registry (plus aliases)."""
         import argparse

@@ -11,7 +11,7 @@ derive from one action registry (`sliceme/surface.py`). Seven engine verbs:
 | Action | Purpose |
 |---|---|
 | `start` (alias `init`) | Bootstrap the plane and a unit for the current directory (idempotent). |
-| `status` | Units, candidates, waves, health, simulation; `--sessions` and `--resume` cover the campaign registry and resume plan. |
+| `status` | Units, candidates, waves, health, simulation; the default is the dense summary, `--verbose` is the full dump, and `--sessions`/`--resume` cover the campaign registry and resume plan. |
 | `deliver` | Merge the campaign worktree into the target feature branch once every commit is approved. |
 | `exec` | The single sandboxed executor queue: `submit`/`run`/`wait`/`cancel` check jobs. |
 | `wave` | The campaign worktree: `--open` creates or reuses it, `--record --wave N` commits the wave. |
@@ -64,11 +64,17 @@ The programmatic plane-only helper is `Service.init_plane(root, ...)`.
 ### `status`
 
 ```bash
-sliceme status [--unit U] [--short] [--simulate] [--no-checks] [--health] [--gc]
+sliceme status [--unit U] [--short] [--dense] [--verbose] [--simulate] [--no-checks] [--health] [--gc]
                  [--sessions] [--resume [--plan-only]]
 ```
 
-`--short` prints only the current unit name. `--health` checks git/config/db.
+The default human output is the **dense summary**: a header (`campaign`,
+`target`/`worktree`/`base`, `design`, node count and wave size), one line per
+node in DAG order (`w<wave> <id> [<phase>] <status>`, with the node label
+appended), and one line per wave. `--dense` asks for it explicitly and
+`--verbose` prints the full nested dump instead. With `--json` the default is
+the nested dump; `--dense --json` emits the summary as JSON (including
+`lines`). `--short` prints only the current unit name. `--health` checks git/config/db.
 `--gc` prunes worktrees, landed-unit branches, expired review rows, and the
 files of every campaign that has finished, and it keeps the report.
 `--simulate` groups prepared candidates into DAG waves, materializes each
@@ -78,8 +84,10 @@ their descriptor files. `--resume` reconciles a suspended campaign from git
 plus `state.db` and returns its resume plan; `--plan-only` reports without side
 effects.
 
-The default projection returns `dag_waves` (the scheduler's wave plan) plus
-per-unit campaign columns (`node`, `log`, `candidate`, `verification`).
+The nested dump (`--verbose`, or `--json` without `--dense`) returns
+`dag_waves` (the scheduler's wave plan) plus per-unit campaign columns (`node`,
+`log`, `candidate`, `verification`); the default dense summary returns the
+header and the node/wave lines instead.
 
 Every projection first **normalizes** `dag.json`. Sliceme contracts
 same-ownership nodes, then computes the waves. A campaign can never schedule an

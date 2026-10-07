@@ -2705,6 +2705,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		defaultActive: false,
 		parameters: Type.Object({
 			action: StringEnum(CAMPAIGN_ACTIONS),
+			dense: Type.Optional(
+				Type.Boolean({ description: "status: print the compact engine summary" }),
+			),
 			design: Type.Optional(Type.String({ description: "start: design document path" })),
 			campaign: Type.Optional(Type.String({ description: "start: campaign name" })),
 			base: Type.Optional(
@@ -2833,6 +2836,25 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					await ensureWaves(ctx, branch, dag, state);
 					widget(ctx, dag, state);
 					if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
+					if (params.dense) {
+						try {
+							const { json } = await sliceme(ctx, ["status", "--dense", "--json"], signal);
+							const lines = Array.isArray(json?.lines) ? json.lines : [];
+							if (lines.length) {
+								return {
+									content: [
+										{
+											type: "text" as const,
+											text: lines.map((line: unknown) => String(line)).join("\n"),
+										},
+									],
+									details: { dag, state },
+								};
+							}
+						} catch {
+							// The engine subprocess failed; fall back to the local summary.
+						}
+					}
 					return {
 						content: [{ type: "text" as const, text: summarise(dag, state) }],
 						details: { dag, state },

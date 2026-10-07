@@ -1012,6 +1012,133 @@ class Service:
             "sandbox": self.sandbox_info(),
         }
 
+    def status_summary(self) -> dict[str, Any]:
+        """The compact, human-first status projection (docs/observability.md).
+
+        Mirrors the pi coordinator's ``summarise``: a header, one line per node
+        in DAG order, and one line per wave.  The default human ``status``
+        output; ``status --verbose`` still returns the full nested dump.  It
+        never raises: a plane with no single campaign falls back to the plane
+        summary.
+        """
+        # Normalization is required, so it runs before every projection.
+        try:
+            self.normalize_dag()
+        except SlicemeError:
+            pass
+        if self._campaign_ref is None and len(self.store.list_campaigns(state="working")) > 1:
+            return self._status_summary_plane()
+        campaign_row = self.campaign
+        if campaign_row is None:
+            return self._status_summary_plane()
+
+        branch = self.config.get("target_branch") or self.config.get("main_branch")
+        dag = campaign.load_dag(self.root, branch) if branch else None
+        state = campaign.load_state(self.root, branch) if branch else {"nodes": {}}
+        nodes = [n for n in (dag or {}).get("nodes") or [] if n.get("id")]
+        node_ids = [str(n["id"]) for n in nodes]
+
+        # Prefer the adapter-written wave state (``state.json``); each entry may
+        # use ``index`` (TS WaveState) or ``wave`` (the engine projection).  Fall
+        # back to the engine's DAG wave plan when there is no state yet.
+        wave_of: dict[str, int] = {}
+        dag_waves: list[dict[str, Any]] = []
+        state_waves = state.get("waves")
+        if isinstance(state_waves, list) and state_waves:
+            for entry in state_waves:
+                if not isinstance(entry, dict):
+                    continue
+                number = entry.get("index")
+                if number is None:
+                    number = entry.get("wave")
+                wave_number = int(number) if number is not None else 0
+                members = [str(m) for m in entry.get("members") or []]
+                for member in members:
+                    wave_of[member] = wave_number
+                dag_waves.append(
+                    {"wave": wave_number, "status": entry.get("status"), "members": members}
+                )
+        else:
+            planned, _error = self._dag_waves(branch)
+            for entry in planned:
+                wave_number = int(entry.get("wave", 0))
+                members = [str(m) for m in entry.get("members") or []]
+                for member in members:
+                    wave_of[member] = wave_number
+                dag_waves.append(
+                    {"wave": wave_number, "status": "pending", "members": members}
+                )
+
+        name = (dag or {}).get("campaign") or campaign_row.get("name") or "(unnamed)"
+        design = (dag or {}).get("design")
+        base = (dag or {}).get("base") or state.get("base")
+        worktree = self.config.get("worktree_branch")
+        wave_size = state.get("wave_size")
+        if wave_size is None and dag:
+            wave_size = dag.get("concurrency")
+        if wave_size is None:
+            wave_size = "?"
+
+        lines = [
+            f"campaign: {name}",
+            f"target:   {branch or '(unset)'}  worktree: {worktree or '(unset)'}  base: {base or '(unset)'}",
+            f"design:   {design or '(unspecified)'}",
+            f"nodes:    {len(node_ids)}  wave size: {wave_size}",
+        ]
+        node_rows: list[dict[str, Any]] = []
+        for node in nodes:
+            node_id = str(node["id"])
+            entry = (state.get("nodes") or {}).get(node_id) or {}
+            wave = wave_of.get(node_id)
+            if wave is None and isinstance(entry, dict):
+                wave = entry.get("wave")
+            if wave is None:
+                wave = "?"
+            phase = node.get("phase")
+            status = campaign.node_status(state, node_id)
+            label = node.get("label")
+            suffix = f" — {label}" if label else ""
+            lines.append(f"  w{wave} {node_id} [{phase or '-'}] {status}{suffix}")
+            node_rows.append(
+                {
+                    "id": node_id,
+                    "wave": wave,
+                    "phase": phase,
+                    "status": status,
+                    "label": label,
+                }
+            )
+        for entry in dag_waves:
+            lines.append(
+                f"wave {entry['wave']} [{entry['status']}]: {', '.join(entry['members'])}"
+            )
+
+        return {
+            "root": str(self.root),
+            "campaign": name,
+            "target_branch": branch,
+            "worktree_branch": worktree,
+            "base": base,
+            "design": design,
+            "node_count": len(node_ids),
+            "wave_size": wave_size,
+            "nodes": node_rows,
+            "dag_waves": dag_waves,
+            "lines": lines,
+        }
+
+    def _status_summary_plane(self) -> dict[str, Any]:
+        """The compact plane projection when no single campaign is bound."""
+        plane = self._plane_status()
+        lines = [f"campaigns: {len(plane['campaigns'])}"]
+        for row in plane["campaigns"]:
+            lines.append(
+                f"  {row['key']} [{row['state']}] "
+                f"target: {row['target_branch'] or '(unset)'} "
+                f"worktree: {row['worktree_branch'] or '(unset)'}"
+            )
+        return {**plane, "lines": lines}
+
     def _plane_status(self) -> dict[str, Any]:
         """A plane-level summary when no campaign is named."""
         cfg = self.plane_config
