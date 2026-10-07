@@ -10,8 +10,13 @@ Design (see ``docs/guide.md`` / ``docs/reference.md``):
 * **One runner.** ``run``/``drain`` hold an exclusive lock, so no two check
   vectors run concurrently — protecting the GPU and shared resources.
 * **Dedupe by fingerprint.** A submit whose ``(tree, commands, toolchain,
-  policy, sandbox, source)`` fingerprint already passed is returned cached; the
-  commands are not re-run.
+  policy, sandbox, source)`` fingerprint already reached a terminal verdict
+  (``passed``, ``failed``, or ``error``) is returned cached; the commands are
+  not re-run (DEC-3: a cached pass and a failed job each skip the verifier).
+* **A batch, one drain.** A submit takes one commit or a list of commits and
+  enqueues one job per commit; a single ``drain`` then verifies a whole wave.
+* **One command on demand.** A submit may pass ``only`` to keep just the named
+  commands, so a re-verify can re-run a single command.
 * **Sandboxed.** ``sliceme.sandbox`` resolves the isolation profile; its digest
   is part of the fingerprint, so a stricter sandbox invalidates a verdict.
 * **Crash-safe.** A ``running`` job whose lease expired is reset to ``queued``
@@ -32,7 +37,13 @@ from .sandbox import Sandbox, coerce_sandbox, resolve_sandbox
 from .sandbox import require_sandbox as _require_sandbox
 from .store import Store
 from .util import SlicemeError, now, state_dir
-from .verifier import acceptance_checks, compute_fingerprint, run_checks
+from .verifier import (
+    CheckSpec,
+    acceptance_checks,
+    compute_fingerprint,
+    run_checks,
+    select_checks,
+)
 
 #: Bumped when executor semantics change so cached fingerprints invalidate.
 EXECUTOR_VERSION = "1"
@@ -42,6 +53,11 @@ DEFAULT_LEASE_SECONDS = 900.0
 
 #: Terminal job statuses.
 TERMINAL = ("passed", "failed", "error", "cancelled")
+
+#: Terminal statuses a submit may reuse from the cache (DEC-3).  A cached pass
+#: and a failed/errored run both stand as verdicts; a ``cancelled`` job does not,
+#: so a re-submit runs it again.
+CACHEABLE = ("passed", "failed", "error")
 
 
 class Executor:
@@ -104,8 +120,11 @@ class Executor:
         self,
         *,
         source: str | None,
-        commit: str | None,
-        commands: list[str],
+        commit: str | list[str] | None = None,
+        commits: list[str] | None = None,
+        commands: list[str] | None = None,
+        checks: list[CheckSpec] | None = None,
+        only: list[str] | None = None,
         sandbox: str | None = None,
         gpu: str = "none",
         wave: int | None = None,
@@ -113,50 +132,101 @@ class Executor:
         priority: int = 0,
         timeout: int = 3600,
     ) -> dict[str, Any]:
-        """Enqueue a check job, or return a cached passing result.
+        """Enqueue one check job per commit, or return cached terminal results.
 
-        Returns ``{"job": <row>, "cached": bool}``.
+        A batch of commits (``commit`` as one ref or a list, plus ``commits``)
+        becomes one job per commit sharing the command vector, so a single
+        ``drain`` verifies a whole wave.  ``only`` keeps just the named commands
+        (matched by check name or command text), so a re-verify can run one
+        command.  A fingerprint that already reached a terminal verdict is
+        returned cached and the commands are not re-run (DEC-3).
+
+        ``checks`` passes a caller's :class:`~sliceme.verifier.CheckSpec` vector
+        (for example the plane's ``checks_from_config``) instead of deriving
+        names, ``required``, and ``timeout`` from bare command strings.  The
+        specs are persisted on the job so the drain honors the caller's checks,
+        not a default.
+
+        Returns ``{"jobs": [<row>, ...], "job": <first row>, "cached": bool}``.
+        ``cached`` is true only when every requested commit was served from the
+        cache; a single commit still reads as ``result["job"]``.
         """
         if not source:
             raise SlicemeError("exec submit requires --source (e.g. node:w1, wave:0)")
-        if not commit:
+        refs = _commit_refs(commit, commits)
+        if not refs:
             raise SlicemeError("exec submit requires --commit")
-        if not commands:
+        if checks is None and not commands:
             raise SlicemeError("exec submit requires at least one --command")
 
         profile = self.require_sandbox(gpu_required=(gpu != "none"), override=sandbox)
-        commit_sha = gitutil.rev_parse(self.root, commit)
-        checks = acceptance_checks(list(commands), timeout=int(timeout))
-        fingerprint = compute_fingerprint(
-            self.root,
-            self.config,
-            commit_sha,
-            checks=checks,
-            source=source,
-            sandbox_digest=profile.digest(),
-            executor_digest=EXECUTOR_VERSION,
+        resolved = (
+            list(checks)
+            if checks is not None
+            else acceptance_checks(list(commands or []), timeout=int(timeout))
         )
+        selected = select_checks(resolved, only)
+        if not selected:
+            raise SlicemeError(
+                "exec submit --only matched no command: " + ", ".join(map(str, only or []))
+            )
+        command_vector = [c.command for c in selected]
+        check_specs = [
+            {
+                "name": c.name,
+                "command": c.command,
+                "required": c.required,
+                "timeout": c.timeout,
+            }
+            for c in selected
+        ]
 
-        cached = self.store.find_passed_job(fingerprint.fingerprint)
-        if cached is not None:
-            return {"job": cached, "cached": True}
+        jobs: list[dict[str, Any]] = []
+        cached = True
+        for ref in refs:
+            commit_sha = gitutil.rev_parse(self.root, ref)
+            fingerprint = compute_fingerprint(
+                self.root,
+                self.config,
+                commit_sha,
+                checks=selected,
+                source=source,
+                sandbox_digest=profile.digest(),
+                executor_digest=EXECUTOR_VERSION,
+            )
+            hit = self._cached_job(fingerprint.fingerprint)
+            if hit is not None:
+                jobs.append(hit)
+                continue
+            cached = False
+            job_id = self.store.create_job(
+                wave=wave,
+                campaign=self.campaign,
+                requester=requester,
+                source=source,
+                commit_ref=commit_sha,
+                tree=gitutil.tree_of(self.root, commit_sha),
+                commands=list(command_vector),
+                checks=check_specs,
+                sandbox=profile.to_dict(),
+                sandbox_digest=profile.digest(),
+                gpu=gpu,
+                priority=int(priority),
+                fingerprint=fingerprint.fingerprint,
+                timeout=int(timeout),
+            )
+            jobs.append(self.store.get_job(job_id))
+        return {"jobs": jobs, "job": jobs[0], "cached": cached}
 
-        job_id = self.store.create_job(
-            wave=wave,
-            campaign=self.campaign,
-            requester=requester,
-            source=source,
-            commit_ref=commit_sha,
-            tree=gitutil.tree_of(self.root, commit_sha),
-            commands=list(commands),
-            sandbox=profile.to_dict(),
-            sandbox_digest=profile.digest(),
-            gpu=gpu,
-            priority=int(priority),
-            fingerprint=fingerprint.fingerprint,
-            timeout=int(timeout),
-        )
-        return {"job": self.store.get_job(job_id), "cached": False}
+    def _cached_job(self, fingerprint: str) -> dict[str, Any] | None:
+        """The newest cached terminal job for *fingerprint*, for dedupe (DEC-3)."""
+        placeholders = ",".join("?" for _ in CACHEABLE)
+        row = self.store.conn.execute(
+            f"SELECT * FROM jobs WHERE fingerprint=? AND status IN ({placeholders})"
+            " ORDER BY id DESC LIMIT 1",
+            (fingerprint, *CACHEABLE),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def run_job(self, job: dict[str, Any]) -> dict[str, Any]:
         """Run one claimed job in the resolved sandbox and record the result."""
@@ -165,13 +235,18 @@ class Executor:
             job_id, status="running", started_at=now(), runner_pid=os.getpid()
         )
         commands = json.loads(job["commands"])
+        stored = json.loads(job["checks"]) if job.get("checks") else None
         profile = (
             coerce_sandbox(json.loads(job["sandbox"]))
             if job.get("sandbox")
             else self.sandbox()
         )
         try:
-            checks = acceptance_checks(commands, timeout=int(job.get("timeout") or 3600))
+            checks = (
+                [CheckSpec.from_config(item) for item in stored]
+                if stored
+                else acceptance_checks(commands, timeout=int(job.get("timeout") or 3600))
+            )
             status, results, duration = run_checks(
                 self.root,
                 self.config,
@@ -187,6 +262,7 @@ class Executor:
                 duration=duration,
                 exit_code=_exit_code(results),
                 output=_format_checks(results),
+                results=json.dumps([result.to_dict() for result in results]),
                 error=None,
             )
         except Exception as exc:  # noqa: BLE001 - surface any failure as a job error
@@ -260,6 +336,23 @@ class Executor:
         }
 
 
+def _commit_refs(
+    commit: str | list[str] | None, commits: list[str] | None
+) -> list[str]:
+    """Normalize the commit batch, dropping blanks and duplicates in order."""
+    raw: list[Any] = list(commits or [])
+    if isinstance(commit, str):
+        raw.append(commit)
+    elif commit:
+        raw.extend(commit)
+    refs: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in refs:
+            refs.append(text)
+    return refs
+
+
 def _exit_code(results: list[Any]) -> int:
     for result in results:
         if result.returncode:
@@ -276,4 +369,10 @@ def _format_checks(results: list[Any]) -> str:
     return "\n".join(lines) or "(no checks run)"
 
 
-__all__ = ["DEFAULT_LEASE_SECONDS", "EXECUTOR_VERSION", "TERMINAL", "Executor"]
+__all__ = [
+    "CACHEABLE",
+    "DEFAULT_LEASE_SECONDS",
+    "EXECUTOR_VERSION",
+    "TERMINAL",
+    "Executor",
+]

@@ -1,8 +1,9 @@
 """Executor queue, sandboxed runs, and fingerprint invalidation.
 
 Phase 1 pins the engine-side executor: one serialized runner, a sandbox
-profile folded into the fingerprint, dedupe of passing jobs, cancellation, and
-crash-lease recovery.
+profile folded into the fingerprint, dedupe of terminal jobs, a commit batch,
+an ``only`` command filter, cancellation, and crash-lease recovery.  Phase 3
+adds that delivery's trusted checks run as executor jobs.
 """
 
 import json
@@ -12,7 +13,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from sliceme import campaign, integrate
 from sliceme.sandbox import (
     Sandbox,
     backend_available,
@@ -21,7 +24,7 @@ from sliceme.sandbox import (
     wrap_command,
 )
 from sliceme.service import Service
-from sliceme.util import SlicemeError
+from sliceme.util import SlicemeError, write_json
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN = REPO_ROOT / "bin" / "sliceme"
@@ -145,6 +148,102 @@ class QueueTests(ExecutorCase):
             self.executor.submit(source="node:w1", commit="HEAD", commands=[])
 
 
+class BatchAndCacheTests(ExecutorCase):
+    def add_commit(self, name):
+        (self.root / name).write_text(name + "\n")
+        run("git", "add", "-A", cwd=self.root)
+        run("git", "commit", "-qm", name, cwd=self.root)
+        return run("git", "rev-parse", "HEAD", cwd=self.root).stdout.strip()
+
+    def test_a_batch_of_commits_is_verified_by_one_drain(self):
+        first = run("git", "rev-parse", "HEAD", cwd=self.root).stdout.strip()
+        second = self.add_commit("second.txt")
+        result = self.executor.submit(
+            source="wave:0", commits=[first, second], commands=["true"]
+        )
+        self.assertFalse(result["cached"])
+        self.assertEqual(len(result["jobs"]), 2)
+        self.assertEqual([job["status"] for job in result["jobs"]], ["queued", "queued"])
+
+        # One drain verifies the whole batch.
+        done = self.executor.drain()
+        self.assertEqual(len(done), 2)
+        self.assertTrue(all(job["status"] == "passed" for job in done))
+        self.assertEqual({job["commit_ref"] for job in done}, {first, second})
+
+    def test_a_batch_may_be_passed_as_the_commit_argument(self):
+        first = run("git", "rev-parse", "HEAD", cwd=self.root).stdout.strip()
+        second = self.add_commit("second.txt")
+        result = self.executor.submit(
+            source="wave:0", commit=[first, second], commands=["true"]
+        )
+        self.assertEqual(len(result["jobs"]), 2)
+
+    def test_a_cached_batch_reports_cached(self):
+        first = run("git", "rev-parse", "HEAD", cwd=self.root).stdout.strip()
+        second = self.add_commit("second.txt")
+        jobs = self.executor.submit(
+            source="wave:0", commits=[first, second], commands=["true"]
+        )
+        self.executor.drain()
+        again = self.executor.submit(
+            source="wave:0", commits=[first, second], commands=["true"]
+        )
+        self.assertTrue(again["cached"])
+        self.assertEqual(
+            [job["id"] for job in again["jobs"]], [job["id"] for job in jobs["jobs"]]
+        )
+        self.assertEqual(self.executor.drain(), [])
+
+    def test_a_terminal_failure_is_cached_not_rerun(self):
+        first = self.executor.submit(source="node:w1", commit="HEAD", commands=["false"])
+        done = self.executor.drain()
+        self.assertEqual(done[0]["status"], "failed")
+
+        # DEC-3: a failed job stands as a verdict and is not re-run.
+        again = self.executor.submit(source="node:w1", commit="HEAD", commands=["false"])
+        self.assertTrue(again["cached"])
+        self.assertEqual(again["job"]["id"], first["job"]["id"])
+        self.assertEqual(again["job"]["status"], "failed")
+        self.assertEqual(self.executor.drain(), [])
+
+    def test_only_filter_runs_one_command(self):
+        full = self.executor.submit(
+            source="node:w1", commit="HEAD", commands=["true", "false"]
+        )
+        one = self.executor.submit(
+            source="node:w1", commit="HEAD", commands=["true", "false"], only=["false"]
+        )
+        self.assertEqual(json.loads(one["job"]["commands"]), ["false"])
+        self.assertNotEqual(full["job"]["fingerprint"], one["job"]["fingerprint"])
+
+        self.executor.cancel(full["job"]["id"])
+        done = self.executor.drain()
+        self.assertEqual([job["status"] for job in done], ["failed"])
+
+    def test_only_that_matches_no_command_is_rejected(self):
+        with self.assertRaises(SlicemeError):
+            self.executor.submit(
+                source="node:w1", commit="HEAD", commands=["true"], only=["absent"]
+            )
+
+    def test_a_check_spec_vector_is_persisted_and_honored(self):
+        from sliceme.verifier import CheckSpec
+
+        advisory = [CheckSpec(name="lint", command="false", required=False)]
+        result = self.executor.submit(
+            source="deliver", commit="HEAD", checks=advisory
+        )
+        stored = json.loads(result["job"]["checks"])
+        self.assertEqual(stored[0]["required"], False)
+        done = self.executor.drain()
+        # An advisory failure is not a job failure.
+        self.assertEqual(done[0]["status"], "passed")
+        results = json.loads(done[0]["results"])
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertFalse(results[0]["required"])
+
+
 class SandboxTests(unittest.TestCase):
     def test_default_is_unsandboxed_and_wraps_unchanged(self):
         self.assertEqual(wrap_command("echo hi", Sandbox()), "echo hi")
@@ -191,6 +290,103 @@ class FingerprintSandboxTests(ExecutorCase):
         )["job"]
         self.assertNotEqual(plain["fingerprint"], strict["fingerprint"])
         self.assertNotEqual(plain["sandbox_digest"], strict["sandbox_digest"])
+
+
+class DeliveryCase(unittest.TestCase):
+    """Shared fixture for delivery: the trusted checks run as executor jobs."""
+
+    checks = [{"name": "ok", "command": "true", "required": True}]
+    nodes = [{"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]}]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        run("git", "init", "-q", "-b", "main", cwd=self.root)
+        run("git", "config", "user.email", "t@example.com", cwd=self.root)
+        run("git", "config", "user.name", "Tester", cwd=self.root)
+        (self.root / "src" / "a").mkdir(parents=True)
+        (self.root / "src" / "a" / "x.py").write_text("a = 1\n")
+        run("git", "add", "-A", cwd=self.root)
+        run("git", "commit", "-qm", "initial", cwd=self.root)
+        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
+        Service.init_plane(self.root, base="feat/x", checks=self.checks)
+        self.svc = Service(self.root)
+        write_json(
+            campaign.dag_path(self.root, "feat/x"),
+            {
+                "campaign": "deliver",
+                "feature_branch": "feat/x",
+                "base": "feat/x",
+                "nodes": self.nodes,
+            },
+        )
+
+    def tearDown(self):
+        self.svc.close()
+        self.tmp.cleanup()
+
+
+class DeliveryRoutingTests(DeliveryCase):
+    def test_delivery_runs_its_checks_as_an_executor_job(self):
+        unit = self.svc.create_wave_workspace(0, base="feat/x")
+        (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
+        self.svc.record_wave(0, messages={"w1": "change"})
+        self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        created = {"url": "https://example.test/pull/1", "number": 1}
+        with mock.patch.object(integrate.pullrequest, "require"), mock.patch.object(
+            integrate.pullrequest, "find", return_value=None
+        ), mock.patch.object(
+            integrate.pullrequest, "create", return_value=created
+        ), mock.patch.object(
+            integrate.gitutil, "push"
+        ):
+            results = integrate.deliver_pull_request(
+                self.svc.store,
+                self.root,
+                self.svc.config,
+                campaign=self.svc.campaign_key(),
+            )
+        self.assertEqual([result.status for result in results], ["landed"])
+        self.assertEqual(
+            [check.status for check in results[0].checks], ["passed"]
+        )
+        self.assertEqual([check.required for check in results[0].checks], [True])
+        self.assertEqual(
+            [check["status"] for check in results[0].to_dict()["checks"]], ["passed"]
+        )
+        jobs = self.svc.store.list_jobs(statuses=["passed"])
+        self.assertEqual([job["source"] for job in jobs], ["deliver"])
+        self.assertIn("[passed] ok: true", jobs[0]["output"])
+
+
+class AdvisoryDeliveryTests(DeliveryCase):
+    """A delivery check with ``required: false`` stays advisory."""
+
+    checks = [{"name": "lint", "command": "false", "required": False}]
+
+    def test_a_failing_advisory_check_does_not_block_delivery(self):
+        unit = self.svc.create_wave_workspace(0, base="feat/x")
+        (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
+        self.svc.record_wave(0, messages={"w1": "change"})
+        self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        created = {"url": "https://example.test/pull/1", "number": 1}
+        with mock.patch.object(integrate.pullrequest, "require"), mock.patch.object(
+            integrate.pullrequest, "find", return_value=None
+        ), mock.patch.object(
+            integrate.pullrequest, "create", return_value=created
+        ), mock.patch.object(
+            integrate.gitutil, "push"
+        ):
+            results = integrate.deliver_pull_request(
+                self.svc.store,
+                self.root,
+                self.svc.config,
+                campaign=self.svc.campaign_key(),
+            )
+        # The plane's `required: false` is honored through the executor job.
+        self.assertEqual([result.status for result in results], ["landed"])
+        self.assertEqual([check.status for check in results[0].checks], ["failed"])
+        self.assertFalse(results[0].checks[0].required)
 
 
 class CliExecTests(ExecutorCase):

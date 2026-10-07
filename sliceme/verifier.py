@@ -144,6 +144,27 @@ def acceptance_checks(acceptance: list[str], *, timeout: int = 3600) -> list[Che
     ]
 
 
+def select_checks(
+    checks: list[CheckSpec], only: list[str] | None
+) -> list[CheckSpec]:
+    """Keep the checks whose name or command text is named in *only*.
+
+    ``only=None`` (or an empty list) keeps every check.  Matching is
+    case-insensitive against both the check name and the command text, so a
+    caller may pass a configured ``NAME`` or the acceptance command itself.
+    This is the single ``only`` filter (see ``Executor.submit``): it lets a
+    re-verify run just one command.
+    """
+    if not only:
+        return list(checks)
+    wanted = {str(item).casefold() for item in only}
+    return [
+        c
+        for c in checks
+        if c.name.casefold() in wanted or c.command.casefold() in wanted
+    ]
+
+
 def run_checks(
     root: Path,
     config: dict[str, Any],
@@ -156,10 +177,7 @@ def run_checks(
     tier: str = "none",
 ) -> tuple[str, list[CheckResult], float]:
     resolved = checks if checks is not None else checks_from_config(config)
-    if only:
-        wanted = {name.casefold() for name in only}
-        resolved = [c for c in resolved if c.name.casefold() in wanted]
-    checks = resolved
+    checks = select_checks(resolved, only)
     setup_specs = (
         [
             CheckSpec(name=f"setup[{i}]", command=cmd, required=True, timeout=900)

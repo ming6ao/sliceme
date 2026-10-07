@@ -15,13 +15,15 @@ plan.
   and `depends_on`, with `concurrency` (default 3) as the per-wave cap. You do
   not write waves. You write the directories and edges; the coordinator
   computes the waves from them.
-- `ready(n) := every d in n.depends_on is done`, and `n` is in the current wave.
-  `done` means verified **and recorded** onto the campaign worktree. Every wave
-  works in the same worktree, so a later wave already sees the files of the
-  previous wave without a merge or a rebase.
+- `ready(n) := every d in n.depends_on is done`. Readiness is the spawn gate; a
+  node starts once its dependencies are done, and the wave stays a display
+  hint. `done` means verified **and recorded** onto the campaign worktree.
+  Every wave works in the same worktree, so a later wave already sees the files
+  of the previous wave without a merge or a rebase.
 - **`owns` is a list of directories, never files or symbols.** For every path a
   node will add, modify, or delete, declare the *deepest directory that contains
-  it*.
+  it*. An empty or blank `owns` entry is an error. A node that changes no file
+  may omit `owns`, and an empty `owns` list stays valid.
   - A change to `src/api/routes.py` owns `dir:src/api`.
   - A change to `src/top.py` owns `dir:src`.
   - A repository-root file such as `Cargo.toml` owns `dir:.`. Ownership is a subtree: owning `dir:src` also serializes everything

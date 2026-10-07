@@ -177,8 +177,9 @@ add `unit_name`, `unit_branch`, `worktree`, and `unit_base_commit`),
 Indexes: `idx_jobs_status`, `idx_jobs_fingerprint`.
 
 Created by `Executor.submit` through `Store.create_job` after it resolves the
-sandbox and computes the fingerprint. `Store.find_passed_job` short-circuits a
-submit whose fingerprint already passed, so no new row appears on a cache hit.
+sandbox and computes the fingerprint. The executor's cache lookup short-circuits
+a submit whose fingerprint already reached a terminal verdict, so no new row
+appears on a cache hit.
 
 Updated by `Executor.run_job` (marks `running` with `started_at` and
 `runner_pid`, then terminal with `finished_at`, `duration`, `exit_code`,
@@ -226,7 +227,7 @@ Created by `Store.create_attempt` through `Service.begin_attempt` (the
 `attempt --begin` action). Finished by `Store.finish_attempt` through
 `Service.end_attempt` (`attempt --end`). Read by `Service.attempts`, the
 `Service.progress` projection, and the resume continuation prompt. The time
-split is the attempt wall clock minus `tool_seconds`, and the result is the
+split is the wall clock of the run minus `tool_seconds`, and the result is the
 thinking time (`docs/observability.md`).
 
 ### 5.5 `review_decisions`

@@ -142,7 +142,9 @@ const EXEC_KEYS = [
 	"job",
 	"source",
 	"commit",
+	"commits",
 	"command",
+	"only",
 	"sandbox",
 	"gpu",
 	"priority",
@@ -153,7 +155,7 @@ const EXEC_KEYS = [
 ] as const;
 
 /** Parameter names the `wave` action forwards to the engine verb. */
-const WAVE_KEYS = ["open", "record", "wave", "messages", "summary"] as const;
+const WAVE_KEYS = ["open", "record", "wave", "only", "messages", "summary"] as const;
 
 /** Parameter names the `progress` action forwards to the engine verb. */
 const PROGRESS_KEYS = ["node"] as const;
@@ -269,6 +271,45 @@ function readyNodes(dag: Dag, state: CampaignState): string[] {
 		const node = (dag.nodes ?? []).find((n) => n.id === id);
 		return (node?.depends_on ?? []).every((dep) => done.has(dep));
 	});
+}
+
+/**
+ * Canonical repo-relative directory: `dir:src/api/` -> `src/api`, `` -> `.`.
+ *
+ * Mirrors `sliceme.ownership.normalize_dir` so the coordinator's single-writer
+ * guard agrees with the engine's wave packing.
+ */
+function normalizeDir(spec: string): string {
+	let text = String(spec ?? "").trim();
+	const colon = text.indexOf(":");
+	if (colon >= 0 && text.slice(0, colon).trim().toLowerCase() === "dir") {
+		text = text.slice(colon + 1);
+	}
+	const segments: string[] = [];
+	for (const part of text.replace(/\\/g, "/").split("/")) {
+		if (!part || part === ".") continue;
+		if (part === "..") segments.pop();
+		else segments.push(part);
+	}
+	return segments.join("/") || ".";
+}
+
+/**
+ * True when two owned directory sets overlap by subtree (equal, ancestor, or
+ * descendant).  Mirrors `sliceme.ownership.owns_conflict`: two nodes whose
+ * directories overlap must not run concurrently in the one shared campaign
+ * worktree.
+ */
+function ownsOverlap(a: string[], b: string[]): boolean {
+	const dirsA = new Set(a.map(normalizeDir));
+	const dirsB = new Set(b.map(normalizeDir));
+	for (const x of dirsA) {
+		for (const y of dirsB) {
+			if (x === y || x === "." || y === ".") return true;
+			if (x.startsWith(`${y}/`) || y.startsWith(`${x}/`)) return true;
+		}
+	}
+	return false;
 }
 
 /** Structural identity of the DAG inputs that determine wave packing. */
@@ -406,6 +447,27 @@ function workerDescription(output: string): string {
 	return (line ?? "").replace(/\s+/g, " ");
 }
 
+/**
+ * Per-node verdicts from one verifier report (one verify turn for a wave).
+ *
+ * The wave verifier is asked for one `NODE <id>: PASS|FAIL` line per node. A
+ * report with no such line (the single-node classic `VERDICT:` line) applies
+ * its PASS/FAIL to every requested node, so the old contract still works.
+ */
+function parseVerdicts(output: string, nodes: string[]): Record<string, boolean> {
+	const verdicts: Record<string, boolean> = {};
+	const line = /NODE\s+([A-Za-z0-9_.+-]+)\s*:\s*(PASS|FAIL)/gi;
+	let match: RegExpExecArray | null;
+	while ((match = line.exec(String(output ?? ""))) !== null) {
+		verdicts[match[1]] = match[2].toUpperCase() === "PASS";
+	}
+	if (!Object.keys(verdicts).length) {
+		const pass = /VERDICT:\s*PASS/i.test(String(output ?? ""));
+		for (const node of nodes) verdicts[node] = pass;
+	}
+	return verdicts;
+}
+
 /** The descriptions the coordinator captured for a set of nodes. */
 function nodeDescriptions(state: any, members: string[]): Record<string, string> {
 	const messages: Record<string, string> = {};
@@ -449,11 +511,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			pi.sendUserMessage(
 				`Start a Sliceme campaign for the design document "${design}". ` +
 					`Use the sliceme tool with action "start", then drive the campaign ` +
-					`without asking for permission: call "ready" and "spawn" every ready ` +
-					`node of wave 0, then record, verify, and continue through the waves. ` +
-					`Stop only at the human gates: the target-branch choice, an explicit ` +
-					`user suspension, a failed sandbox gate, and the final commit ` +
-					`review before delivery.`,
+					`without asking for permission: call "ready" and "spawn" (use "nodes") ` +
+					`for every ready node, then record, verify the wave in one turn, and ` +
+					`continue through the waves. Stop only at the human gates: the target-branch ` +
+					`choice, an explicit user suspension, a failed sandbox gate, and the final ` +
+					`commit review before delivery.`,
 			);
 		},
 	});
@@ -483,7 +545,16 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	const sliceme = (ctx: ExtensionContext, args: string[], signal?: AbortSignal) =>
 		runSliceme(pi, ctx, withCampaign(ctx, args), signal);
 
+	/**
+	 * The campaign's feature (target) branch.
+	 *
+	 * Read from the session pointer and the engine's config mirror first, so a
+	 * spawn/record/verify does not start a `status` subprocess just to learn the
+	 * branch. The engine is the fallback when neither local source is reachable.
+	 */
 	async function featureBranch(ctx: ExtensionContext): Promise<string> {
+		const local = activeCampaign(ctx.cwd);
+		if (local) return local;
 		const { json } = await sliceme(ctx, ["status"]);
 		const branch = json?.feature_branch ?? json?.main_branch;
 		if (!branch) throw new Error("sliceme: no feature branch; run `sliceme start` first");
@@ -1093,13 +1164,23 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			const resolves: AddressingResolve[] = [];
 			for (const { comment } of fresh) {
 				const id = Number(comment.id);
-				let resolved: any = { comment: id, node: null, reason: "general" };
-				try {
-					resolved =
-						(await sliceme(ctx, ["review", "--resolve", "--comment-id", String(id)], signal))
-							.json ?? resolved;
-				} catch {
-					/* routing failed: the addressing subagent records a reply row only */
+				// A comment that already names its node needs no `review --resolve`
+				// round-trip: the poll payload is the same answer the engine returns.
+				const explicit = (comment as any).node as string | undefined;
+				let resolved: any = explicit
+					? { comment: id, node: explicit, reason: "explicit" }
+					: { comment: id, node: null, reason: "general" };
+				if (!explicit) {
+					try {
+						resolved =
+							(await sliceme(
+								ctx,
+								["review", "--resolve", "--comment-id", String(id)],
+								signal,
+							)).json ?? resolved;
+					} catch {
+						/* routing failed: the addressing subagent records a reply row only */
+					}
 				}
 				resolves.push({
 					comment: id,
@@ -1617,17 +1698,31 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		return { name, mode: isNew ? "new" : "existing" };
 	}
 
+	/**
+	 * The opened campaign worktree per branch, so a wave opens it once and later
+	 * spawns reuse it instead of starting another `wave --open` subprocess.
+	 */
+	const campaignWorktrees = new Map<string, any>();
+
 	/** Ensure the single campaign worktree exists and return its details. */
 	async function ensureCampaignWorktree(
 		ctx: ExtensionContext,
 		signal?: AbortSignal,
 	): Promise<any> {
+		const branch = activeCampaign(ctx.cwd);
+		const cached = branch ? campaignWorktrees.get(branch) : undefined;
+		if (cached?.worktree && fs.existsSync(String(cached.worktree))) {
+			if (branch) deliveryBlocked.delete(branch);
+			return cached;
+		}
 		const opened = await sliceme(ctx, ["wave", "--open"], signal);
 		const unit = opened.json?.unit ?? {};
 		if (!unit.worktree) throw new Error("sliceme: could not create the campaign worktree");
 		// A re-opened worktree restores the source branch, so allow delivery again.
-		const branch = activeCampaign(ctx.cwd);
-		if (branch) deliveryBlocked.delete(branch);
+		if (branch) {
+			campaignWorktrees.set(branch, unit);
+			deliveryBlocked.delete(branch);
+		}
 		return unit;
 	}
 
@@ -1920,71 +2015,165 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		};
 	}
 
-	async function spawnNode(
+	/** One worker launch's shared wave context (resolved once per spawn call). */
+	interface SpawnContext {
+		branch: string;
+		dag: Dag;
+		state: any;
+		store: CampaignStateStore;
+		unit: any;
+		worktree: string;
+	}
+
+	/**
+	 * Spawn one or more ready nodes in one call.
+	 *
+	 * `--nodes` (or every ready node of the current wave when neither `--node`
+	 * nor `--nodes` is given) fans the workers out concurrently: the worktree is
+	 * opened once, the branch resolved once, and each worker runs as its own
+	 * subagent. Readiness is the gate (DEC-2); waves stay a display hint, so an
+	 * explicitly named later node may start once its dependencies are done.
+	 */
+	async function spawnNodes(
 		ctx: ExtensionContext,
 		params: any,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback,
 	): Promise<any> {
-		const node = String(params.node ?? "");
-		if (!node) throw new Error("spawn requires --node <id>");
-		const { json } = await sliceme(ctx, ["status"]);
-		const branch = String(json?.feature_branch ?? "main");
+		const branch = await featureBranch(ctx);
 		const store = stateStore(ctx, branch);
 		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
 		const state: any = store.read();
 		if (isPaused(ctx, branch)) return pausedResult("spawn");
-		const spec = (dag.nodes ?? []).find((n) => n.id === node);
-		if (!spec) throw new Error(`spawn: unknown node '${node}'`);
 		await ensureWaves(ctx, branch, dag, state);
 
+		const picked: string[] = Array.isArray(params.nodes) && params.nodes.length
+			? params.nodes.map((id: any) => String(id))
+			: params.node
+				? [String(params.node)]
+				: readyWaveNodes(dag, state);
+		const requested: string[] = [...new Set(picked)];
+		if (!requested.length) throw new Error("spawn: no ready node in the current wave");
+
+		const ready = new Set(readyNodes(dag, state));
 		const maxAttempts = Number(dag.max_attempts ?? 3);
-		const attempts = Number(state.nodes[node]?.attempts ?? 0);
-		if (attempts >= maxAttempts) {
-			state.nodes[node] = { ...(state.nodes[node] ?? {}), status: "failed" };
-			store.save();
-			throw new Error(`spawn: node '${node}' exceeded max_attempts=${maxAttempts}`);
+		const targets: CampaignNode[] = [];
+		for (const id of requested) {
+			const spec = (dag.nodes ?? []).find((n) => n.id === id);
+			if (!spec) throw new Error(`spawn: unknown node '${id}'`);
+			const attempts = Number(state.nodes[id]?.attempts ?? 0);
+			if (attempts >= maxAttempts) {
+				state.nodes[id] = { ...(state.nodes[id] ?? {}), status: "failed" };
+				store.save();
+				throw new Error(`spawn: node '${id}' exceeded max_attempts=${maxAttempts}`);
+			}
+			if (!ready.has(id)) {
+				const waiting = (spec.depends_on ?? []).filter(
+					(dep) => nodeStatus(state, dep) !== "done",
+				);
+				throw new Error(
+					`spawn: node '${id}' is not ready` +
+						(waiting.length ? ` (waiting on ${waiting.join(", ")})` : ""),
+				);
+			}
+			targets.push(spec);
 		}
 
-		// A node may only start in the current wave, and only once every
-		// dependency is integrated (done), not merely verified.
-		const wave = currentWave(state);
-		if (!wave || !wave.members.includes(node)) {
-			throw new Error(
-				`spawn: node '${node}' is scheduled in wave ${state.nodes[node]?.wave ?? "?"}; ` +
-					`current wave is ${wave?.index ?? "(none)"}`,
+		// One writer at a time: readiness is the spawn gate (DEC-2) and a named
+		// later node may start early, so enforce directory disjointness here rather
+		// than trusting wave membership.  Two concurrent workers that own the same
+		// directory (or one that a still-running node owns) would edit the one
+		// shared worktree and overwrite each other.
+		const running = (dag.nodes ?? []).filter(
+			(n) => nodeStatus(state, n.id) === "running",
+		);
+		for (let i = 0; i < targets.length; i += 1) {
+			for (let j = i + 1; j < targets.length; j += 1) {
+				if (ownsOverlap(targets[i].owns ?? [], targets[j].owns ?? [])) {
+					throw new Error(
+						`spawn: nodes '${targets[i].id}' and '${targets[j].id}' own overlapping ` +
+							`directories; keep one writer per directory`,
+					);
+				}
+			}
+			const clash = running.find((n) =>
+				ownsOverlap(targets[i].owns ?? [], n.owns ?? []),
 			);
-		}
-		if (!new Set(readyWaveNodes(dag, state)).has(node)) {
-			throw new Error(`spawn: node '${node}' is not ready in wave ${wave.index}`);
+			if (clash) {
+				throw new Error(
+					`spawn: node '${targets[i].id}' owns a directory that running node ` +
+						`'${clash.id}' owns; wait for it to finish`,
+				);
+			}
 		}
 
 		// Workers are pure editors in the one shared campaign worktree: they never
-		// create a unit and never run git.  A re-spawn re-runs the worker against
-		// the same worktree; the previous wave's files are already present.
-		const attempt = attempts + 1;
+		// create a unit and never run git.  Open the worktree once for the wave.
 		const unit = await ensureCampaignWorktree(ctx, signal);
 		const worktree = String(unit.worktree);
 		if (path.resolve(worktree) === path.resolve(ctx.cwd)) {
 			throw new Error("spawn: campaign worktree must differ from the coordinator checkout");
 		}
 
-		state.nodes[node] = {
-			...(state.nodes[node] ?? {}),
-			status: "running",
-			unit: String(unit.name ?? "campaign"),
-			worktree,
-			branch: String(unit.branch ?? state.worktree_branch ?? ""),
-		};
+		for (const spec of targets) {
+			const attempt = Number(state.nodes[spec.id]?.attempts ?? 0) + 1;
+			state.nodes[spec.id] = {
+				...(state.nodes[spec.id] ?? {}),
+				status: "running",
+				unit: String(unit.name ?? "campaign"),
+				worktree,
+				branch: String(unit.branch ?? state.worktree_branch ?? ""),
+			};
+			logEvent(ctx.cwd, branch, "node.spawn", { node: spec.id, unit: unit.name, attempt });
+		}
 		refreshWaves(state);
 		store.save();
-		logEvent(ctx.cwd, branch, "node.spawn", { node, unit: unit.name, attempt });
 		widget(ctx, dag, state);
 
-		const previousEvidence = state.nodes[node]?.lastError
-			? `\nA previous attempt failed with this verifier evidence:\n${state.nodes[node].lastError}`
+		const context: SpawnContext = { branch, dag, state, store, unit, worktree };
+		const results = await Promise.all(
+			targets.map((spec) => runWorker(ctx, context, spec, signal, onUpdate)),
+		);
+		if (results.some((result) => result.paused)) return pausedResult("spawn");
+		const failed = results.filter((result) => result.exitCode !== 0);
+		const summary = results
+			.map((result) => `worker ${result.node} exited ${result.exitCode}`)
+			.join("\n");
+		return {
+			content: [{ type: "text" as const, text: summary }],
+			details: {
+				nodes: results.map((result) => result.node),
+				unit: unit.name,
+				results: results.map((result) => ({
+					node: result.node,
+					exitCode: result.exitCode,
+					output: result.output,
+				})),
+			},
+			isError: failed.length > 0,
+		};
+	}
+
+	/** Run one worker against the shared wave context and fold its result in. */
+	async function runWorker(
+		ctx: ExtensionContext,
+		sc: SpawnContext,
+		spec: CampaignNode,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback,
+	): Promise<{ node: string; exitCode: number; output: string; paused: boolean }> {
+		const node = spec.id;
+		const attempt = Number(sc.state.nodes[node]?.attempts ?? 0) + 1;
+		const previousEvidence = sc.state.nodes[node]?.lastError
+			? `\nA previous attempt failed with this verifier evidence:\n${sc.state.nodes[node].lastError}`
 			: "";
-		const continuation = await continuationContext(ctx, branch, worktree, node, state);
+		const continuation = await continuationContext(
+			ctx,
+			sc.branch,
+			sc.worktree,
+			node,
+			sc.state,
+		);
 		const task =
 			`You are a one-shot worker for DAG node "${node}" (${spec.label ?? ""}). ` +
 			`Goal: ${spec.goal ?? ""}. You own these directories: ${(spec.owns ?? []).join(", ")}. ` +
@@ -1994,52 +2183,50 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			`node.` +
 			previousEvidence +
 			continuation;
-		const result = await runTracked(ctx, branch, {
+		const result = await runTracked(ctx, sc.branch, {
 			agent: "worker",
 			node,
-			unit: String(unit.name ?? "campaign"),
+			unit: String(sc.unit.name ?? "campaign"),
 			attempt,
 			task,
-			cwd: worktree,
-			log: logPath(ctx.cwd, branch, node),
+			cwd: sc.worktree,
+			log: logPath(ctx.cwd, sc.branch, node),
 			signal,
 			onUpdate,
 		});
-		if (result.interrupted || isPaused(ctx, branch)) {
+		if (result.interrupted || isPaused(ctx, sc.branch)) {
 			// A suspended worker keeps its edits in the shared campaign worktree; mark
 			// the node paused so resume continues it instead of respawning from scratch.
 			// Its attempt is not consumed: the next spawn reuses the same attempt number.
-			state.nodes[node].status = "paused";
-			refreshWaves(state);
-			store.save();
-			logEvent(ctx.cwd, branch, "node.suspended", {
+			sc.state.nodes[node].status = "paused";
+			refreshWaves(sc.state);
+			sc.store.save();
+			logEvent(ctx.cwd, sc.branch, "node.suspended", {
 				node,
 				attempt,
 				signal: result.signal ?? null,
 			});
-			widget(ctx, dag, state);
-			return pausedResult("spawn");
+			widget(ctx, sc.dag, sc.state);
+			return { node, exitCode: result.exitCode, output: result.output, paused: true };
 		}
-		state.nodes[node].status = result.exitCode === 0 ? "pending" : "failed";
-		state.nodes[node].attempts = attempt;
+		sc.state.nodes[node].status = result.exitCode === 0 ? "pending" : "failed";
+		sc.state.nodes[node].attempts = attempt;
 		if (result.exitCode === 0) {
 			const description = workerDescription(result.output);
-			if (description) state.nodes[node].description = description;
+			if (description) sc.state.nodes[node].description = description;
 		}
-		refreshWaves(state);
-		store.save();
-		widget(ctx, dag, state);
-		return {
-			content: [{ type: "text" as const, text: `worker ${node} exited ${result.exitCode}` }],
-			details: { node, unit: unit.name, exitCode: result.exitCode, output: result.output },
-			isError: result.exitCode !== 0,
-		};
+		refreshWaves(sc.state);
+		sc.store.save();
+		widget(ctx, sc.dag, sc.state);
+		return { node, exitCode: result.exitCode, output: result.output, paused: false };
 	}
 
 	/**
-	 * Record the current wave: commit each node's changed paths on the campaign
-	 * worktree, enforce ownership conformance, and register a candidates per node.
-	 * No feature-branch mutation happens here.
+	 * Record the current wave, one member at a time.
+	 *
+	 * Each member records with E2's per-node filter (`--only`), so a stray or
+	 * ambiguous path fails only the node it is attributed to and a path owned by
+	 * another node is ignored. No feature-branch mutation happens here.
 	 */
 	async function recordWave(
 		ctx: ExtensionContext,
@@ -2054,18 +2241,24 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		await ensureWaves(ctx, branch, dag, state);
 		const wave = currentWave(state);
 		if (!wave) throw new Error("record: no open wave to record");
-		const recordArgs = ["wave", "--record", "--wave", String(wave.index)];
 		const messages = nodeDescriptions(state, wave.members);
-		if (Object.keys(messages).length) {
-			recordArgs.push("--messages", JSON.stringify(messages));
-		}
-		const recorded = await sliceme(ctx, recordArgs, signal);
-		const candidates: any[] = recorded.json?.candidates ?? [];
-		const byNode = new Map<string, any>(
-			candidates.map((c: any) => [String(c.node), c]),
-		);
+		const candidates: any[] = [];
+		const failures: string[] = [];
 		for (const id of wave.members) {
-			const candidate = byNode.get(id);
+			const recordArgs = ["wave", "--record", "--wave", String(wave.index), "--only", id];
+			if (messages[id]) recordArgs.push("--messages", JSON.stringify({ [id]: messages[id] }));
+			let recorded: any;
+			try {
+				recorded = await sliceme(ctx, recordArgs, signal);
+			} catch (error) {
+				const message = String((error as Error)?.message ?? error);
+				failures.push(`${id}: ${message}`);
+				state.nodes[id] = { ...(state.nodes[id] ?? {}), status: "failed", lastError: message };
+				continue;
+			}
+			const created: any[] = recorded.json?.candidates ?? [];
+			candidates.push(...created);
+			const candidate = created.find((entry) => String(entry.node) === id);
 			if (!candidate) continue;
 			state.nodes[id] = {
 				...(state.nodes[id] ?? {}),
@@ -2083,125 +2276,200 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		logEvent(ctx.cwd, branch, "wave.recorded", {
 			wave: wave.index,
 			candidates: candidates.map((c: any) => ({ node: c.node, commit: c.head_commit })),
+			failed: failures,
 		});
 		const summary = candidates.length
 			? `wave ${wave.index} recorded: ${candidates.map((c: any) => c.node).join(", ")}`
 			: `wave ${wave.index} recorded no changes`;
+		const text = failures.length ? `${summary}\nfailed: ${failures.join("; ")}` : summary;
 		// Between waves, deliver any review comments the human wrote.
 		relaySafely(ctx, branch);
 		// The first recorded commit makes the review client available.
 		if (reviewNeeded(state)) void ensureReviewServer(ctx, branch);
-		return { content: [{ type: "text" as const, text: summary }], details: recorded.json ?? {} };
+		return {
+			content: [{ type: "text" as const, text }],
+			details: { wave: wave.index, candidates, failures },
+			isError: failures.length > 0,
+		};
 	}
 
-	async function verifyNode(
+	/**
+	 * Verify one or more recorded nodes in a single turn.
+	 *
+	 * Every node's acceptance vector is submitted to the single executor, one drain
+	 * runs the whole batch, and one verifier subagent judges the combined evidence
+	 * and returns a per-node verdict. `only` narrows the acceptance checks, so a
+	 * re-verify can run a single command.
+	 */
+	async function verifyNodes(
 		ctx: ExtensionContext,
 		params: any,
 		signal?: AbortSignal,
 	): Promise<any> {
-		const node = String(params.node ?? "");
-		if (!node) throw new Error("verify requires --node <id>");
 		const branch = await featureBranch(ctx);
 		if (isPaused(ctx, branch)) return pausedResult("verify");
 		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
 		const store = stateStore(ctx, branch);
 		const state: any = store.read();
-		const spec = (dag.nodes ?? []).find((n) => n.id === node);
-		if (!spec) throw new Error(`verify: unknown node '${node}'`);
-		const commit = String(
-			state.nodes[node]?.commit ?? state.nodes[node]?.branch ?? "",
-		);
-		if (!commit) {
-			throw new Error(`verify: node '${node}' has no recorded commit; run record first`);
+
+		const picked: string[] = Array.isArray(params.nodes) && params.nodes.length
+			? params.nodes.map((id: any) => String(id))
+			: params.node
+				? [String(params.node)]
+				: (currentWave(state)?.members ?? []).filter(
+						(id) =>
+							Boolean(state.nodes[id]?.commit) && nodeStatus(state, id) !== "done",
+					);
+		const requested: string[] = [...new Set(picked)];
+		if (!requested.length) throw new Error("verify: no recorded node in the current wave");
+		const only: string[] = Array.isArray(params.only)
+			? params.only.map((check: any) => String(check))
+			: [];
+
+		const specs: CampaignNode[] = [];
+		for (const id of requested) {
+			const spec = (dag.nodes ?? []).find((n) => n.id === id);
+			if (!spec) throw new Error(`verify: unknown node '${id}'`);
+			if (!state.nodes[id]?.commit) {
+				throw new Error(`verify: node '${id}' has no recorded commit; run record first`);
+			}
+			specs.push(spec);
 		}
 
-		// The executor is the single runner: enqueue the node's acceptance at its
-		// recorded commit, drain the queue, and wait for the result. The verifier
-		// then judges that evidence instead of running anything itself.
-		const submitArgs = [
-			"exec",
-			"--submit",
-			"--source",
-			`node:${node}`,
-			"--commit",
-			commit,
-			"--gpu",
-			spec.gpu ?? "none",
-		];
-		for (const cmd of spec.acceptance ?? []) submitArgs.push("--command", cmd);
-		const submitted = await sliceme(ctx, submitArgs, signal);
-		await sliceme(ctx, ["exec", "--run"], signal);
-		const job = (
-			await sliceme(
-				ctx,
-				["exec", "--wait", "--job", String(submitted.json?.job?.id), "--timeout", "3600"],
-				signal,
-			)
-		).json?.job;
-
-		const evidence =
-			`Executor status: ${job?.status ?? "unknown"}\n` +
-			`Executor fingerprint: ${job?.fingerprint ?? "-"}\n` +
-			`${job?.output ?? submitted.text}`;
-		const task =
-			`Independently verify DAG node "${node}" from the executor's recorded evidence ` +
-			`only. You are read-only: do not run commands and do not edit any file. Acceptance ` +
-			`vector: ${(spec.acceptance ?? []).join(" ; ")}. GPU tier: ${spec.gpu ?? "none"}.\n\n` +
-			`${evidence}\n\nReport a single line starting with "VERDICT: PASS" or ` +
-			`"VERDICT: FAIL", then your reasoning grounded in the evidence.`;
-		const result = await runTracked(ctx, branch, {
-			agent: "verifier",
-			node,
-			unit: `verify:${node}`,
-			attempt: Number(state.nodes[node]?.attempts ?? 1),
-			task,
-			cwd: ctx.cwd,
-			log: path.join(stateDir(ctx.cwd), `${branchKey(branch)}.worker_verify_${node}.log`),
-			signal,
+		// The executor is the single runner: enqueue every node's acceptance at its
+		// recorded commit, then drain the whole batch once.  A submit whose
+		// fingerprint already reached a terminal verdict comes back cached with no
+		// queued work (DEC-3).
+		const submitted: Array<{ spec: CampaignNode; job: any; cached: boolean }> = [];
+		for (const spec of specs) {
+			const submitArgs = [
+				"exec",
+				"--submit",
+				"--source",
+				`node:${spec.id}`,
+				"--commit",
+				String(state.nodes[spec.id]?.commit),
+				"--gpu",
+				spec.gpu ?? "none",
+			];
+			for (const cmd of spec.acceptance ?? []) submitArgs.push("--command", cmd);
+			for (const check of only) submitArgs.push("--only", check);
+			const reply = await sliceme(ctx, submitArgs, signal);
+			submitted.push({
+				spec,
+				job: reply.json?.job,
+				cached: Boolean(reply.json?.cached),
+			});
+		}
+		// Drain only when a submit queued work; a cached submit already returned a
+		// terminal job, so there is nothing to run.
+		let drainedById = new Map<string, any>();
+		if (submitted.some(({ cached }) => !cached)) {
+			const drained = await sliceme(ctx, ["exec", "--run"], signal);
+			drainedById = new Map<string, any>(
+				(drained.json?.jobs ?? []).map((job: any) => [String(job.id), job]),
+			);
+		}
+		// A cached verdict and a failed job are already decided, so they skip the
+		// verifier (DEC-3); only a fresh pass needs an independent judgement.
+		const evidence = submitted.map(({ spec, job, cached }) => {
+			const current = drainedById.get(String(job?.id)) ?? job;
+			const decided =
+				cached || current?.status === "failed" || current?.status === "error";
+			return { spec, job: current, decided };
 		});
-		if (result.interrupted || isPaused(ctx, branch)) {
-			// Suspended mid-verification: leave the node `recorded` (state is untouched)
-			// so resume re-verifies the same candidate instead of failing the node.
-			return pausedResult("verify");
+		const toVerify = evidence.filter((entry) => !entry.decided);
+
+		const ids = evidence.map(({ spec }) => spec.id);
+		let verifierOutput = "";
+		const verdicts: Record<string, boolean> = {};
+		if (toVerify.length) {
+			const described = toVerify
+				.map(
+					({ spec, job }) =>
+						`Node "${spec.id}" (${spec.label ?? ""}) — goal: ${spec.goal ?? ""}.\n` +
+						`Acceptance vector: ${(spec.acceptance ?? []).join(" ; ")}. ` +
+						`GPU tier: ${spec.gpu ?? "none"}.\n` +
+						`Executor status: ${job?.status ?? "unknown"}\n` +
+						`Executor fingerprint: ${job?.fingerprint ?? "-"}\n` +
+						`${job?.output ?? "(no executor output)"}`,
+				)
+				.join("\n\n---\n\n");
+			const task =
+				`Independently verify each DAG node below from the executor's recorded ` +
+				`evidence only. You are read-only: do not run commands and do not edit any ` +
+				`file. A green command is necessary, not enough: judge whether the evidence ` +
+				`actually shows each node's acceptance.\n\n${described}\n\n` +
+				`Report one line per node in the form "NODE <id>: PASS" or "NODE <id>: FAIL", ` +
+				`then your reasoning grounded in the evidence.`;
+			const verifyIds = toVerify.map(({ spec }) => spec.id);
+			const result = await runTracked(ctx, branch, {
+				agent: "verifier",
+				node: verifyIds.join(","),
+				unit: `verify:${verifyIds.join(",")}`,
+				attempt: Number(state.nodes[verifyIds[0]]?.attempts ?? 1),
+				task,
+				cwd: ctx.cwd,
+				log: path.join(stateDir(ctx.cwd), `${branchKey(branch)}.worker_verify.log`),
+				signal,
+			});
+			if (result.interrupted || isPaused(ctx, branch)) {
+				// Suspended mid-verification: leave the nodes `recorded` (state is
+				// untouched) so resume re-verifies the same candidates.
+				return pausedResult("verify");
+			}
+			verifierOutput = result.output;
+			if (result.exitCode === 0) {
+				Object.assign(verdicts, parseVerdicts(result.output, verifyIds));
+			} else {
+				// A verifier failure is a failed judgement: no node can pass.
+				for (const { spec } of toVerify) verdicts[spec.id] = false;
+			}
 		}
 
-		const passed =
-			job?.status === "passed" &&
-			result.exitCode === 0 &&
-			/VERDICT:\s*PASS/i.test(result.output);
-		state.nodes[node] = {
-			...(state.nodes[node] ?? {}),
-			status: passed ? "done" : "failed",
-			verdict: passed ? "pass" : "fail",
-			job: job?.id ?? null,
-			...(passed ? {} : { lastError: result.output || job?.output }),
-		};
+		const verdictById: Record<string, boolean> = {};
+		const failed: string[] = [];
+		for (const { spec, job, decided } of evidence) {
+			const passed = decided
+				? job?.status === "passed"
+				: job?.status === "passed" && verdicts[spec.id] === true;
+			verdictById[spec.id] = passed;
+			state.nodes[spec.id] = {
+				...(state.nodes[spec.id] ?? {}),
+				status: passed ? "done" : "failed",
+				verdict: passed ? "pass" : "fail",
+				job: job?.id ?? null,
+				...(passed
+					? {}
+					: { lastError: decided ? job?.output : verifierOutput || job?.output }),
+			};
+			if (!passed) failed.push(spec.id);
+		}
 		const completed = refreshWaves(state);
 		store.save();
 		widget(ctx, dag, state);
 		logEvent(ctx.cwd, branch, "node.verdict", {
-			node,
-			passed,
-			gpu: spec.gpu ?? "none",
-			job: job?.id ?? null,
+			nodes: ids,
+			failed,
 			completed_waves: completed.map((w) => w.index),
 		});
 
-		// Nothing lands on the target per wave.  When every wave is done, try the
-		// delivery; the engine refuses until the human approves every commit.
+		// Nothing lands on the target per wave.  When every wave is done and every
+		// node passed, try the delivery; the engine refuses until the human approves.
 		let delivery: any = null;
-		if (passed && allWavesDone(state)) {
+		if (!failed.length && allWavesDone(state)) {
 			delivery = await tryDelivery(ctx, branch, state, signal);
 		}
+		const summary = ids.map((id) => `${id}: ${verdictById[id] ? "PASS" : "FAIL"}`).join("\n");
 		return {
 			content: [
 				{
 					type: "text" as const,
-					text: `${node}: ${passed ? "PASS" : "FAIL"} (job ${job?.id ?? "?"})\n${result.output}`,
+					text: verifierOutput ? `${summary}\n${verifierOutput}` : summary,
 				},
 			],
-			details: { node, passed, job: job?.id ?? null, executor: job, delivery: delivery?.json ?? null },
-			isError: !passed,
+			details: { nodes: ids, failed, verdicts: verdictById, delivery: delivery?.json ?? null },
+			isError: failed.length > 0,
 		};
 	}
 
@@ -2313,10 +2581,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		label: "Sliceme",
 		description:
 			"Coordinate a design into landed work: start (choose target branch + planner), " +
-			"status, ready, spawn (one-shot editor in the campaign worktree), record (commit the " +
-			"wave), verify (executor runs; verifier judges), deliver (merge to the target after " +
-			"approval), report, exec (sandbox gate, campaign worktree, check queue). The dag.json " +
-			"plan is the only schedule; waves are a projection of it.",
+			"status, ready, spawn (one call fans a wave out to one-shot editors in the campaign " +
+			"worktree), record (commit the wave), verify (executor runs; one verifier turn judges " +
+			"the wave), deliver (merge to the target after approval), report, exec (sandbox gate, " +
+			"campaign worktree, check queue). The dag.json plan is the only schedule; waves are a " +
+			"projection of it.",
 		promptSnippet: "Drive an Sliceme campaign (start → spawn → record → verify → deliver)",
 		promptGuidelines: [
 			"Drive the campaign continuously. After `start` returns the DAG, call `ready` and " +
@@ -2330,13 +2599,17 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"projection (owns + depends_on, capped by concurrency). Merge nodes that share an " +
 				"owned directory and sit on one dependency chain into a single node.",
 			"Workers are pure editors in the one shared campaign worktree: they never run git.",
-			"Spawn nodes only from the current wave; a later wave starts after the previous wave " +
-				"is fully recorded and verified. Never recreate the worktree or rebase between waves.",
-			"Spawn every ready node in the current wave together (issue the spawn calls in " +
-				"one turn so they run in parallel); never exceed the wave cap.",
+			"A node starts once every dependency is done (readiness is the gate); the wave is a " +
+				"display hint. Never recreate the worktree or rebase between waves.",
+			"Spawn a wave with one call: `spawn --nodes <id,id,...>` (or `spawn` for every ready " +
+				"node of the current wave) fans the workers out concurrently and opens the worktree " +
+				"once; never exceed the wave cap.",
 			"After all workers in the current wave finish editing, call `record` to commit the " +
 				"wave onto the campaign worktree (per-node commits, ownership conformance).",
 			"A node is ready only once every dependency is done, never merely verified.",
+			"Judge a wave with one `verify` turn: `verify --nodes <id,id,...>` (or `verify` for " +
+				"the current wave) submits every node's acceptance, drains the whole batch once, and " +
+				"runs a single verifier. Pass `--only <check>` to re-verify one command.",
 			"If a wave record is rejected for a path outside every node's owned dirs, widen that " +
 				"node's owns (or add a depends_on edge) in dag.json; the next status/ready/spawn replans.",
 			"Only the single executor runs checks (and only it may use the GPU); verifiers " +
@@ -2368,7 +2641,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				}),
 			),
 			replan: Type.Optional(Type.Boolean({ description: "start: re-run the planner" })),
-			node: Type.Optional(Type.String({ description: "node id for spawn/verify" })),
+			node: Type.Optional(Type.String({ description: "spawn/verify: a single node id" })),
+			nodes: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"spawn/verify: node ids; one call fans a wave out or judges it in one turn",
+				}),
+			),
 			narrative: Type.Optional(Type.String({ description: "report: what-changed/risks text" })),
 			validate: Type.Optional(
 				Type.Boolean({ description: "exec: validate the project sandbox gate" }),
@@ -2393,6 +2672,14 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			commit: Type.Optional(Type.String({ description: "exec: commit/ref to run at" })),
 			command: Type.Optional(
 				Type.Array(Type.String(), { description: "exec: check command (repeatable)" }),
+			),
+			commits: Type.Optional(
+				Type.Array(Type.String(), { description: "exec: commit refs to run as one batch" }),
+			),
+			only: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "exec/verify: keep only these checks (matched by name or command)",
+				}),
 			),
 			sandbox: Type.Optional(
 				StringEnum(["none", "bwrap", "unshare"] as const, {
@@ -2490,11 +2777,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					};
 				}
 				case "spawn":
-					return spawnNode(ctx, params, signal, onUpdate);
+					return spawnNodes(ctx, params, signal, onUpdate);
 				case "record":
 					return recordWave(ctx, params, signal);
 				case "verify":
-					return verifyNode(ctx, params, signal);
+					return verifyNodes(ctx, params, signal);
 				case "deliver":
 					return deliverCampaign(ctx, params, signal);
 				case "report": {

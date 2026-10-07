@@ -110,6 +110,8 @@ ACTIONS: tuple[Action, ...] = (
             Param("job", "string", "job id for --wait/--cancel"),
             Param("source", "string", "fingerprint source, e.g. node:w1 or wave:0"),
             Param("commit", "string", "commit/ref to run the checks at"),
+            Param("commits", "list", "submit: commit refs run as one batch (repeatable)", flag="commits"),
+            Param("only", "list", "submit: keep only these checks, matched by name or command", flag="only"),
             Param("command", "list", "check command (repeatable)", flag="command"),
             Param("sandbox", "string", "sandbox mode", choices=SANDBOX_MODES),
             Param("gpu", "string", "GPU tier reserved by the executor", choices=("none", "T1", "T2")),
@@ -128,6 +130,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("open", "boolean", "create or reuse the single campaign worktree"),
             Param("record", "boolean", "record a wave: conformance + per-node commits"),
             Param("wave", "int", "wave index to record"),
+            Param("only", "list", "record: scope to these nodes, one commit each (repeatable)", flag="only"),
             Param("messages", "string", "record: JSON object of node id to description"),
             Param("summary", "string", "record: candidate summary"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -387,10 +390,12 @@ def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
                 ) from None
         if messages is not None and not isinstance(messages, dict):
             raise SlicemeError("wave --record --messages must be a JSON object")
+        only = list(p.get("only") or []) or None
         # Serialize git mutation with the single executor's check runs.
         with service.executor().lock():
             return service.record_wave(
                 int(p["wave"]),
+                only=only,
                 messages=messages,
                 summary=p.get("summary"),
             )
@@ -419,7 +424,9 @@ def _dispatch_exec(service: "Service", p: dict[str, Any]) -> Any:
         result = executor.submit(
             source=p.get("source"),
             commit=p.get("commit"),
+            commits=list(p.get("commits") or []),
             commands=list(p.get("command") or []),
+            only=list(p.get("only") or []),
             sandbox=p.get("sandbox"),
             gpu=p.get("gpu") or "none",
             wave=p.get("wave"),
@@ -427,7 +434,7 @@ def _dispatch_exec(service: "Service", p: dict[str, Any]) -> Any:
             priority=int(p.get("priority") or 0),
             timeout=int(p.get("timeout") or 3600),
         )
-        return {"cached": result["cached"], "job": result["job"]}
+        return {"cached": result["cached"], "jobs": result["jobs"], "job": result["job"]}
     return executor.status()
 
 

@@ -9,6 +9,8 @@ decides ownership at plan time, so parallel agents never author the same files.
 
 - **Plan-time ownership** — nodes own directories; overlapping subtrees are
   serialized into waves.
+- **Readiness is the spawn gate** — a node starts once every dependency is
+  done; the wave stays a display hint.
 - **One campaign worktree** — every wave commits onto the same git worktree
   branch. Sliceme never recreates or rebases the branch between waves, and files
   persist.
@@ -41,9 +43,9 @@ the `sliceme` tool:
 sliceme start <DESIGN.md>   choose the target branch; planner -> dag.json + waves
 sliceme status              waves, nodes, and live child state
 sliceme ready               current-wave nodes whose dependencies are done
-sliceme spawn <node>        one-shot pure editor in the campaign worktree
+sliceme spawn --nodes <ids> start a wave: one-shot pure editors, one worktree
 sliceme record              commit the current wave onto the campaign worktree
-sliceme verify <node>       the executor runs checks; a read-only verifier judges
+sliceme verify --nodes <ids> one turn: the executor runs the wave; one verifier judges
 sliceme review --serve      local review client (per-commit approval)
 sliceme deliver             push the campaign branch and open a pull request
 sliceme report              deterministic report plus the narrative

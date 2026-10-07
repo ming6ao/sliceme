@@ -203,16 +203,16 @@ sequenceDiagram
   C->>P: start (planner subagent)
   P->>P: writes the campaign dag.json (Write tool)
   C->>E: status (normalizes the DAG, then projects dag_waves)
-  loop each ready node in the current wave
-    C->>W: spawn node (pure editor, campaign worktree)
+  loop each ready node (dependencies done)
+    C->>W: spawn a node or a wave of nodes (pure editor, campaign worktree)
     W->>G: edit owned dirs only
   end
   C->>E: wave --record --wave N (per-node commits, conformance)
-  C->>X: verify node (submit acceptance at the node commit, run, wait)
+  C->>X: verify wave (submit each acceptance, one drain, wait)
   X->>X: run sandboxed checks in scratch worktree
-  C->>V: verify against recorded evidence
-  V-->>C: VERDICT: PASS / FAIL
-  C->>C: mark node done (no merge); open wave N+1 in the same worktree
+  C->>V: verify the wave against the recorded evidence
+  V-->>C: NODE <id>: PASS / FAIL
+  C->>C: mark each node done (no merge); open the next wave in the same worktree
   U->>E: review --decision approve --commit SHA (per commit, any time)
   C->>E: report (deterministic skeleton + narrative)
   C->>E: deliver when every commit is approved (push + pull request into the target)
@@ -247,7 +247,7 @@ flowchart TD
 | Rule | Definition |
 |---|---|
 | `wave(n)` | `max(wave(d) + 1 for d in depends_on)`, then the earliest wave with room under `concurrency` and no directory-subtree conflict. |
-| `ready(n)` | Every dependency is `done` (verified **and** recorded) and `n` is in the current wave. |
+| `ready(n)` | Every dependency is `done` (verified **and** recorded). Readiness is the spawn gate; the wave is a display hint. |
 | `owns` conflict | Equal directories, or one an ancestor of the other. `dir:src/api` overlaps `dir:src` and `dir:src/api/v2`. |
 
 Every wave records onto the same campaign worktree. A later wave therefore sees
@@ -470,7 +470,7 @@ The suspend/resume descriptor is a file, not a table.
 ```mermaid
 stateDiagram-v2
   [*] --> pending
-  pending --> running: spawn (current wave, deps done)
+  pending --> running: spawn (deps done)
   running --> recorded: wave --record --wave N committed the node
   running --> failed: worker error or exit != 0
   running --> paused: suspend aborts the worker

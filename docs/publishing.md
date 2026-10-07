@@ -76,9 +76,9 @@ Then, inside the session:
 /sliceme DESIGN.md                # activate the tools and start a campaign
 sliceme start DESIGN.md           # choose target branch + run the planner
 sliceme ready                     # current-wave nodes whose deps are done
-sliceme spawn <node>              # one-shot pure editor in the campaign worktree
+sliceme spawn --nodes <ids>       # start a wave: one-shot pure editors, one worktree
 sliceme record                    # commit the current wave onto the campaign worktree
-sliceme verify <node>             # executor runs checks; a read-only verifier judges
+sliceme verify --nodes <ids>      # one turn: the executor runs the wave; one verifier judges
 sliceme deliver                   # after all waves: approve, then open the pull request
 sliceme review --report --narrative "..."  # deterministic report + your summary
 ```

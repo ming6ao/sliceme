@@ -74,7 +74,9 @@ Normalization:
 
 Sliceme rejects a non-directory spec (`file:`, `symbol:`, `api:`, `schema:`,
 `config:`, `migration:`, `infra:`, `test:`) when the coordinator projects the
-DAG. A plan that tries to own a single file fails loudly.
+DAG. It also rejects an empty or blank `owns` entry. A plan that tries to own a
+single file, or that leaves a blank entry, fails loudly. A node that changes no
+file may omit `owns`, and an empty `owns` list stays valid.
 
 ### The conflict rule
 
@@ -162,10 +164,12 @@ the rules
 ```text
 wave(n)  :=  max(wave(d) + 1 for d in n.depends_on), then the earliest wave with
              room (<= concurrency) and no directory-subtree conflict
-ready(n) :=  every d in n.depends_on is done AND n is in the current wave
+ready(n) :=  every d in n.depends_on is done
 ```
 
-are the whole executor. `done` means **verified and recorded** onto the
+are the whole executor. Readiness is the spawn gate: a node starts once every
+dependency is `done`, not at a fixed wave. The wave stays a display hint and
+caps how many nodes run at once. `done` means **verified and recorded** onto the
 campaign worktree. Every wave works in the same worktree, so a later wave
 already sees the files of the previous wave without a merge or a rebase. To
 batch the merge to the target branch until the end therefore does not weaken
@@ -229,16 +233,19 @@ review (approve every commit) ──► deliver ──► push campaign branch -
    The planner then writes `dag.json`, and the coordinator projects it into
    waves.
 2. **`ready`** returns the nodes of the current wave whose dependencies are all
-   `done`.
-3. **`spawn`** starts a node only in the current wave. It launches a one-shot
-   pure editor in the one shared campaign worktree. Sliceme reuses the
-   worktree, so it already contains every earlier wave's files.
+   `done`. Readiness is the gate, so the wave is a hint.
+3. **`spawn`** starts a ready node, and `spawn --nodes <ids>` starts a whole
+   wave in one call. It launches one-shot pure editors in the one shared
+   campaign worktree. Sliceme reuses the worktree, so it already contains every
+   earlier wave's files.
 4. **`record`** commits the current wave onto the campaign worktree, with one
    commit per node. Sliceme attributes the commit by owned directories. Nothing
    lands on the target.
-5. **`verify`** runs the read-only verifier on the recorded commit of the node.
-   The verifier submits the acceptance vector of the node to the executor (§6).
-   The coordinator marks the node `done` from the verdict.
+5. **`verify`** judges a recorded wave in one turn. The verifier submits the
+   acceptance vector of every node to the executor (§6), and one drain runs the
+   whole batch. One verifier then judges the combined evidence. A cached pass
+   and a failed job skip the verifier. The coordinator marks each node `done`
+   from the verdict.
 6. **`review`** (`--serve`) opens the local review client. Commits accumulate as
    waves land. The human approves individual commits or all commits at any
    time. The packet also shows the generated report.
@@ -317,8 +324,13 @@ Semantics:
 - **One runner.** `run` and `drain` hold an exclusive `flock` on
   `.sliceme/executor.lock`. No two check vectors run at the same time.
 - **Dedupe by fingerprint.** A submit whose `(tree, commands, toolchain,
-  policy, sandbox, source)` fingerprint already passed returns the cached job.
-  The executor does not run the commands again.
+  policy, sandbox, source)` fingerprint already reached a terminal verdict
+  (`passed`, `failed`, or `error`) returns the cached job. The executor does not
+  run the commands again.
+- **A batch, one drain.** A submit takes one commit or a batch of commits, so a
+  single `exec --run` verifies a whole wave.
+- **One command on demand.** A submit may pass `--only` to keep just the named
+  commands, so a re-verify can run one command.
 - **Sandboxed.** Each job carries a `sandbox` profile. The executor resolves the
   profile and wraps every command (see 6.2).
 - **Crash-safe.** A `running` job whose lease expired resets to `queued` before
@@ -398,6 +410,12 @@ changed path to exactly one same-wave node by `owns`. It rejects an unowned,
 ambiguous, or **cross-node rename** change. It then creates one commit and one
 prepared candidate per node on the campaign branch. The recorder diffs against
 the current `HEAD`, so it never re-attributes a change from an earlier wave.
+
+`record --only <node>` scopes the record to one node. It attributes every
+changed path across the whole DAG, ignores a path owned by another node, and
+fails only the recorded node. Each failure carries a reason code (`stray_path`,
+`ambiguous_path`, `cross_node_rename`, or `missing_description`), so a caller
+switches on the code and never parses the message.
 
 The recorder holds the executor lock, so it serializes recording with check
 runs. Sliceme reuses the worktree, so a later wave already sees every earlier

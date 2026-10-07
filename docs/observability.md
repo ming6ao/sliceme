@@ -51,7 +51,7 @@ A command groups by program name only: the first token, after a leading
 `cd <dir> &&` and any `NAME=value` assignments. For example,
 `tools/nanochat build //src:tokenizer` groups as `tools/nanochat`.
 
-The reducer caps the command map at 200 keys per attempt. The least costly keys
+The reducer caps the command map at 200 keys per run. The least costly keys
 merge into `(other)`.
 
 ### 2.3 Verifier and executor accounting

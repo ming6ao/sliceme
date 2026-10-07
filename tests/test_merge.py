@@ -3,7 +3,7 @@
 These pin the merge contract:
 * two nodes that own the same directory and sit on one ``depends_on`` edge
   become one node;
-* no edge, a different directory, or a different phase means no merge;
+* no edge or a different directory means no merge;
 * the survivor waits on the union of the external dependencies;
 * an absorbed id in another node's ``depends_on`` is rewritten;
 * the merge is deterministic and idempotent;
@@ -63,15 +63,16 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(ids(merged), ["a", "b"])
         self.assertEqual(mapping, {})
 
-    def test_different_phase_does_not_merge(self):
+    def test_a_different_phase_still_merges(self):
+        # ``phase`` is a display label only; it never gates a merge.
         merged, mapping = merge_same_own_nodes(
             [
                 node("a", ["dir:src/x"]),
                 node("b", ["dir:src/x"], ["a"], phase="P1"),
             ]
         )
-        self.assertEqual(ids(merged), ["a", "b"])
-        self.assertEqual(mapping, {})
+        self.assertEqual(ids(merged), ["a"])
+        self.assertEqual(mapping, {"b": "a"})
 
     def test_three_node_chain_merges_into_one(self):
         merged, mapping = merge_same_own_nodes(

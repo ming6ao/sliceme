@@ -60,15 +60,18 @@ def normalize_dir(path: str) -> str:
 def parse_owns(specs: list[str]) -> list[str]:
     """Parse an ``owns`` list into normalized directories.
 
-    Accepts ``dir:path`` and bare paths. A recognized non-directory kind raises
-    :class:`SlicemeError`.
+    Accepts ``dir:path`` and bare paths. An empty or whitespace-only entry and
+    a recognized non-directory kind each raise :class:`SlicemeError`. A missing
+    ``owns`` list stays valid (an empty list parses to ``[]``).
     """
     owns: list[str] = []
     seen: set[str] = set()
     for spec in specs:
         text = str(spec).strip()
         if not text:
-            continue
+            raise SlicemeError(
+                "owns entry is empty; declare the deepest directory the node touches"
+            )
         if ":" in text:
             prefix = text.split(":", 1)[0].strip().lower()
             if prefix in _NON_DIR_KINDS:
@@ -272,6 +275,46 @@ def plan_dag_waves(
 
 
 # ---------------------------------------------------------------------------
+# Per-node readiness: the spawn gate (DEC-2)
+# ---------------------------------------------------------------------------
+#: Node statuses that mean a node is underway or finished, so it is never
+#: "ready" to spawn again.
+_NOT_READY_STATUSES = frozenset({"done", "running"})
+
+
+def _status_of(state: dict[str, Any], node_id: str) -> str:
+    """Read one node's status from a campaign state mapping."""
+    entries = state.get("nodes") if isinstance(state, dict) else None
+    entry = entries.get(node_id) if isinstance(entries, dict) else None
+    if isinstance(entry, dict):
+        return str(entry.get("status") or "pending")
+    return "pending"
+
+
+def readiness(nodes: list[dict[str, Any]], state: dict[str, Any]) -> list[str]:
+    """Return the ids of the nodes ready to spawn, in DAG declaration order.
+
+    A node is ready when its own status is neither ``done`` nor ``running`` and
+    every id in its ``depends_on`` has status ``done``.  *state* is the campaign
+    state mapping ``{"nodes": {id: {"status": ...}}}`` that
+    :func:`sliceme.campaign.load_state` returns.  A dependency missing from
+    *state* counts as pending, so the dependent is simply not ready yet.
+
+    Readiness is the spawn gate (DEC-2).  Waves stay a display hint; a node
+    starts once its dependencies complete rather than at a fixed wave.
+    """
+    done = {_node_id(n) for n in nodes if _status_of(state, _node_id(n)) == "done"}
+    ready: list[str] = []
+    for node in nodes:
+        nid = _node_id(node)
+        if _status_of(state, nid) in _NOT_READY_STATUSES:
+            continue
+        if all(str(dep) in done for dep in (node.get("depends_on") or [])):
+            ready.append(nid)
+    return ready
+
+
+# ---------------------------------------------------------------------------
 # DAG normalization: contract same-ownership chains
 # ---------------------------------------------------------------------------
 #: GPU tiers, weakest to strongest. A merged node needs the strongest tier.
@@ -327,7 +370,8 @@ def merge_same_own_nodes(
     """Contract same-ownership nodes that share a dependency edge.
 
     Two nodes merge when a ``depends_on`` edge connects them, their owned
-    directories are equal, their phases match, and neither sets ``no_merge``.
+    directories are equal, and neither sets ``no_merge``. ``phase`` is a
+    display label only and never gates a merge.
     The lowest topological index survives.  Returns the merged nodes and a map
     from every absorbed id to its survivor.  The result is idempotent.
     """
@@ -347,8 +391,6 @@ def merge_same_own_nodes(
     def mergeable(a: str, b: str) -> bool:
         node_a, node_b = by_id[a], by_id[b]
         if node_a.get("no_merge") or node_b.get("no_merge"):
-            return False
-        if str(node_a.get("phase") or "") != str(node_b.get("phase") or ""):
             return False
         owns_a, owns_b = node_owns(node_a), node_owns(node_b)
         return bool(owns_a) and sorted(owns_a) == sorted(owns_b)
@@ -396,5 +438,6 @@ __all__ = [
     "parse_owns",
     "path_within_owns",
     "plan_dag_waves",
+    "readiness",
     "validate_dag",
 ]

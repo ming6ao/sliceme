@@ -226,6 +226,59 @@ class DagWaveStatusTests(CampaignCase):
         self.assertIn("cycle", status["dag_waves_error"])
 
 
+class ReadinessGateTests(CampaignCase):
+    def write_state(self, nodes, *, waves=None, current_wave=0):
+        write_json(
+            campaign.state_path(self.root, "feat/x"),
+            {
+                "campaign": "demo",
+                "feature_branch": "feat/x",
+                "waves": waves or [],
+                "current_wave": current_wave,
+                "nodes": nodes,
+            },
+        )
+
+    def test_status_ready_gates_on_dependencies(self):
+        self.campaign_plane()
+        self.dag(
+            [
+                {"id": "w1", "owns": ["dir:a"], "depends_on": []},
+                {"id": "w2", "owns": ["dir:b"], "depends_on": ["w1"]},
+                {"id": "w3", "owns": ["dir:c"], "depends_on": ["w1"]},
+            ]
+        )
+        # w1 is done, so its dependents are ready even though they share a wave
+        # index; the gate is readiness, not wave membership (DEC-2).
+        self.write_state({"w1": {"status": "done"}})
+        self.assertEqual(self.svc.ready_nodes(), ["w2", "w3"])
+        self.assertEqual(self.svc.status()["ready"], ["w2", "w3"])
+
+    def test_status_ready_excludes_done_running_and_blocked_nodes(self):
+        self.campaign_plane()
+        self.dag(
+            [
+                {"id": "w1", "owns": ["dir:a"], "depends_on": []},
+                {"id": "w2", "owns": ["dir:b"], "depends_on": ["w1"]},
+                {"id": "w3", "owns": ["dir:c"], "depends_on": []},
+            ]
+        )
+        self.write_state(
+            {
+                "w1": {"status": "running"},
+                "w2": {"status": "pending"},
+                "w3": {"status": "done"},
+            }
+        )
+        # w2 waits on w1; w1 is running and w3 is done, so nothing is ready.
+        self.assertEqual(self.svc.ready_nodes(), [])
+
+    def test_status_ready_needs_a_dag(self):
+        self.campaign_plane()
+        self.assertEqual(self.svc.ready_nodes(), [])
+        self.assertEqual(self.svc.status()["ready"], [])
+
+
 class DagStateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

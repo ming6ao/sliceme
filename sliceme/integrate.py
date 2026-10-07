@@ -27,6 +27,7 @@ once over the combined result.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ from . import campaign, gitutil, pullrequest
 from .ownership import DEFAULT_WAVE_SIZE, plan_dag_waves
 from .store import Store
 from .util import SlicemeError, scratch_dir
-from .verifier import CheckResult, run_checks
+from .verifier import CheckResult, checks_from_config, run_checks
 
 __all__ = [
     "LandResult",
@@ -169,6 +170,25 @@ def _conflict_detail(outcome: gitutil.MergeOutcome) -> str:
     return "merge conflict: " + last
 
 
+def _check_results(job: dict[str, Any]) -> list[CheckResult]:
+    """Rebuild the per-check evidence the executor persisted on *job*."""
+    raw = job.get("results")
+    if not raw:
+        return []
+    return [CheckResult(**item) for item in json.loads(raw)]
+
+
+def _delivery_executor(
+    store: Store, root: Path, config: dict[str, Any], campaign_key: str | None
+):
+    """The single executor, for the plane's trusted checks before a push."""
+    from .executor import Executor
+
+    branch = config.get("main_branch")
+    dag = campaign.load_dag(root, branch) if branch else None
+    return Executor(root, store, config, dag=dag, campaign=campaign_key)
+
+
 def deliver_pull_request(
     store: Store,
     root: Path,
@@ -218,17 +238,32 @@ def deliver_pull_request(
             )
         ]
 
+    # The trusted checks run through the single executor, not beside it: a
+    # submit whose fingerprint already reached a terminal verdict is honored
+    # as cached (DEC-3), and the single drain serializes the run.
     checks: list[CheckResult] = []
     if run_checks_flag:
-        status, checks, _duration = run_checks(root, config, source_head)
-        if status != "passed":
-            return [
-                LandResult(
-                    status="failed",
-                    detail="checks failed; pull request not opened",
-                    checks=checks,
-                )
-            ]
+        specs = checks_from_config(config)
+        if specs:
+            executor = _delivery_executor(store, root, config, campaign)
+            submitted = executor.submit(
+                source="deliver",
+                commit=source_head,
+                checks=specs,
+                priority=1,
+            )
+            if not submitted["cached"]:
+                executor.drain()
+            job = executor.wait(submitted["job"]["id"], timeout=3600.0)
+            checks = _check_results(job)
+            if job["status"] != "passed":
+                return [
+                    LandResult(
+                        status="failed",
+                        detail="checks failed; pull request not opened",
+                        checks=checks,
+                    )
+                ]
 
     remote = (config.get("policy") or {}).get("remote") or "origin"
     gitutil.push(root, remote, source)

@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   commit_ref TEXT NOT NULL,
   tree TEXT,
   commands TEXT NOT NULL,
+  checks TEXT,
   sandbox TEXT,
   sandbox_digest TEXT,
   gpu TEXT NOT NULL DEFAULT 'none',
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   duration REAL,
   exit_code INTEGER,
   output TEXT,
+  results TEXT,
   error TEXT,
   runner_pid INTEGER
 );
@@ -188,7 +190,14 @@ class Store:
         self._ensure_columns(
             "campaigns", {"pr_url": "TEXT", "pr_number": "INTEGER"}
         )
-        self._ensure_columns("jobs", {"timeout": "INTEGER NOT NULL DEFAULT 3600"})
+        self._ensure_columns(
+            "jobs",
+            {
+                "timeout": "INTEGER NOT NULL DEFAULT 3600",
+                "checks": "TEXT",
+                "results": "TEXT",
+            },
+        )
         self._ensure_columns("candidates", {"node": "TEXT"})
         self._ensure_columns("units", {"campaign": "TEXT"})
         self._ensure_columns("candidates", {"campaign": "TEXT"})
@@ -519,7 +528,9 @@ class Store:
             "commit_ref",
             "tree",
             "commands",
+            "checks",
             "sandbox",
+            "results",
             "sandbox_digest",
             "gpu",
             "priority",
@@ -543,6 +554,7 @@ class Store:
         source: str,
         commit_ref: str,
         commands: list[str],
+        checks: list[dict[str, Any]] | None = None,
         wave: int | None = None,
         campaign: str | None = None,
         requester: str | None = None,
@@ -558,8 +570,8 @@ class Store:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO jobs(wave, campaign, requester, source, commit_ref, tree,"
-                " commands, sandbox, sandbox_digest, gpu, priority, status, fingerprint,"
-                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " commands, checks, sandbox, sandbox_digest, gpu, priority, status, fingerprint,"
+                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     wave,
                     campaign,
@@ -568,6 +580,7 @@ class Store:
                     commit_ref,
                     tree,
                     json.dumps(commands),
+                    json.dumps(checks) if checks is not None else None,
                     json.dumps(sandbox) if sandbox is not None else None,
                     sandbox_digest,
                     gpu,

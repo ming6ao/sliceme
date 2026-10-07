@@ -21,6 +21,7 @@ from .ownership import (
     node_owns,
     path_within_owns,
     plan_dag_waves,
+    readiness,
     validate_dag,
 )
 from .store import Store
@@ -694,16 +695,28 @@ class Service:
         self,
         wave_index: int,
         *,
+        only: str | list[str] | None = None,
         messages: dict[str, str] | None = None,
         summary: str | None = None,
     ) -> dict[str, Any]:
         """Record a shared wave worktree: conformance, then per-node commits.
 
-        Every changed path is attributed to exactly one same-wave node by its
-        owned directories; each node gets one commit and a prepared candidate
-        on the shared wave branch.  The commit subject is the node's per-node
-        ``messages`` entry.  A node with changes and no description is an
-        error.
+        Without *only*, every changed path is attributed to exactly one
+        same-wave node by its owned directories; each node gets one commit and
+        a prepared candidate on the shared wave branch, and any violation is a
+        wave-wide error.  The commit subject is the node's per-node ``messages``
+        entry.
+
+        With *only* (one node id, or a list for a batch) the record is scoped to
+        those nodes: every changed path is attributed across the whole DAG and a
+        path owned by another node is ignored.  A path owned by no node
+        (``stray_path``) or by more than one (``ambiguous_path``) has no single
+        owner, so it is reported by the wave's first declared member; recording
+        any other member ignores it.  A cross-node rename fails only its source
+        node.  Every violation raises a :class:`SlicemeError` whose ``reason``
+        attribute is a machine-readable code (``stray_path``,
+        ``ambiguous_path``, ``cross_node_rename``, ``missing_description``);
+        callers switch on the code, never the text.
         """
         branch = self.config.get("main_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
@@ -721,13 +734,40 @@ class Service:
                 f"wave {wave_index} has no workspace; run `sliceme wave --open` first"
             )
         by_id = {str(node["id"]): node for node in dag["nodes"]}
-        members = [by_id[node_id] for node_id in wave.members if node_id in by_id]
+        if only is None:
+            members = [by_id[node_id] for node_id in wave.members if node_id in by_id]
+            return self._record_wave_commits(
+                unit,
+                int(wave_index),
+                members,
+                messages=messages,
+                summary=summary,
+            )
+        requested = [only] if isinstance(only, str) else list(only)
+        targets: list[str] = []
+        for item in requested:
+            node_id = str(item or "").strip()
+            if not node_id:
+                continue
+            if node_id not in by_id:
+                raise SlicemeError(f"record --only: unknown node '{node_id}'")
+            if node_id not in wave.members:
+                raise SlicemeError(
+                    f"record --only: node '{node_id}' is not in wave {wave_index}"
+                )
+            if node_id not in targets:
+                targets.append(node_id)
+        if not targets:
+            raise SlicemeError("record --only needs a node id")
+        members = [by_id[node_id] for node_id in targets]
         return self._record_wave_commits(
             unit,
             int(wave_index),
             members,
             messages=messages,
             summary=summary,
+            dag_nodes=list(dag["nodes"]),
+            wave_order=list(wave.members),
         )
 
     def _record_wave_commits(
@@ -738,6 +778,8 @@ class Service:
         *,
         messages: dict[str, str] | None,
         summary: str | None,
+        dag_nodes: list[dict[str, Any]] | None = None,
+        wave_order: list[str] | None = None,
     ) -> dict[str, Any]:
         worktree = Path(unit["worktree"])
         if not worktree.exists():
@@ -747,30 +789,78 @@ class Service:
         # wave's committed changes are not re-attributed to this wave.  The
         # campaign worktree accumulates commits across waves.
         entries = _changed_entries(worktree)
-        owners = {str(node["id"]): node_owns(node) for node in members}
-        assignment: dict[str, list[str]] = {node_id: [] for node_id in owners}
-        violations: list[str] = []
+        # ``dag_nodes`` turns on the scoped record: attribute every changed path
+        # across the whole DAG and fail only the recorded node.  Without it the
+        # attribution stays per wave member (today's wave-wide record).
+        targeted = dag_nodes is not None
+        owner_nodes = dag_nodes if targeted else members
+        owners = {str(node["id"]): node_owns(node) for node in owner_nodes}
+        assigned_to = {str(node["id"]) for node in members}
+        # A stray or ambiguous path belongs to no single node.  Attribute it to
+        # the wave's first declared member so exactly one scoped record reports
+        # it, instead of every member's record failing on the same path.
+        reporter = str((wave_order or [""])[0]) if targeted else None
+        assignment: dict[str, list[str]] = {node_id: [] for node_id in assigned_to}
+        violations: list[tuple[str, str]] = []
         for status, path, old in entries:
             new_owners = _owners_of(path, owners)
-            old_owners = _owners_of(old, owners) if old else new_owners
-            if (
-                len(new_owners) != 1
-                or len(old_owners) != 1
-                or new_owners[0] != old_owners[0]
-            ):
-                violations.append(_describe_violation(status, path, old, new_owners, old_owners))
+            old_owners = _owners_of(old, owners) if old else []
+            if len(new_owners) == 0:
+                if targeted and reporter not in assigned_to:
+                    continue
+                violations.append(
+                    ("stray_path", _describe_violation(status, path, old, new_owners, old_owners))
+                )
+                continue
+            if len(new_owners) > 1:
+                if targeted:
+                    responsible = next(
+                        (nid for nid in (wave_order or []) if nid in new_owners),
+                        reporter,
+                    )
+                    if responsible not in assigned_to:
+                        continue
+                violations.append(
+                    (
+                        "ambiguous_path",
+                        _describe_violation(status, path, old, new_owners, old_owners),
+                    )
+                )
                 continue
             node_id = new_owners[0]
-            assignment[node_id].append(path)
-            if old:
-                assignment[node_id].append(old)
+            if old and (len(old_owners) != 1 or old_owners[0] != node_id):
+                # A cross-node rename fails only its source node (the old
+                # owner).  A destination record ignores the rename.
+                source = old_owners[0] if len(old_owners) == 1 else None
+                if not targeted or (source is not None and source in assigned_to):
+                    violations.append(
+                        (
+                            "cross_node_rename",
+                            _describe_violation(status, path, old, new_owners, old_owners),
+                        )
+                    )
+                continue
+            if node_id in assignment:
+                assignment[node_id].append(path)
+                if old:
+                    assignment[node_id].append(old)
+            # A path owned by another DAG node is ignored for this record.
         if violations:
-            raise SlicemeError(
+            reason, detail = violations[0]
+            if targeted:
+                recorded = ", ".join(str(node["id"]) for node in members)
+                raise _record_error(
+                    reason, f"record --only={recorded}: {detail}"
+                )
+            raise _record_error(
+                reason,
                 "wave conformance failed; every changed path must map to exactly one "
-                "wave node's owned directories: " + "; ".join(violations[:10])
+                "wave node's owned directories: "
+                + "; ".join(detail for _, detail in violations[:10]),
             )
         messages = messages or {}
         created: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         for node in members:
             node_id = str(node["id"])
             paths = sorted(set(assignment.get(node_id) or []))
@@ -781,9 +871,10 @@ class Service:
             # invents one.
             description = _subject_line(messages.get(node_id))
             if not description:
-                raise SlicemeError(
+                raise _record_error(
+                    "missing_description",
                     f"wave --record: node '{node_id}' has no description; "
-                    f"pass --messages '{{\"{node_id}\": \"...\"}}'"
+                    f"pass --messages '{{\"{node_id}\": \"...\"}}'",
                 )
             result = gitutil.git(
                 worktree, "commit", "-m", description, "--", *paths, check=False
@@ -803,6 +894,9 @@ class Service:
                 campaign=self.campaign_key(),
             )
             created.append(self.store.get_candidate(cid))
+            results.append(
+                {"node": node_id, "reason": "ok", "paths": paths, "candidate": int(cid)}
+            )
         self.store.conn.commit()
         return {
             "wave": int(wave_index),
@@ -811,6 +905,8 @@ class Service:
             "worktree": str(worktree),
             "candidates": created,
             "changed": [path for _, path, _ in entries],
+            "reason": "ok",
+            "results": results,
         }
 
     def simulation(self, *, run_checks_flag: bool = True) -> dict[str, Any]:
@@ -821,6 +917,25 @@ class Service:
             campaign=self.campaign_key(),
             run_checks_flag=run_checks_flag,
         )
+
+    def ready_nodes(self) -> list[str]:
+        """The ids of the DAG nodes ready to spawn (readiness is the gate).
+
+        A node is ready when every ``depends_on`` dependency is ``done`` and the
+        node itself is neither ``done`` nor ``running``.  Waves stay a display
+        hint (DEC-2): the spawn gate is readiness, not wave membership.  A
+        missing DAG has no ready nodes; a malformed DAG reports none rather than
+        crashing a status read (the error stays visible in ``dag_waves_error``).
+        """
+        branch = self.config.get("target_branch") or self.config.get("main_branch")
+        dag = campaign.load_dag(self.root, branch) if branch else None
+        if not dag or not dag.get("nodes"):
+            return []
+        state = campaign.load_state(self.root, branch) if branch else {}
+        try:
+            return readiness(list(dag["nodes"]), state)
+        except SlicemeError:
+            return []
 
     def executor(self):
         """Build the single sandboxed verification executor for this plane."""
@@ -891,6 +1006,7 @@ class Service:
             "waves": [w.to_dict() for w in waves],
             "dag_waves": dag_waves,
             "dag_waves_error": dag_waves_error,
+            "ready": self.ready_nodes(),
             "dag_merge": dag_merge,
             "executor": self.store.job_counts(campaign=key),
             "sandbox": self.sandbox_info(),
@@ -1471,11 +1587,13 @@ class Service:
             addressed_at=now(),
             addressing_commit=addressing_commit,
         )
-        # A new addressing commit changes the reviewed diff, so the campaign
-        # approval is stale and the gate re-opens for the whole campaign.
-        decision = self.campaign_decision()
-        if self._is_approved(decision):
-            self.store.consume_review_decisions([int(decision["id"])])
+        # Only a reply that answers with code changes the reviewed diff, so only
+        # then is the campaign approval stale and the gate re-opened.  A
+        # reply-only turn keeps the reviewer's approval for the whole campaign.
+        if addressing_commit is not None:
+            decision = self.campaign_decision()
+            if self._is_approved(decision):
+                self.store.consume_review_decisions([int(decision["id"])])
         self.store.conn.commit()
         self._log_review_event(
             "addressed", {"comment": int(comment_id), "commit": addressing_commit}
@@ -1677,10 +1795,12 @@ class Service:
         ):
             return decision
         listing = ", ".join(commit[:7] for commit in commits)
-        raise SlicemeError(
+        error = SlicemeError(
             f"not-approved: {listing} not approved; open `sliceme review`"
             " and approve the campaign"
         )
+        error.reason = "not_approved"
+        raise error
 
     def consume_approvals(self, commits: list[str] | None = None) -> None:
         """Mark the latest campaign decision consumed after a landed delivery."""
@@ -1704,9 +1824,11 @@ class Service:
         """Refuse delivery while a delivered comment is not addressed."""
         ids = self.unaddressed_comments()
         if ids:
-            raise SlicemeError(
+            error = SlicemeError(
                 "unaddressed-comments: " + ",".join(str(item) for item in ids)
             )
+            error.reason = "unaddressed_comments"
+            raise error
 
     def _log_review_event(self, kind: str, data: dict[str, Any]) -> None:
         """Append one review audit line to ``.sliceme/<branch-key>.events.jsonl``."""
@@ -2065,6 +2187,17 @@ def _campaign_has_work(store: Store, root: Path, campaign_row: dict[str, Any]) -
 
 def _owners_of(path: str, owners: dict[str, list[str]]) -> list[str]:
     return [node_id for node_id, owns in owners.items() if path_within_owns(path, owns)]
+
+
+def _record_error(reason: str, message: str) -> SlicemeError:
+    """A record error carrying a machine-readable reason code.
+
+    The code is on both the ``reason`` attribute and at the head of the
+    message, so a caller can switch on the code and never parse the text.
+    """
+    error = SlicemeError(f"{reason}: {message}")
+    error.reason = reason
+    return error
 
 
 def _describe_violation(

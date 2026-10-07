@@ -279,6 +279,20 @@ class ApprovalTests(ReviewCase):
             self.svc.deliver()
         self.assertIn("not-approved", str(ctx.exception))
 
+    def test_delivery_gates_carry_reason_codes(self):
+        # The engine reports a machine-readable code per human gate so a caller
+        # never parses the error text.
+        self.record_wave0()
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.deliver()
+        self.assertEqual(ctx.exception.reason, "not_approved")
+        self.approve_all()
+        comment = self.svc.review_comment(body="please fix", file="src/a/x.py")
+        self.svc.review_ack(int(comment["id"]))
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.deliver()
+        self.assertEqual(ctx.exception.reason, "unaddressed_comments")
+
     def test_one_approval_covers_the_whole_campaign(self):
         self.record_wave0()
         commits = [c["hash"] for c in self.svc.review_snapshot()["commits"]]
@@ -332,6 +346,20 @@ class ApprovalTests(ReviewCase):
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
         self.assertIn("not-approved", str(ctx.exception))
+
+    def test_a_reply_only_turn_keeps_the_approval(self):
+        self.record_wave0()
+        self.approve_all()
+        comment = self.svc.review_comment(body="please explain", file="src/a/x.py")
+        self.svc.review_ack(int(comment["id"]))
+        # A reply-only turn answers in text and changes no commit.
+        self.svc.review_reply(parent_comment_id=int(comment["id"]), body="see the design")
+        self.svc.review_mark_addressed(int(comment["id"]))
+        # The reviewed diff did not change, so the approval still covers it.
+        self.assertTrue(self.svc.review_poll()["campaign_approved"])
+        self.assertEqual(self.svc.review_poll()["pending"], [])
+        delivered = self.svc.deliver()
+        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
 
     def test_request_changes_supersedes_an_approval(self):
         self.record_wave0()

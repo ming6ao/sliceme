@@ -270,6 +270,113 @@ class CliTests(unittest.TestCase):
             self.assertEqual(Path(report["path"]).name, "feat--x.report.md")
             self.assertIn("landed", report["content"])
 
+    def test_cli_exec_submit_batch_and_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "a.txt").write_text("hi\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+
+            def rev(ref):
+                return subprocess.run(
+                    ["git", "rev-parse", ref], cwd=tmp, capture_output=True, text=True, check=True
+                ).stdout.strip()
+
+            parent = rev("HEAD")
+            (root / "b.txt").write_text("b\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "second"], cwd=tmp, check=True)
+            head = rev("HEAD")
+            run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+
+            # One submit takes a batch of commits; one drain verifies them all.
+            out = run_cli(
+                [
+                    "--json", "exec", "--submit", "--source", "wave:0",
+                    "--commits", parent, "--commits", head, "--command", "true",
+                ],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(len(json.loads(out.stdout)["jobs"]), 2)
+
+            out = run_cli(["--json", "exec", "--run"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(json.loads(out.stdout)["executed"], 2)
+
+            # `--only` keeps just the named command, so a re-verify runs one check.
+            out = run_cli(
+                [
+                    "--json", "exec", "--submit", "--source", "node:w1",
+                    "--commit", head, "--command", "true", "--command", "false",
+                    "--only", "false",
+                ],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            job = json.loads(out.stdout)["job"]
+            self.assertEqual(json.loads(job["commands"]), ["false"])
+
+    def test_cli_wave_record_only_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
+            (root / "src" / "a").mkdir(parents=True)
+            (root / "src" / "b").mkdir(parents=True)
+            (root / "src" / "a" / "x.py").write_text("a = 1\n")
+            (root / "src" / "b" / "y.py").write_text("b = 1\n")
+            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
+            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
+            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            write_json(
+                campaign.dag_path(root, "feat/x"),
+                {
+                    "campaign": "cli",
+                    "feature_branch": "feat/x",
+                    "base": "main",
+                    "nodes": [
+                        {"id": "w1", "owns": ["dir:src/a"], "depends_on": []},
+                        {"id": "w2", "owns": ["dir:src/b"], "depends_on": []},
+                    ],
+                },
+            )
+            out = run_cli(["--json", "wave", "--open"], root)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            worktree = Path(json.loads(out.stdout)["unit"]["worktree"])
+            (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
+            (worktree / "src" / "b" / "y.py").write_text("b = 2\n")
+
+            # Each node records in its own scoped call: one stray path would fail
+            # only the node it is attributed to.
+            out = run_cli(
+                [
+                    "--json", "wave", "--record", "--wave", "0", "--only", "w1",
+                    "--messages", '{"w1": "change a"}',
+                ],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            first = json.loads(out.stdout)
+            self.assertEqual([c["node"] for c in first["candidates"]], ["w1"])
+            self.assertEqual(first["reason"], "ok")
+
+            out = run_cli(
+                [
+                    "--json", "wave", "--record", "--wave", "0", "--only", "w2",
+                    "--messages", '{"w2": "change b"}',
+                ],
+                root,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual([c["node"] for c in json.loads(out.stdout)["candidates"]], ["w2"])
+
     def test_cli_status_normalizes_same_ownership(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

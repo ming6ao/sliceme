@@ -31,9 +31,9 @@ COORDINATOR (this session)
 - The DAG is the **only authored schedule**. Sliceme computes waves as a
   deterministic projection of it: it packs nodes into waves by `owns`
   **directory-subtree overlap** and `depends_on`, capped by `concurrency`
-  (default 3). `ready(n) := every d in n.depends_on is done` **and** `n` is in
-  the current wave. `done` means verified **and recorded** onto the campaign
-  worktree.
+  (default 3). `ready(n) := every d in n.depends_on is done`. Readiness is the
+  spawn gate; the wave stays a display hint. `done` means verified **and
+  recorded** onto the campaign worktree.
 - The planner **merges same-ownership chains**. Sliceme normalizes the DAG
   automatically before every wave projection: when two nodes own the same
   directory set and one depends on the other, it contracts them into one node.
@@ -42,11 +42,12 @@ COORDINATOR (this session)
 - A node owns **directories, not files**. For each path it will add, modify, or
   delete, it declares the deepest directory that contains it (`dir:src/api`).
   Sliceme serializes two nodes with overlapping owned directories (equal,
-  ancestor, or descendant) into different waves. There is no runtime declare
-  step and no lease.
-- A node starts only in the current wave. A later wave begins after the
-  coordinator records and verifies every member of the previous wave. The node
-  runs in the same worktree, so it already sees the files of the previous wave.
+  ancestor, or descendant) into different waves. It rejects an empty or blank
+  `owns` entry, and a node that changes no file may omit `owns`. There is no
+  runtime declare step and no lease.
+- A node starts once every dependency is `done`; the wave stays a display
+  hint. The node runs in the same worktree, so it already sees the files of the
+  previous wave.
 - Workers are **pure editors**: they edit only their owned directories, never
   run `git`, and never run the test suite. The coordinator runs
   `wave --record --wave N` to create one commit per node and enforce
@@ -72,9 +73,10 @@ COORDINATOR (this session)
   wave completes and a human approves every commit, the coordinator runs
   `deliver` automatically and opens a pull request with the trusted checks.
 - `wave --record` enforces **plan conformance**: it rejects a changed path
-  outside the owned directories of its node. The coordinator then widens `owns`
-  or adds a `depends_on` edge (the DAG fingerprint changes, so the next
-  `status`/`ready`/`spawn` replans).
+  outside the owned directories of its node. `wave --record --only <node>`
+  scopes the record to one node and fails that node alone with a reason code.
+  The coordinator then widens `owns` or adds a `depends_on` edge (the DAG
+  fingerprint changes, so the next `status`/`ready`/`spawn` replans).
 - Sliceme can reconstruct everything from `.sliceme/` plus git after a crash.
 
 The pi package ships two extension modules. They register two tools, `sliceme`
@@ -114,9 +116,9 @@ Use the `sliceme` tool:
 sliceme start <DESIGN.md>   choose target branch + planner -> dag.json + waves
 sliceme ready               current-wave nodes whose dependencies are done
 sliceme status              waves + DAG + live child state
-sliceme spawn <node>        one-shot pure editor in the campaign worktree
+sliceme spawn --nodes <ids> start a wave: one-shot pure editors, one worktree
 sliceme record              commit the current wave onto the campaign worktree
-sliceme verify <node>       executor runs checks; a read-only verifier judges
+sliceme verify --nodes <ids> one turn: executor runs the wave; one verifier judges
 sliceme review --serve      local review client (per-commit approval)
 sliceme deliver             push the campaign branch and open a pull request
 sliceme review --report     deterministic report (`--narrative` appends the summary)
@@ -132,11 +134,10 @@ The coordinator also registers two commands and two lifecycle hooks
 
 `start` asks for the target branch, projects the DAG into waves
 (directory-subtree overlap, `depends_on` barrier, `concurrency` cap; default 3),
-and stores them in `state.json`. A node may spawn only in the current wave. When
-the coordinator records and verifies every member of a wave, the next wave opens
-in the same worktree. A coordinator-added `depends_on` edge changes the DAG
-fingerprint, and the next `status`/`ready`/`spawn` automatically replans the
-waves.
+and stores them in `state.json`. A node may spawn once every dependency is
+`done`; the wave stays a display hint. A coordinator-added `depends_on` edge
+changes the DAG fingerprint, and the next `status`/`ready`/`spawn` automatically
+replans the waves.
 
 The coordinator's own checkout is **not** an Sliceme unit. `sliceme start`
 bootstraps the plane with `--no-unit` and records the chosen target branch. The

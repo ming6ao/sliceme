@@ -3,7 +3,7 @@
 Status: implemented. Commits accumulate while the campaign runs. A human
 approves the whole campaign commit set. Sliceme includes the report even though
 git ignores it. The coordinator proceeds to delivery automatically once a human
-approves the campaign and every delivered comment is addressed.
+approves the campaign and has addressed every delivered comment.
 
 A human reviews the unmerged commits from the campaign worktree in a local
 browser. The reviewer reads the diff and the report, writes comments, and
@@ -125,7 +125,8 @@ A **reply** is a row in `comments` with a `parent_comment_id` and a status of
 `addressed` when recorded. It carries `addressing_commit` only when it answers
 with code; a no-code conversation turn leaves it null. A reply never changes
 the parent status. A **root** comment moves `open` -> `delivered` ->
-`addressed`, and `addressed_at` is stamped when it becomes `addressed`.
+`addressed`, and Sliceme stamps `addressed_at` when the comment becomes
+`addressed`.
 
 The design writes audit events to `.sliceme/<branch-key>.events.jsonl`. The
 design adds no relay audit table.
@@ -176,16 +177,17 @@ refuses with a `not-approved` finding. The engine never asks for approval again
 on its own. Delivery also refuses while any root comment is `delivered` but not
 `addressed`, with an `unaddressed-comments` finding.
 
-- An addressing commit changes the reviewed diff, so marking a comment
-  addressed consumes the campaign approval and re-opens the gate.
+- A reply that answers with code records an addressing commit. That commit
+  changes the reviewed diff, so it consumes the campaign approval and re-opens
+  the gate. A reply-only turn keeps the approval.
 - A `request_changes` campaign decision supersedes an earlier `approve`.
 - A successful delivery consumes the campaign approval it used. A failed check
   or a failed forge call leaves the approval unconsumed, so a retry needs no new
   review.
 
 The coordinator does not prompt for a final approval. The browser approvals are
-the trigger: when `review --poll` reports that a human approves the campaign,
-no comment is pending, and every wave has completed, the coordinator runs
+the trigger. When `review --poll` reports that a human approves the campaign,
+no comment remains open, and every wave has completed, the coordinator runs
 `deliver`.
 
 ## 7. HTTP surface
@@ -351,7 +353,8 @@ travels in the snapshot because it is one small Markdown file.
 ## 9. Delivery
 
 The coordinator triggers delivery after every wave completes, a human approves
-the campaign, and every delivered comment is addressed. The design orders
+the campaign, and the coordinator has addressed every delivered comment. The
+design orders
 delivery to avoid a race with the campaign loop:
 
 1. **Quiesce.** The poll runs only while the agent is idle, so no worker commits

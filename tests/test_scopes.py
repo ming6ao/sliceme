@@ -35,6 +35,16 @@ class ParseOwnsTests(unittest.TestCase):
             with self.assertRaises(SlicemeError):
                 parse_owns([spec])
 
+    def test_rejects_empty_or_whitespace_entry(self):
+        for spec in ("", "   ", "\t"):
+            with self.assertRaises(SlicemeError):
+                parse_owns([spec])
+        with self.assertRaises(SlicemeError):
+            parse_owns(["dir:src/api", ""])
+
+    def test_missing_owns_list_stays_valid(self):
+        self.assertEqual(parse_owns([]), [])
+
 
 class ConflictTests(unittest.TestCase):
     def test_equal_directories_conflict(self):

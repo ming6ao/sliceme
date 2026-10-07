@@ -138,9 +138,9 @@ feature branch to the default branch stays a human act on the forge.
 
 ```bash
 sliceme exec [--submit] [--validate] [--gpu-required] [--run] [--wait] [--cancel]
-               [--job ID] [--source SRC] [--commit REF]
-               [--command CMD]... [--sandbox none|bwrap|unshare] [--gpu none|T1|T2]
-               [--priority N] [--timeout SECONDS] [--wave N]
+               [--job ID] [--source SRC] [--commit REF] [--commits REF]...
+               [--command CMD]... [--only NAME]... [--sandbox none|bwrap|unshare]
+               [--gpu none|T1|T2] [--priority N] [--timeout SECONDS] [--wave N]
                [--requester ID] [--limit N]
 ```
 
@@ -149,10 +149,14 @@ delegate to it instead of each running the acceptance suite.
 
 - `--validate`: resolve and validate the project sandbox gate (manifest and,
   with `--gpu-required`, a GPU runner); exits non-zero when the gate fails.
-- `--submit`: enqueue a check job for `--source` (e.g. `node:w1`, `wave:0`),
-  `--commit`, and one or more `--command`. A job whose
+- `--submit`: enqueue a check job for `--source` (e.g. `node:w1`, `wave:0`), one
+  `--commit` or a batch of `--commits`, and one or more `--command`. A job whose
   `(tree, commands, toolchain, policy, sandbox, source)` fingerprint already
-  passed comes back as `cached`; the executor does not run the commands again.
+  reached a terminal verdict (`passed`, `failed`, or `error`) comes back as
+  `cached`; the executor does not run the commands again. The reply carries
+  `jobs` (one per commit), `job` (the first), and `cached`.
+- `--only NAME`: keep just the named checks (matched by name or command), so a
+  re-verify can run one command.
 - `--run`: drain the queue with the single runner.  Holds an exclusive `flock`
   on `.sliceme/executor.lock`, so exactly one check vector runs at a time.
 - `--wait`: block until `--job` is terminal (or `--timeout`, default 600s).
@@ -168,12 +172,13 @@ job whose lease expired.
 
 ```bash
 sliceme wave --open
-sliceme wave --record --wave N [--messages JSON] [--summary S]
+sliceme wave --record --wave N [--only NODE]... [--messages JSON] [--summary S]
 ```
 
 The campaign worktree, split out of `exec` so the executor stays a pure check
-queue. Ownership syntax is `dir:PATH`; Sliceme also accepts a bare path. Sliceme rejects
-a non-directory spec (`file:`, `symbol:`, …) when it projects the DAG.
+queue. Ownership syntax is `dir:PATH`; Sliceme also accepts a bare path. Sliceme
+rejects a non-directory spec (`file:`, `symbol:`, …) and an empty or blank entry
+when it projects the DAG. A node that changes no file may omit `owns`.
 
 - `--open`: create (or reuse) the single **campaign worktree** and branch
   (`worktree_branch`, for example `sliceme/<target-slug>`), idempotently.
@@ -185,6 +190,11 @@ a non-directory spec (`file:`, `symbol:`, …) when it projects the DAG.
   It diffs against the current `HEAD`, so it never re-attributes an earlier
   wave's committed changes. It holds the executor lock, so it serializes with
   check runs.
+- `--only NODE`: scope the record to one node (repeatable). Sliceme attributes
+  every changed path across the whole DAG, ignores a path owned by another node,
+  and fails only the recorded node. Each failure carries a reason code
+  (`stray_path`, `ambiguous_path`, `cross_node_rename`, or
+  `missing_description`), so a caller switches on the code, never the text.
 - The commit subject is the node's human description. Sliceme uses the
   per-node `--messages '{"w1": "..."}'` entry. A node with changes and no
   description is an error. The subject never carries a wave prefix. The node
@@ -207,7 +217,8 @@ same stream feeds a debounced per-node heartbeat file.  `--end` finds the
 newest running try for the node.
 
 The `--tool-seconds` value is the total tool call time. The time split is the
-attempt wall clock minus `--tool-seconds`, and the result is the thinking time.
+wall clock of the run minus `--tool-seconds`, and the result is the thinking
+time.
 `--tool-durations` is a JSON map of tool name to total seconds.
 `--slowest-commands` is a JSON list of the slowest shell commands. See
 [observability.md](./observability.md).
@@ -284,7 +295,7 @@ rejected.
 | `sliceme/service.py` | **single owner of state**: units, candidates, wave conformance, campaign worktree + recorder, review, and delivery |
 | `sliceme/store.py` | SQLite persistence (WAL) |
 | `sliceme/gitutil.py` | Git plumbing (`worktree`, `merge`, `merge-tree`, `commit`, `branch`, `push`, `changed_files`) |
-| `sliceme/ownership.py` | Directory ownership (normalization, `owns`, subtree conflicts), the DAG wave projection, and the same-ownership merge |
+| `sliceme/ownership.py` | Directory ownership (normalization, `owns`, subtree conflicts), per-node `readiness`, the DAG wave projection, and the same-ownership merge |
 | `sliceme/verifier.py` | Fingerprints (plane and node sources) and the sandboxed trusted-check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
 | `sliceme/executor.py` | The single sandboxed executor queue (submit/run/wait/cancel, dedupe, leases) |
@@ -351,10 +362,11 @@ SQLite tables: `campaigns`, `units`, `candidates`, `jobs`, `attempts`,
   collide.
 
 Checks run in a clean detached scratch worktree at the commit and, when a
-sandbox exists, wrapped accordingly. The executor serves a passing job
-for an unchanged fingerprint from cache; verification never mutates the
-candidate or the target branch. The newest terminal job for a commit is the
-review evidence. Agent-reported tests are provenance only, never acceptance.
+sandbox exists, wrapped accordingly. The executor serves a cached terminal job
+(`passed`, `failed`, or `error`) for an unchanged fingerprint; verification
+never mutates the candidate or the target branch. The newest terminal job for a
+commit is the review evidence. Agent-reported tests are provenance only, never
+acceptance.
 
 ## 5. Tests
 

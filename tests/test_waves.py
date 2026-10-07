@@ -11,7 +11,12 @@ Pins the strict scheduling contract:
 import unittest
 
 from sliceme.util import SlicemeError
-from sliceme.ownership import DEFAULT_WAVE_SIZE, plan_dag_waves, validate_dag
+from sliceme.ownership import (
+    DEFAULT_WAVE_SIZE,
+    plan_dag_waves,
+    readiness,
+    validate_dag,
+)
 
 
 def node(nid, owns=None, depends_on=None):
@@ -167,6 +172,41 @@ class WavePlanTests(unittest.TestCase):
         validate_dag([node("w1", ["dir:src/api"]), node("w2", ["dir:docs"])])
         with self.assertRaises(SlicemeError):
             validate_dag([node("w1", ["symbol:src/a.py#A"])])
+
+
+class ReadinessTests(unittest.TestCase):
+    """``readiness`` is the spawn gate: deps done, node not yet done/running."""
+
+    def test_nodes_without_dependencies_are_ready(self):
+        nodes = [node("a"), node("b", ["dir:src/b"], depends_on=["a"])]
+        self.assertEqual(readiness(nodes, {"nodes": {}}), ["a"])
+
+    def test_dependent_is_ready_once_every_dependency_is_done(self):
+        nodes = [node("a"), node("b", depends_on=["a"])]
+        state = {"nodes": {"a": {"status": "done"}}}
+        self.assertEqual(readiness(nodes, state), ["b"])
+
+    def test_partial_dependencies_block_readiness(self):
+        nodes = [node("a"), node("b"), node("c", depends_on=["a", "b"])]
+        state = {"nodes": {"a": {"status": "done"}, "b": {"status": "pending"}}}
+        self.assertEqual(readiness(nodes, state), ["b"])
+        state["nodes"]["b"]["status"] = "done"
+        self.assertEqual(readiness(nodes, state), ["c"])
+
+    def test_done_and_running_nodes_are_not_ready(self):
+        nodes = [node("a"), node("b")]
+        state = {"nodes": {"a": {"status": "done"}, "b": {"status": "running"}}}
+        self.assertEqual(readiness(nodes, state), [])
+
+    def test_missing_state_treats_dependencies_as_pending(self):
+        nodes = [node("a"), node("b", depends_on=["a"])]
+        self.assertEqual(readiness(nodes, {}), ["a"])
+
+    def test_order_follows_declaration(self):
+        self.assertEqual(readiness([node("b"), node("a")], {"nodes": {}}), ["b", "a"])
+
+    def test_readiness_does_not_need_owns(self):
+        self.assertEqual(readiness([node("a")], {"nodes": {}}), ["a"])
 
 
 if __name__ == "__main__":
