@@ -87,6 +87,14 @@ ACTIONS: tuple[Action, ...] = (
         ),
     ),
     Action(
+        name="plan",
+        summary="show the campaign split declared in a design document",
+        params=(
+            Param("design", "string", "design document path relative to the repo root"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
         name="deliver",
         summary="push the campaign worktree and open the delivery pull request (after approval)",
         params=(
@@ -308,6 +316,13 @@ def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
     return service.status()
 
 
+def _dispatch_plan(service: "Service", p: dict[str, Any]) -> Any:
+    design = p.get("design")
+    if not design:
+        raise SlicemeError("plan requires --design")
+    return service.campaign_plan(str(design))
+
+
 def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
     return service.deliver(
         target=p.get("target"),
@@ -474,6 +489,7 @@ def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
 
 _HANDLERS = {
     "status": _dispatch_status,
+    "plan": _dispatch_plan,
     "deliver": _dispatch_deliver,
     "attempt": _dispatch_attempt,
     "progress": _dispatch_progress,

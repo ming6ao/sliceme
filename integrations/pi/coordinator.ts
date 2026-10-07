@@ -60,6 +60,7 @@ import {
 	heartbeatPath,
 	logEvent,
 	logPath,
+	parseCampaignPlan,
 	readActiveCampaign,
 	readJson,
 	renderAgentLine,
@@ -90,6 +91,7 @@ import type {
 export const CAMPAIGN_ACTIONS = [
 	"start",
 	"status",
+	"plan",
 	"ready",
 	"spawn",
 	"record",
@@ -573,6 +575,26 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			);
 		}
 		return branch;
+	}
+
+	/** True when a local branch exists. */
+	async function branchExists(ctx: ExtensionContext, branch: string): Promise<boolean> {
+		const result = await pi.exec(
+			"git",
+			["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+			{ cwd: ctx.cwd },
+		);
+		return result.code === 0;
+	}
+
+	/** Read a design document from the session cwd; empty when missing. */
+	function readDesignFile(ctx: ExtensionContext, design: string): string {
+		const file = path.isAbsolute(design) ? design : path.join(ctx.cwd, design);
+		try {
+			return fs.readFileSync(file, "utf8");
+		} catch {
+			return "";
+		}
 	}
 
 	/**
@@ -1757,21 +1779,55 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		const design = String(params.design ?? "DESIGN.md");
 		const campaign = String(params.campaign ?? path.basename(ctx.cwd));
 
+		// A design may declare a campaign split.  Each entry becomes one campaign
+		// with its own target branch and directory scope.  The operator runs the
+		// entries in order; a directory may repeat across entries because the
+		// campaign boundary resets ownership.
+		const plan = parseCampaignPlan(readDesignFile(ctx, design));
+		let planEntry = plan.find((entry) => entry.name === String(params.campaign ?? ""));
+		if (!planEntry && plan.length) {
+			planEntry = plan.find((entry) => !fs.existsSync(statePath(ctx.cwd, entry.target)));
+		}
+		if (plan.length && !planEntry) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `sliceme: every campaign in ${design} is already started.`,
+					},
+				],
+				isError: true,
+			};
+		}
+
 		// The user chooses the target branch once; it is remembered for the whole
 		// campaign.  Work accumulates on a separate campaign worktree branch and is
 		// only opened as a pull request after all waves finish and the user approves.
-		// A resume reuses the recorded target instead of asking again.
+		// A resume reuses the recorded target instead of asking again.  A plan entry
+		// supplies the target and the base, so there is nothing to choose.
 		const prior = await existingCampaign(ctx);
 		const resuming = Boolean(
 			prior?.target &&
 				!params.replan &&
 				fs.existsSync(statePath(ctx.cwd, String(prior.target))),
 		);
-		const chosen =
-			!params.target && resuming
+		const chosen = planEntry
+			? {
+					name: planEntry.target,
+					mode: ((await branchExists(ctx, planEntry.target))
+						? "existing"
+						: "new") as "existing" | "new",
+				}
+			: !params.target && resuming
 				? { name: String(prior!.target), mode: "current" as const }
 				: await chooseTargetBranch(ctx, params);
 		const branch = chosen.name;
+		const planDirs = planEntry?.dirs ?? [];
+		const planNotice = planEntry
+			? `sliceme: campaign '${planEntry.name}' of ${plan.length} in the plan` +
+				(planDirs.length ? `; scope: ${planDirs.join(", ")}` : "") +
+				". "
+			: "";
 		const defaultBr = await defaultBranch(ctx, branch);
 		if (branch === defaultBr || branch === "main" || branch === "master") {
 			return {
@@ -1788,17 +1844,22 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			};
 		}
 		const notice =
-			`sliceme: target (feature) branch '${branch}' (${chosen.mode}); ` +
+			`${planNotice}target (feature) branch '${branch}' (${chosen.mode}); ` +
 			`commits accumulate on a separate campaign worktree branch.`;
 		if (ctx.hasUI) ctx.ui.notify(notice, "info");
 
 		// 1. Plane with no coordinator unit; the engine records the chosen target
 		// branch (and re-points an existing plane).  A new target is created here.
-		await sliceme(
-			ctx,
-			["start", "--no-unit", "--target", branch, "--target-mode", chosen.mode],
-			signal,
-		);
+		const startArgs = [
+			"start",
+			"--no-unit",
+			"--target",
+			branch,
+			"--target-mode",
+			chosen.mode,
+		];
+		if (planEntry?.base) startArgs.push("--base", planEntry.base);
+		await sliceme(ctx, startArgs, signal);
 		// Bind this session to the campaign so every later engine call names it.
 		writeActiveCampaign(ctx.cwd, branch);
 		const plane = (await sliceme(ctx, ["status"], signal)).json;
@@ -1928,6 +1989,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			`node every touched component depends_on; merge nodes that own the same directory and ` +
 			`sit on one dependency chain into a single node, because one node completes one ` +
 			`cohesive directory change; do not split one directory across a chain of small nodes; ` +
+			(planDirs.length
+				? `Campaign scope: this campaign owns only these directories: ${planDirs.join(", ")}. ` +
+					`Plan every node inside that scope; a later campaign owns the rest. `
+				: "") +
 			`each node lists its acceptance commands; ` +
 			`gpu is "none","T1","T2" and only the verifier may use it. ` +
 			`Project sandbox: look for sliceme.sandbox.json, .sliceme-sandbox.json, or ` +
@@ -2570,8 +2635,23 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				details: { delivered: Boolean(state.delivered) },
 			};
 		}
+		const dag = readJson<Dag>(dagPath(ctx.cwd, branch), { nodes: [] });
+		let nextHint = "";
+		if (dag?.design) {
+			const plan = parseCampaignPlan(readDesignFile(ctx, dag.design));
+			const current = plan.findIndex((entry) => entry.target === branch);
+			const next = plan.find(
+				(entry, index) =>
+					index > current && !fs.existsSync(statePath(ctx.cwd, entry.target)),
+			);
+			if (next) {
+				nextHint =
+					`\nNext campaign in the plan: '${next.name}' (target ${next.target}). ` +
+					`Run start --design ${dag.design} --campaign ${next.name}.`;
+			}
+		}
 		return {
-			content: [{ type: "text" as const, text: delivered.text }],
+			content: [{ type: "text" as const, text: `${delivered.text}${nextHint}` }],
 			details: delivered.json ?? {},
 		};
 	}
@@ -2757,6 +2837,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 						content: [{ type: "text" as const, text: summarise(dag, state) }],
 						details: { dag, state },
 					};
+				}
+				case "plan": {
+					const design = String(params.design ?? "DESIGN.md");
+					const { json, text } = await sliceme(ctx, ["plan", "--design", design], signal);
+					return { content: [{ type: "text" as const, text }], details: json ?? {} };
 				}
 				case "ready": {
 					const branch = await featureBranch(ctx);

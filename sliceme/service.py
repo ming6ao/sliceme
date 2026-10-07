@@ -1213,6 +1213,56 @@ class Service:
             )
         return {"root": str(self.root), "sessions": entries}
 
+    def campaign_plan(self, design: str | Path) -> dict[str, Any]:
+        """The design's campaign split joined with the registry state.
+
+        The entries keep the design order.  ``next`` names the first entry whose
+        campaign is not delivered, landed, or closed.  The caller runs the
+        entries in order.  A directory may repeat across entries: the engine
+        keeps one writer per directory inside one campaign, and the campaign
+        boundary lets the next campaign own the same directory.
+        """
+        from . import plan as plan_mod
+
+        entries = plan_mod.load_campaign_plan(self.root, design)
+        rows = self.store.list_campaigns()
+        result: list[dict[str, Any]] = []
+        previous_target: str | None = None
+        next_name: str | None = None
+        for index, entry in enumerate(entries):
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if (item.get("name") or "") == entry["name"]
+                    or item["target_branch"] == entry["target"]
+                ),
+                None,
+            )
+            state = str(row["state"]) if row else "pending"
+            result.append(
+                {
+                    "index": index,
+                    "name": entry["name"],
+                    "target": entry["target"],
+                    "base": entry["base"]
+                    or previous_target
+                    or self.plane_config.get("base"),
+                    "dirs": entry["dirs"],
+                    "state": state,
+                    "campaign_key": row["key"] if row else None,
+                }
+            )
+            if next_name is None and state not in ("delivered", "landed", "closed"):
+                next_name = entry["name"]
+            previous_target = entry["target"]
+        return {
+            "design": str(design),
+            "entries": result,
+            "next": next_name,
+            "total": len(result),
+        }
+
     # ------------------------------------------------------------------
     # Attempts (per-subagent fidelity)
     # ------------------------------------------------------------------

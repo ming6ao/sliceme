@@ -359,7 +359,62 @@ the adapter and the server change.
 - [observability.md](./observability.md): remove the note about concurrent
   campaigns.
 
-## 15. Related documents
+## 15. Campaign plans
+
+One design document can declare a campaign split. The engine parses the plan.
+The coordinator runs the entries in order.
+
+### 15.1 The plan block
+
+A design document holds a fenced block:
+
+```sliceme-campaigns
+[
+  {"name": "core", "target": "agent/post-training-core", "base": "main",
+   "dirs": ["include/nanochat", "backends", "src", "bindings", "python", "tools"]},
+  {"name": "sft", "target": "agent/post-training-sft",
+   "base": "agent/post-training-core",
+   "dirs": ["python", "tools", "tests", "src"]},
+  {"name": "rl", "target": "agent/post-training",
+   "base": "agent/post-training-sft",
+   "dirs": ["src", "tools", "tests", "python"]}
+]
+```
+
+Each entry has these fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | The campaign name. Unique in the plan. |
+| `target` | yes | The feature branch for the campaign. |
+| `base` | no | The base ref. The default is the previous entry's target, or the plane base for the first entry. |
+| `dirs` | no | The directory scope for the planner. |
+
+### 15.2 Why a plan exists
+
+The engine allows one owner per directory inside one campaign. A directory that
+several phases touch forces those phases into one node or into separate
+campaigns. A plan makes the second choice explicit. Each campaign has its own
+DAG, worktree, and record, so a later campaign may own a directory the earlier
+campaign owned.
+
+### 15.3 The commands
+
+- `sliceme plan --design DESIGN.md` prints the entries in order, the registry
+  state of each, and the next entry to run.
+- `sliceme start --design DESIGN.md --campaign <name>` starts one entry. The
+  coordinator reads the entry's target, base, and directory scope.
+- The planner receives the scope and plans every node inside it.
+- After delivery, the coordinator reports the next entry.
+
+### 15.4 The order
+
+The coordinator runs the entries in plan order. Each entry's base defaults to
+the previous entry's target, so the changes accumulate. Delivery needs human
+approval, so the coordinator reports the next entry instead of starting it
+without a command.
+
+## 16. Related documents
 
 - [guide.md](./guide.md) — the model, ownership, and orchestration.
 - [architecture.md](./architecture.md) — the parts and the campaign lifecycle.

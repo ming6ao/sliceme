@@ -77,6 +77,53 @@ export function parseJson(text: string): any {
 	}
 }
 
+/** One entry of the ``sliceme-campaigns`` plan in a design document. */
+export interface CampaignPlanEntry {
+	name: string;
+	target: string;
+	base: string | null;
+	dirs: string[];
+}
+
+const CAMPAIGN_PLAN_FENCE =
+	/^[ \t]*```+[^\n]*\bsliceme-campaigns\b[^\n]*\r?\n([\s\S]*?)^[ \t]*```+[ \t]*$/m;
+
+/**
+ * Parse the `sliceme-campaigns` fenced block from a design document.
+ *
+ * Returns an empty list when the document declares no plan. The engine's
+ * `sliceme plan` action is the canonical reader and joins the registry state;
+ * this mirror lets the coordinator resolve the target branch before the plane
+ * exists. Entries without a name or a target are dropped.
+ */
+export function parseCampaignPlan(text: string): CampaignPlanEntry[] {
+	const match = CAMPAIGN_PLAN_FENCE.exec(text ?? "");
+	if (!match) return [];
+	const raw = match[1].trim();
+	if (!raw) return [];
+	let data: unknown;
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(data)) return [];
+	const plan: CampaignPlanEntry[] = [];
+	for (const entry of data) {
+		if (!entry || typeof entry !== "object") continue;
+		const record = entry as Record<string, unknown>;
+		const name = String(record.name ?? "").trim();
+		const target = String(record.target ?? "").trim();
+		if (!name || !target) continue;
+		const dirs = Array.isArray(record.dirs)
+			? record.dirs.map((item) => String(item).trim()).filter(Boolean)
+			: [];
+		const base = record.base ? String(record.base).trim() : null;
+		plan.push({ name, target, base, dirs });
+	}
+	return plan;
+}
+
 /** Run the Sliceme CLI with `--json` from the session's cwd. */
 export async function runSliceme(
 	pi: ExtensionAPI,

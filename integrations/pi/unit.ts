@@ -33,6 +33,7 @@ import { runSliceme } from "./common.ts";
 export const SLICEME_ACTIONS = [
 	"start",
 	"status",
+	"plan",
 	"deliver",
 	"exec",
 	"wave",

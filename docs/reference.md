@@ -95,6 +95,22 @@ candidate or a status other than `pending`. Sliceme reports the result as
 `dag_merge` (`merged`, `before_nodes`, `after_nodes`, `before_waves`,
 `after_waves`).
 
+### `plan`
+
+```bash
+sliceme plan --design DESIGN.md
+```
+
+Read the `sliceme-campaigns` fenced block from the design document. Join the
+entries, in order, with the campaign registry state. Print each entry's name,
+target, base, directory scope, and state. Print `next`: the first entry whose
+campaign is not delivered, landed, or closed.
+
+Use the plan to run one design as a sequence of campaigns. Each campaign has
+its own DAG and worktree, so a directory may repeat across entries. The engine
+keeps one owner per directory inside one campaign. See
+[multi-campaign.md](./multi-campaign.md) section 15.
+
 ### `deliver`
 
 ```bash

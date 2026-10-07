@@ -39,6 +39,10 @@ plan.
   owns one directory and completes the whole cohesive change. Do not split one
   directory across a chain of small nodes. Set `"no_merge": true` on a node
   that must stay separate for its own gate.
+- **Campaign scope.** The task may name the directories this campaign owns.
+  Plan every node inside that scope and nothing outside it. A later campaign
+  owns the rest, and it may own the same directory again. When the task gives a
+  scope, do not plan a node whose `owns` leaves the scope.
 - Every node owns narrow directories and lists concrete `acceptance` commands.
 - `gpu` is `none`, `T1`, or `T2`; only the executor runs checks, and the
   executor composes the GPU broker, so acceptance commands stay plain.
