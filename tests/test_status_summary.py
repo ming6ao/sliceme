@@ -33,8 +33,7 @@ class StatusSummaryCase(unittest.TestCase):
             (self.root / "src" / sub / "x.py").write_text("x = 1\n")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-qm", "initial")
-        _git(self.root, "checkout", "-q", "-b", "feat/x")
-        Service.init_plane(self.root, checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         self.svc = Service(self.root)
         write_json(
             campaign.dag_path(self.root, "feat/x"),
@@ -58,7 +57,7 @@ class StatusSummaryCase(unittest.TestCase):
             {
                 "campaign": "dense",
                 "target_branch": "feat/x",
-                "worktree_branch": "sliceme/feat-x",
+                "worktree_branch": "feat/x",
                 "base": "main",
                 "wave_size": 2,
                 "waves": [
@@ -75,7 +74,7 @@ class StatusSummaryCase(unittest.TestCase):
         self.assertEqual([n["id"] for n in view["nodes"]], ["w1", "w2"])
         self.assertEqual(view["lines"][0], "campaign: dense")
         self.assertEqual(
-            view["lines"][1], "target:   feat/x  worktree: sliceme/feat-x  base: main"
+            view["lines"][1], "target:   feat/x  worktree: feat/x  base: main"
         )
         self.assertEqual(view["lines"][2], "design:   DESIGN.md")
         self.assertEqual(view["lines"][3], "nodes:    2  wave size: 2")
@@ -176,7 +175,7 @@ class StatusSummaryCase(unittest.TestCase):
         self.svc.store.create_campaign(
             key="feat--y",
             target_branch="feat/y",
-            worktree_branch="sliceme/feat-y",
+            worktree_branch="feat/y",
             base="main",
             unit_name="campaign:feat--y",
         )

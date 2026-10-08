@@ -6,7 +6,7 @@ deliberate gaps. For the model and workflow, see [guide.md](./guide.md).
 ## 1. Actions
 
 The CLI and the pi `sliceme` tool derive from one action registry
-(`sliceme/surface.py`). The engine has eight verbs:
+(`sliceme/surface.py`). The engine has nine verbs:
 
 | Action | Purpose |
 |---|---|
@@ -14,16 +14,17 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `status` | Units, candidates, waves, checks, health, simulation; the default is the dense summary, `--verbose` is the full dump, and `--sessions`/`--resume` cover the campaign registry and the resume plan. |
 | `ready` | The current-wave node ids, the wave index, and `paused`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
-| `deliver` | Push the campaign worktree branch and open the delivery pull request after approval. |
+| `deliver` | Push the campaign branch and open the delivery pull request against the delivery base after the confirmation. |
 | `check` | Run the synchronous combined-tree checks for the current wave (`--current`). |
 | `wave` | The campaign worktree: `--open` creates or reuses it, `--record` commits a wave as per-node commits. |
 | `review` | Record one campaign decision, or write the deterministic report. |
+| `evidence` | Write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs. |
 
 The pi extension forwards these verbs through one tool. The campaign loop lives
 in the `sliceme.campaign` workflow resource, not in the engine.
 
-Most campaign-scoped actions accept `--campaign REF`. The reference is a target
-branch, a branch key, or a unit name. When a plane holds one campaign,
+Most campaign-scoped actions accept `--campaign REF`. The reference is a
+campaign branch, a branch key, or a unit name. When a plane holds one campaign,
 `--campaign` is optional. When a plane holds several campaigns, a
 campaign-scoped call without `--campaign` returns the plane summary. See §3 for
 the layout.
@@ -32,8 +33,8 @@ the layout.
 
 ```bash
 sliceme start [--name N] [--path DIR] [--kind worker]
-                [--base REF] [--target BRANCH] [--target-mode current|existing|new]
-                [--worktree-branch BRANCH] [--main BRANCH] [--check NAME=COMMAND ...]
+                [--design DESIGN.md] [--feature-branch BRANCH] [--base REF]
+                [--check NAME=COMMAND ...]
                 [--force] [--no-unit] [--campaign REF]
 ```
 
@@ -43,21 +44,24 @@ the repo-local `.git/info/exclude`. It then creates a unit for the directory
 unless the directory is already inside one. Re-running from a unit worktree is a
 no-op.
 
-- `--target BRANCH` with `--target-mode current|existing|new` chooses the
-  campaign's **target (feature) branch** once and records it. `current` adopts
-  the checked-out branch, `existing` requires the named branch, and `new`
-  creates it from `--base`.
-- The target is **never** `main`, `master`, or the repository default branch;
-  `deliver` refuses it. There is no override.
-- `--worktree-branch BRANCH` names the separate campaign accumulation branch
-  (default derived, for example `sliceme/<target-slug>`).
-- `--main BRANCH` is a deprecated alias for `--target`.
-- `--base REF` records the fork point (default: the target branch).
+- `--design DESIGN.md` names the design document. The engine derives the
+  **campaign branch** `feat/<slug(design-stem)>` from its file name and records
+  it. `--feature-branch BRANCH` overrides the derived name. One of the two is
+  required when the plane does not exist.
+- The campaign branch is the **pull request head**. It is **never** `main`,
+  `master`, or the repository default branch; `start` and `deliver` refuse it.
+  There is no override.
+- `--base REF` records the **delivery base** (the pull request base). The
+  default is the repository default branch (`main`).
+- The campaign worktree branch equals the campaign branch. `wave --open`
+  fetches the delivery base and creates the worktree from `origin/<base>`.
 - `--no-unit` initialises the plane without creating a unit, for a coordinator's
   checkout.
 - `--check NAME=COMMAND` registers a trusted plane check (repeatable).
 - Sliceme captures the recorded `default_branch` once at init: origin `HEAD`,
   else `init.defaultBranch`, else an existing `main` or `master`, else `main`.
+- Re-running `start` with a different `--feature-branch` adds a campaign to the
+  same plane; the earlier campaigns stay intact.
 
 The programmatic plane-only helper is `Service.init_plane(root, ...)`.
 
@@ -140,14 +144,15 @@ one owner per directory inside one campaign. See
 ### `deliver`
 
 ```bash
-sliceme deliver [--target BRANCH] [--source BRANCH]
+sliceme deliver [--source BRANCH]
                    [--cleanup none|worktrees|all] [--no-checks] [--campaign REF]
 ```
 
-- Pushes the campaign worktree branch (`--source`, default the recorded
-  `worktree_branch`) to the remote (`policy.remote`, default `origin`).
-- Opens one pull request against the target branch (`--target`, default the
-  recorded target) with the `gh` program. The body is the campaign report.
+- Pushes the campaign branch (`--source`, default the recorded
+  `worktree_branch`, which equals the campaign branch) to the remote
+  (`policy.remote`, default `origin`).
+- Opens one pull request against the **delivery base** (the repository default
+  branch, `main`) with the `gh` program. The body is the evidence document.
 - Pre-checks the merge with `git merge-tree`. A conflict returns structured
   findings before the push.
 - Runs the plane's trusted checks on the campaign head through the single check
@@ -156,8 +161,8 @@ sliceme deliver [--target BRANCH] [--source BRANCH]
 - Marks prepared candidates and their unit `landed` without rewriting their
   recorded commits.
 
-It is idempotent: Sliceme returns an open pull request as it is, and a target
-that already contains the worktree branch is a no-op. Delivery needs the
+It is idempotent: Sliceme returns an open pull request as it is, and a delivery
+base that already contains the campaign branch is a no-op. Delivery needs the
 campaign worktree branch; run `wave --open` first. It refuses until the newest
 campaign decision is an unconsumed `approve`, or an `override` records a note.
 Install `gh` and authenticate it before the first delivery.
@@ -173,9 +178,10 @@ Step 3 covers a process that starts from a desktop launcher or a service and has
 a small `PATH`. Set `SLICEME_GH` when `gh` lives elsewhere. Sliceme validates
 `gh` before the push, so a missing program leaves the campaign working.
 
-**The target is never the repository default branch.** Sliceme refuses `main`,
-`master`, and the recorded default, with **no override**. Promotion from a
-feature branch to the default branch stays a human act on the forge.
+**The campaign branch is never the repository default branch.** Sliceme refuses
+to push `main`, `master`, or the recorded default, with **no override**.
+Promotion from the campaign branch to the default branch stays a human act on
+the forge.
 
 ### `check`
 
@@ -204,9 +210,12 @@ accepts a bare path. Sliceme rejects a non-directory spec (`file:`, `symbol:`,
 …) and an empty or blank entry when it projects the DAG. A node that changes no
 file may omit `owns`.
 
-- `--open`: create (or reuse) the single **campaign worktree** and branch
-  (`worktree_branch`, for example `sliceme/<target-slug>`), idempotently. Sliceme
-  uses the same worktree for every wave and never recreates it between waves.
+- `--open`: create (or reuse) the single **campaign worktree** and its branch
+  (`worktree_branch`, which equals the campaign branch, for example
+  `feat/<name>`), idempotently. It fetches the delivery base and bases the
+  worktree on `origin/<delivery_base>`, then reports a fallback when the remote
+  or the base is absent. Sliceme uses the same worktree for every wave and never
+  recreates it between waves.
 - `--record --current`: record the wave whose index the engine holds. The
   `--current` flag is the workflow-resource form, because a host grant cannot
   know a wave index in advance.
@@ -228,6 +237,29 @@ file may omit `owns`.
 The recorder holds the campaign lock, so it serializes with campaign creation
 and other records. Checks are synchronous and run inside the caller, so they
 need no lock.
+
+### `evidence`
+
+```bash
+sliceme evidence [--design REF] [--campaign REF]
+```
+
+Write the deterministic evidence document for the campaign. The engine writes
+`.sliceme/<branch-key>.evidence.json` (the complete evidence, with the full check
+output) and `.sliceme/<branch-key>.evidence.md` (the check output is bounded).
+The Markdown document is the pull request body. The evidence holds:
+
+- the design reference, the campaign branch, and the delivery base;
+- every campaign commit, oldest first;
+- the node, the goal, and the owned directories for each commit;
+- the newest check for each commit (status, command, fingerprint, duration, and
+  output);
+- the diffstat and the changed files for each commit;
+- the worker log path, and the tail of the log when a writer recorded one;
+- the artifact paths and the report path.
+
+The narrative is deterministic and the engine writes it; there is no narrative
+agent. The evidence is not a gate.
 
 ### `review`
 
@@ -283,9 +315,9 @@ recorded in `dag.json`, so Sliceme rejects a post-plan manifest change.
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
 | `sliceme/checks.py` | The single synchronous combined-tree check runner plus the `checks` cache |
-| `sliceme/integrate.py` | Target selection and guards, pull request delivery, and combined-tree simulation |
+| `sliceme/integrate.py` | Campaign-branch guard and the delivery base, pull request delivery, and combined-tree simulation |
 | `sliceme/pullrequest.py` | The `gh` forge client: find or create the delivery pull request |
-| `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; deterministic report |
+| `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; the deterministic report and evidence document |
 | `sliceme/review/` | Reduced review: `api.py` (decision + report dispatch), `packet.py` (snapshot + commits + report + evidence), `diff.py` (diff parsing) |
 | `integrations/pi/` | the pi adapter: `common.ts` (invocation and paths), `coordinator.ts` (tool, agents, commands), `campaign-resource.ts` (the `sliceme.campaign` resource), `agents/{planner,worker}.md` |
 
@@ -295,7 +327,7 @@ CLI runs without installation.
 
 ## 3. State layout
 
-All campaign state lives under `.sliceme/`, **prefixed by the target-branch
+All campaign state lives under `.sliceme/`, **prefixed by the campaign-branch
 name** so one campaign's files form a single glob and no two campaigns collide.
 Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
 
@@ -308,7 +340,9 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
   active.<pid>.campaign            # per-process pointer to the session's campaign
   feat--x.dag.json                 # canonical plan (never committed)
   feat--x.state.json               # optional read-only legacy override (never written by the engine)
-  feat--x.report.md                # final report (kept on cleanup)
+  feat--x.report.md                # deterministic report (kept on cleanup)
+  feat--x.evidence.json            # complete evidence (full check output)
+  feat--x.evidence.md              # human evidence; the pull request body
   feat--x.session.json             # adapter-written suspend/resume descriptor
   feat--x.control.json             # cooperative pause flag
   feat--x.worker_<id>.log          # one log per worker id
@@ -347,7 +381,7 @@ Checks run in a clean detached scratch worktree at the commit and, when a
 sandbox exists, wrapped accordingly. The runner serves a cached terminal row
 (`passed`, `failed`, or `error`) for an unchanged fingerprint, so a resumed
 campaign re-verifies from the cache. Verification never mutates the candidate or
-the target branch. The newest terminal check for a commit is the review
+the delivery base. The newest terminal check for a commit is the review
 evidence. Agent-reported tests are provenance only, never acceptance.
 
 The runner is **synchronous**. One call runs one check set and writes one
@@ -367,7 +401,7 @@ The suite covers these areas:
 - GPU isolation: two GPU nodes land in two waves;
 - conformance-by-ownership at wave record time;
 - the combined-tree check runner and its cache;
-- campaign worktree recording and target-branch selection;
+- campaign worktree recording and campaign-branch selection;
 - the campaign approval gate and the report;
 - the workflow resource grants and field rejection (Node harness);
 - end-to-end flows (delivery, idempotency, conflict atomicity, failing checks,
@@ -380,13 +414,16 @@ The suite covers these areas:
 | `tests/test_waves.py` | DAG wave projection, dependency barriers, caps, GPU isolation, validation |
 | `tests/test_merge.py` | the same-ownership merge |
 | `tests/test_plan.py` | the design's campaign split parse |
-| `tests/test_campaign.py` | plane bootstrap and retargeting, wave recording, report, DAG/state layout |
+| `tests/test_campaign.py` | plane bootstrap and campaign registration, wave recording, report, DAG/state layout |
 | `tests/test_campaigns.py` | several campaigns in one plane, scoping, delivery isolation, migration |
 | `tests/test_checks.py` | the combined-tree runner, the check cache, sandbox profiles/wrapping, fingerprint invalidation |
 | `tests/test_sandbox_gate.py` | manifest discovery/validation, fail-closed gate, GPU runner, setup |
 | `tests/test_wave_scope.py` | campaign worktree reuse, conformance-by-ownership, per-node commits, delivery, default-branch refusal |
-| `tests/test_target_branch.py` | current/existing/new target modes, persistence, default-branch refusal |
-| `tests/test_pull_request.py` | the `gh` client, the report-backed body, and the fail-closed rules |
+| `tests/test_target_branch.py` | the design-derived campaign branch, the `--feature-branch` override, the delivery base, default-branch refusal |
+| `tests/test_open_campaign.py` | the worktree from `origin/main` and the local-base fallback |
+| `tests/test_evidence.py` | the evidence document: commits, checks, diffs, logs, and the bounded Markdown |
+| `tests/test_e2e.py` | the full flow from `start` to the delivery pull request |
+| `tests/test_pull_request.py` | the `gh` client, the evidence-backed body, the head/base, and the fail-closed rules |
 | `tests/test_review_approval.py` | the one campaign approval, the override, and the retired comment verbs |
 | `tests/test_review_report.py` | the deterministic report and the packet |
 | `tests/test_sessions.py` | the descriptor round-trip, the resume plan, cleanup, and the additive `checks` table |
@@ -402,12 +439,12 @@ The suite covers these areas:
   `owns`/`depends_on` are not inferred.
 - No long-lived daemon or unix socket: the CLI calls the SQLite service directly
   (WAL). There is no browser review client.
-- One campaign occupies one target branch; several campaigns can share a plane.
-  RPC-steerable workers are out of scope.
+- One campaign occupies one campaign branch; several campaigns can share a
+  plane. RPC-steerable workers are out of scope.
 - `jj` workspaces and shared dependency caches are not implemented. Campaign
   workers are pure editors in the single campaign worktree (`wave --open` /
   `wave --record`).
-- Promotion from the target feature branch to the default branch is a human
-  `git` step.
+- Promotion from the campaign branch to the default branch is a human act on
+  the forge.
 - Child status, events, and control belong to pi-subagents. Sliceme reads the
   engine's own state and does not keep a per-child progress file.

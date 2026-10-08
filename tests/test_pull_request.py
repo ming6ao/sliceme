@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from sliceme import campaign
+from sliceme import integrate
 from sliceme import pullrequest
 from sliceme.service import Service
 from sliceme.util import SlicemeError, write_json
@@ -44,13 +45,12 @@ class PullRequestCase(unittest.TestCase):
         (self.root / "src" / "a" / "x.py").write_text("a = 1\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
         self.remote = Path(self.remote_tmp.name) / "origin.git"
         subprocess.run(["git", "init", "--bare", "-q", str(self.remote)], check=True)
         run("git", "remote", "add", "origin", str(self.remote), cwd=self.root)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
-        Service.init_plane(self.root, checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         self.svc = Service(self.root)
         write_json(
             campaign.dag_path(self.root, "feat/x"),
@@ -69,7 +69,7 @@ class PullRequestCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def record_one(self):
-        unit = self.svc.create_wave_workspace(0, base="feat/x")
+        unit = self.svc.create_wave_workspace(0)
         (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "test"})
         return unit
@@ -99,19 +99,29 @@ class PullRequestCase(unittest.TestCase):
         row = self.campaign_row()
         self.assertEqual(row["pr_url"], url)
         self.assertEqual(row["state"], "delivered")
-        # The target branch is unchanged until a human merges the pull request.
+        # The delivery base is unchanged until a human merges the pull request.
         self.assertEqual(
-            run("git", "show", "feat/x:src/a/x.py", cwd=self.root).stdout, "a = 1\n"
+            run("git", "show", "main:src/a/x.py", cwd=self.root).stdout, "a = 1\n"
         )
-        # The campaign branch is pushed to origin.
+        # The campaign branch is the pull request head; the base is the delivery
+        # base (the default branch).
+        self.assertEqual(unit["branch"], "feat/x")
+        self.assertEqual(result["feature_branch"], "feat/x")
         self.assertIn(unit["branch"], self.remote_heads())
+        self.assertEqual(self.pr_state(unit["branch"])["base"], "main")
 
-    def test_pr_body_is_the_campaign_report(self):
+    def test_pr_body_is_the_evidence_document(self):
         unit = self.record_one()
         self.approve()
         self.svc.deliver()
         pr = self.pr_state(unit["branch"])
-        self.assertIn("Campaign report", pr["body"])
+        # The evidence document is the pull request body.  Delivery writes it
+        # when the coordinator did not.
+        evidence = self.root / ".sliceme" / "feat--x.evidence.md"
+        self.assertTrue(evidence.is_file())
+        self.assertIn("## Evidence", pr["body"])
+        self.assertIn("Campaign branch: `feat/x`", pr["body"])
+        self.assertIn("Delivery base: `main`", pr["body"])
         self.assertIn(unit["branch"], pr["body"])
         self.assertEqual(pr["title"], "sliceme: pr")
 
@@ -159,16 +169,40 @@ class PullRequestCase(unittest.TestCase):
 
     def test_conflict_refuses_before_push(self):
         unit = self.record_one()
-        # Advance the target branch with a conflicting change.
-        (self.root / "src" / "a" / "x.py").write_text("a = 'target'\n")
+        # Advance the delivery base with a conflicting change.
+        delivery_base = self.svc.config["delivery_base"]
+        run("git", "checkout", "-q", delivery_base, cwd=self.root)
+        (self.root / "src" / "a" / "x.py").write_text("a = 'base'\n")
         run("git", "add", "-A", cwd=self.root)
-        run("git", "commit", "-qm", "target change", cwd=self.root)
+        run("git", "commit", "-qm", "base change", cwd=self.root)
         self.approve()
         result = self.svc.deliver()
         self.assertEqual(result["results"][0]["status"], "failed")
         self.assertIn("conflict", result["results"][0]["detail"])
         self.assertIsNone(self.campaign_row()["pr_url"])
         self.assertNotIn(unit["branch"], self.remote_heads())
+
+    def test_deliver_refuses_the_default_branch(self):
+        # The campaign branch is the pull request head; delivery must refuse it
+        # when it is the default branch.
+        config = dict(self.svc.config)
+        config["target_branch"] = "main"
+        config["main_branch"] = "main"
+        with self.assertRaises(SlicemeError) as ctx:
+            integrate.deliver_pull_request(self.svc.store, self.svc.root, config)
+        self.assertIn("default branch", str(ctx.exception))
+
+    def test_deliver_refuses_a_campaign_branch_equal_to_the_delivery_base(self):
+        # An explicit --base may name a non-default branch.  The campaign branch
+        # must not equal it, or the pull request would have head == base.
+        run("git", "branch", "develop", "main", cwd=self.root)
+        config = dict(self.svc.config)
+        config["target_branch"] = "develop"
+        config["main_branch"] = "develop"
+        config["delivery_base"] = "develop"
+        with self.assertRaises(SlicemeError) as ctx:
+            integrate.deliver_pull_request(self.svc.store, self.svc.root, config)
+        self.assertIn("delivery base", str(ctx.exception))
 
 
 class GhResolverTests(unittest.TestCase):

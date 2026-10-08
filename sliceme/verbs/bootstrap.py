@@ -24,14 +24,29 @@ from ..util import (
     write_json,
 )
 from .support import (
-    _campaign_has_work,
-    _default_worktree_branch,
     _ensure_gitignore,
-    _resolve_target_branch,
     _unique_branch,
     _unique_worktree,
     campaign_lock,
 )
+
+
+def _campaign_branch_of(design: str | None, feature_branch: str | None) -> str:
+    """The campaign branch: the pull request head.
+
+    An explicit ``feature_branch`` wins.  Otherwise the engine derives
+    ``feat/<slug(design-stem)>`` from the design document name.  A caller with
+    neither cannot pick a campaign branch, so the engine refuses.
+    """
+    explicit = str(feature_branch or "").strip()
+    if explicit:
+        return explicit
+    if not design:
+        raise SlicemeError(
+            "start needs --design (the design document path) or --feature-branch"
+        )
+    slug = slugify(Path(str(design)).stem)
+    return f"feat/{slug}"
 
 
 class BootstrapVerbs:
@@ -41,21 +56,19 @@ class BootstrapVerbs:
         cls,
         root: Path,
         *,
-        main_branch: str | None = None,
-        target_branch: str | None = None,
-        target_mode: str | None = None,
-        worktree_branch: str | None = None,
+        design: str | None = None,
+        feature_branch: str | None = None,
         base: str | None = None,
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
         """Create the on-disk plane (config + state db) for a git repo.
 
-        ``target_branch`` is the feature branch delivery finally lands on.
-        ``target_mode`` is one of ``current``, ``existing``, or ``new``; ``new``
-        creates the branch from ``base``.  Delivery refuses to commit to
-        ``main``, ``master``, or the recorded default branch, so a plane that
-        targets one can be created but never delivered.
+        ``feature_branch`` names the campaign branch (the pull request head).
+        When it is absent the engine derives ``feat/<slug(design-stem)>`` from
+        ``design``.  ``base`` overrides the delivery base (the pull request
+        base); the default is the repository default branch.  The engine refuses
+        to use the default branch as the campaign branch.
         """
         from ..util import ensure_parent, state_dir
 
@@ -67,30 +80,29 @@ class BootstrapVerbs:
             raise SlicemeError(
                 "already initialised (.sliceme/config.json exists); use --force to reset config"
             )
-        target = _resolve_target_branch(
-            root,
-            target_branch=target_branch or main_branch,
-            target_mode=target_mode,
-            base=base,
-        )
+        campaign_branch = _campaign_branch_of(design, feature_branch)
         default_branch = integrate.found_default_branch(root)
-        base = base or target
-        try:
-            gitutil.rev_parse(root, base)
-        except SlicemeError:
-            raise SlicemeError(f"base branch/ref '{base}' does not exist") from None
-        worktree_branch = worktree_branch or _default_worktree_branch(root, target)
+        delivery_base = base or default_branch
+        if base:
+            try:
+                gitutil.rev_parse(root, base)
+            except SlicemeError:
+                raise SlicemeError(f"delivery base '{base}' does not exist") from None
         if integrate.is_default_branch(
-            root, worktree_branch, {"default_branch": default_branch}
+            root, campaign_branch, {"default_branch": default_branch}
         ):
-            raise SlicemeError("the campaign worktree branch cannot be the default branch")
+            raise SlicemeError("the campaign branch cannot be the default branch")
+        # The campaign worktree accumulates on the campaign branch, so the
+        # worktree branch and the pull request head are one branch.
+        worktree_branch = campaign_branch
         config = {
             "version": 1,
-            "target_branch": target,
+            "target_branch": campaign_branch,
             # Deprecated mirror kept for one release; read target_branch first.
-            "main_branch": target,
+            "main_branch": campaign_branch,
             "worktree_branch": worktree_branch,
-            "base": base,
+            "delivery_base": delivery_base,
+            "base": delivery_base,
             "default_branch": default_branch,
             "checks": checks or [],
             "policy": {"require_verification": True, "allow_auto_approve": [], "remote": "origin"},
@@ -100,114 +112,104 @@ class BootstrapVerbs:
         write_json(cfg_file, config)
         state.mkdir(parents=True, exist_ok=True)
         store = Store(root)
-        store.close()
+        try:
+            cls._create_plane_campaign(
+                store,
+                branch=campaign_branch,
+                worktree_branch=worktree_branch,
+                delivery_base=delivery_base,
+                design=design,
+            )
+            store.conn.commit()
+        finally:
+            store.close()
         _ensure_gitignore(root)
         return config
 
+    @staticmethod
+    def _create_plane_campaign(
+        store: Store,
+        *,
+        branch: str,
+        worktree_branch: str | None = None,
+        delivery_base: str,
+        design: str | None,
+    ) -> dict[str, Any]:
+        """Create the campaign row for *branch* (idempotent on the branch)."""
+        existing = store.get_campaign(branch)
+        if existing is not None:
+            # A different design must not silently reuse this branch.  Two
+            # design names can slugify to one branch, so refuse the collision
+            # and let the caller pick a branch with --feature-branch.
+            recorded = str(existing.get("design") or "").strip()
+            requested = str(design or "").strip()
+            if recorded and requested and recorded != requested:
+                raise SlicemeError(
+                    f"campaign branch '{branch}' already belongs to design "
+                    f"'{recorded}'; pass --feature-branch to choose another branch"
+                )
+            return existing
+        key = branch_key(branch)
+        by_key = store.get_campaign(key)
+        if by_key is not None and by_key["target_branch"] != branch:
+            raise SlicemeError(
+                f"branch key collision: '{branch}' and "
+                f"'{by_key['target_branch']}' share the key '{key}'"
+            )
+        return store.create_campaign(
+            key=key,
+            target_branch=branch,
+            worktree_branch=worktree_branch or branch,
+            delivery_base=delivery_base,
+            base=delivery_base,
+            design=design,
+            unit_name="campaign" if not store.list_campaigns() else f"campaign:{key}",
+        )
+
     @classmethod
-    def _sync_campaign_retarget(
+    def _register_plane_campaign(
         cls,
         root: Path,
         *,
-        old_target: str | None = None,
-        worktree_branch: str | None = None,
-        target_mode: str | None = None,
+        design: str | None,
+        feature_branch: str | None,
+        base: str | None,
     ) -> None:
-        """Register a campaign for a named target branch.
+        """Register a campaign in an existing plane (idempotent on the branch).
 
-        A resumed campaign already has a row, so this is a no-op.  A target
-        chosen with ``new`` is always a new campaign.  When the caller adopts
-        an existing branch and the plane has one campaign with no recorded
-        work, that campaign is retargeted in place for backward compatibility.
+        Repeated ``start`` with a different ``feature_branch`` adds a campaign
+        to the same plane; the earlier campaigns stay intact.  The config
+        mirrors follow the newest campaign branch.
         """
+        campaign_branch = _campaign_branch_of(design, feature_branch)
         cfg = read_json(config_path(root)) or {}
-        new_target = cfg.get("target_branch") or cfg.get("main_branch")
-        if not new_target:
-            return
+        default_branch = cfg.get("default_branch") or integrate.found_default_branch(root)
+        delivery_base = base or cfg.get("delivery_base") or default_branch
+        if integrate.is_default_branch(
+            root, campaign_branch, {"default_branch": default_branch}
+        ):
+            raise SlicemeError("the campaign branch cannot be the default branch")
+        worktree_branch = campaign_branch
+        cfg["target_branch"] = campaign_branch
+        cfg["main_branch"] = campaign_branch
+        cfg["worktree_branch"] = worktree_branch
+        cfg["delivery_base"] = delivery_base
+        cfg["base"] = delivery_base
+        cfg["default_branch"] = default_branch
+        write_json(config_path(root), cfg)
         with campaign_lock(root):
             store = Store(root)
             try:
-                # A plane created by `start --no-unit` has no row yet.
-                if not store.list_campaigns() and old_target:
-                    store.create_campaign(
-                        key=branch_key(str(old_target)),
-                        target_branch=str(old_target),
-                        worktree_branch=_default_worktree_branch(root, str(old_target)),
-                        base=cfg.get("base"),
-                        unit_name="campaign",
-                    )
-                if store.get_campaign(new_target) is not None:
-                    store.conn.commit()
-                    return
-                old = store.get_campaign(old_target) if old_target else None
-                if (
-                    old is not None
-                    and old["target_branch"] != str(new_target)
-                    and target_mode != "new"
-                    and not _campaign_has_work(store, root, old)
-                ):
-                    store.update_campaign_target(
-                        old["key"],
-                        target_branch=str(new_target),
-                        worktree_branch=worktree_branch,
-                    )
-                    store.conn.commit()
-                    return
-                key = branch_key(str(new_target))
-                by_key = store.get_campaign(key)
-                if by_key is not None and by_key["target_branch"] != str(new_target):
-                    raise SlicemeError(
-                        f"branch key collision: '{new_target}' and "
-                        f"'{by_key['target_branch']}' share the key '{key}'"
-                    )
-                store.create_campaign(
-                    key=key,
-                    target_branch=str(new_target),
-                    worktree_branch=str(
-                        worktree_branch
-                        or _default_worktree_branch(root, str(new_target))
-                    ),
-                    base=cfg.get("base"),
-                    unit_name=f"campaign:{key}",
+                cls._create_plane_campaign(
+                    store,
+                    branch=campaign_branch,
+                    worktree_branch=worktree_branch,
+                    delivery_base=delivery_base,
+                    design=design,
                 )
                 store.conn.commit()
             finally:
                 store.close()
-
-    @classmethod
-    def _retarget_plane(
-        cls,
-        root: Path,
-        *,
-        main_branch: str | None = None,
-        target_branch: str | None = None,
-        target_mode: str | None = None,
-        worktree_branch: str | None = None,
-        base: str | None = None,
-    ) -> None:
-        """Point an existing plane's target branch at an existing branch.
-
-        Used by ``start --target`` so a campaign adopts the chosen branch even
-        when the plane already exists.  It never creates a branch unless
-        ``target_mode`` is ``new``: a missing one is an error.
-        """
-        target = _resolve_target_branch(
-            root,
-            target_branch=target_branch or main_branch,
-            target_mode=target_mode,
-            base=base,
-        )
-        cfg = read_json(config_path(root))
-        if cfg is None:
-            raise SlicemeError("missing .sliceme/config.json")
-        default_branch = cfg.get("default_branch") or integrate.found_default_branch(root)
-        cfg["target_branch"] = target
-        cfg["main_branch"] = target
-        cfg["default_branch"] = default_branch
-        cfg["base"] = base or target
-        if worktree_branch:
-            cfg["worktree_branch"] = worktree_branch
-        write_json(config_path(root), cfg)
 
     @classmethod
     def init(
@@ -215,12 +217,10 @@ class BootstrapVerbs:
         path: str | os.PathLike[str] | None = None,
         *,
         name: str | None = None,
+        design: str | None = None,
+        feature_branch: str | None = None,
         base: str | None = None,
         kind: str = "worker",
-        main_branch: str | None = None,
-        target_branch: str | None = None,
-        target_mode: str | None = None,
-        worktree_branch: str | None = None,
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
         no_unit: bool = False,
@@ -250,35 +250,22 @@ class BootstrapVerbs:
             root = gitutil.toplevel(start)
             cls.init_plane(
                 root,
-                main_branch=main_branch,
-                target_branch=target_branch,
-                target_mode=target_mode,
-                worktree_branch=worktree_branch,
+                design=design,
+                feature_branch=feature_branch,
                 base=base,
                 checks=checks,
                 force=force,
             )
             initialized = True
-        elif main_branch or target_branch or target_mode:
-            # An existing plane keeps its identity; adopting a target branch
-            # registers a campaign.  A resumed campaign already has a row, so
-            # the registration is a no-op; a different target is a new
-            # campaign and the earlier one stays intact.
-            old_cfg = read_json(config_path(root)) or {}
-            old_target = old_cfg.get("target_branch") or old_cfg.get("main_branch")
-            cls._retarget_plane(
+        elif design or feature_branch:
+            # An existing plane registers one campaign for this design.  A
+            # repeated start with a different feature branch adds a campaign;
+            # the earlier campaigns stay intact.
+            cls._register_plane_campaign(
                 root,
-                main_branch=main_branch,
-                target_branch=target_branch,
-                target_mode=target_mode,
-                worktree_branch=worktree_branch,
+                design=design,
+                feature_branch=feature_branch,
                 base=base,
-            )
-            cls._sync_campaign_retarget(
-                root,
-                old_target=old_target,
-                worktree_branch=worktree_branch,
-                target_mode=target_mode,
             )
 
         # Keep the exclude entry fresh even when the plane already existed and

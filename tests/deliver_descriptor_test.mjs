@@ -1,10 +1,10 @@
 /**
  * Unit tests for `applyEngineReply` in `integrations/pi/common.ts`.
  *
- * The engine's `deliver` reply carries `target_branch`, not `feature_branch`.
- * The reply handler must still mark the session descriptor `completed`, and it
- * must do so without an active-campaign pointer, so a successful delivery never
- * leaves a `suspended` descriptor (`docs/sessions.md` §6).
+ * The engine's `deliver` reply carries `feature_branch`.  The reply handler
+ * must still mark the session descriptor `completed`, and it must do so
+ * without an active-campaign pointer, so a successful delivery never leaves a
+ * `suspended` descriptor (`docs/sessions.md` §6).
  *
  * `tests/test_pi_package.py` runs this harness through Node's type stripping.
  */
@@ -30,11 +30,11 @@ function writeDescriptor(branch) {
 	);
 }
 
-// A deliver reply names `target_branch`.  There is no active-campaign pointer,
-// yet the descriptor must flip to `completed`.
+// A deliver reply names `feature_branch`.  There is no active-campaign
+// pointer, yet the descriptor must flip to `completed`.
 writeDescriptor("feat/checkout");
 const deliver = {
-	target_branch: "feat/checkout",
+	feature_branch: "feat/checkout",
 	source: "sliceme/feat-checkout",
 	results: [{ status: "landed" }],
 };
@@ -47,7 +47,7 @@ assert.ok(readJson(sessionPath(dir, "feat/checkout"), {}).completed_at);
 // A deliver reply that did not land leaves the descriptor untouched.
 writeDescriptor("feat/other");
 applyEngineReply(dir, "deliver", {
-	target_branch: "feat/other",
+	feature_branch: "feat/other",
 	results: [{ status: "failed" }],
 });
 assert.equal(readJson(sessionPath(dir, "feat/other"), {}).status, "suspended");
@@ -55,7 +55,7 @@ assert.equal(readJson(sessionPath(dir, "feat/other"), {}).status, "suspended");
 // A non-deliver reply still sets the pointer but never completes the
 // descriptor.
 writeDescriptor("feat/third");
-applyEngineReply(dir, "status", { target_branch: "feat/third" });
+applyEngineReply(dir, "status", { feature_branch: "feat/third" });
 assert.equal(readActiveCampaign(dir), "feat/third");
 assert.equal(readJson(sessionPath(dir, "feat/third"), {}).status, "suspended");
 

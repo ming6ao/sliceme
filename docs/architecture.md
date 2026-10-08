@@ -21,7 +21,7 @@ Sliceme turns a design document into a DAG of work. It packs non-conflicting
 nodes into waves. It runs one pure-editor worker subagent per node in a single
 campaign worktree. One synchronous check runner tests the recorded wave tree
 against a content fingerprint. Sliceme then opens one pull request from the
-campaign worktree branch onto a target feature branch after approval.
+campaign branch onto the default branch after the user confirms.
 
 A pi coordinator session owns the campaign loop. The trusted `sliceme.campaign`
 workflow resource runs the loop, and pi-subagents owns child execution. A
@@ -40,7 +40,7 @@ it.
 | **One check runner.** | All checks go through one synchronous runner, so shared resources (and the GPU) stay serialized. The GPU rule adds a single-node wave per GPU node. |
 | **Verification is pinned to content.** | A verdict is valid only for an exact `(tree, command vector, toolchain, policy, sandbox, checks, source)` fingerprint. |
 | **Git and SQLite win over caches.** | `state.json` is an optional, read-only legacy override that the engine never writes. On conflict, git and `state.db` are authoritative. |
-| **Fail closed, fail lastingly.** | A missing sandbox gate or a default-branch target aborts before mutation; a failed check or a forge failure leaves the campaign working. |
+| **Fail closed, fail lastingly.** | A missing sandbox gate or a default-branch campaign branch aborts before mutation; a failed check or a forge failure leaves the campaign working. |
 | **pi-subagents owns children.** | The resource requests children through `runs.run`; pi-subagents owns status, events, tool scoping, and control. |
 
 ## 3. System context
@@ -57,7 +57,7 @@ flowchart LR
   SL --> DB[(".sliceme/state.db<br/>SQLite WAL")]
   SL --> FS[(".sliceme/ files<br/>dag · state · report · descriptor")]
   SL -.->|"GPU job"| GPU["GPU runner<br/>tools/gpu.sh"]
-  PIUSER(["Human approval<br/>and promotion"]) -.-> REPO
+  PIUSER(["Human confirmation<br/>and promotion"]) -.-> REPO
 ```
 
 - **pi** is the only supported host today. The engine itself is host-agnostic:
@@ -66,9 +66,10 @@ flowchart LR
   it only through `git` operations (worktrees, commits, pushes, pull requests).
   Sliceme never commits its own plane files: it adds `.sliceme/` to the
   repository's `.git/info/exclude`.
-- **Promotion to the default branch is a human `git` step.** The engine refuses
-  to deliver onto `main`, `master`, or the recorded default branch, with no
-  override.
+- **Promotion to the default branch is a human act on the forge.** The engine
+  refuses to push `main`, `master`, or the recorded default branch as the
+  campaign branch, with no override. The pull request base is the delivery base
+  (`main`).
 
 ## 4. Layered part view
 
@@ -91,7 +92,7 @@ flowchart TB
     VE["verifier.py<br/>fingerprints · check runner"]
     SB["sandbox.py<br/>isolation profiles · gate · GPU"]
     CH["checks.py<br/>one synchronous combined-tree runner + cache"]
-    IN["integrate.py<br/>target guard · delivery · simulate"]
+    IN["integrate.py<br/>campaign-branch guard · delivery · simulate"]
     GU["gitutil.py<br/>worktree · merge · merge-tree"]
     STO["store.py<br/>SQLite WAL persistence"]
   end
@@ -142,9 +143,9 @@ adapter owns state.
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner. |
 | `sliceme/sandbox.py` | Isolation profiles, project manifests, the gate, and command wrapping. |
 | `sliceme/checks.py` | The single synchronous combined-tree runner and the `checks` cache. |
-| `sliceme/integrate.py` | Target-branch guard, pull request delivery, and combined-tree simulation. |
+| `sliceme/integrate.py` | Campaign-branch guard and the delivery base, pull request delivery, and combined-tree simulation. |
 | `sliceme/pullrequest.py` | The `gh` forge client. |
-| `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; deterministic report. |
+| `sliceme/campaign.py` | `dag.json` / `state.json` layout and readers; the deterministic report and evidence document. |
 | `sliceme/review/` | The reduced review surface: `api.py`, `packet.py`, `diff.py`. |
 | `integrations/pi/*.ts` | pi adapter: the `sliceme` tool, the `sliceme.campaign` resource, and the invocation helpers. |
 | `integrations/pi/agents/*.md` | Planner and worker prompts plus their `tools:` scoping. |
@@ -174,18 +175,19 @@ flowchart LR
 | `status` | Units, candidates, waves, checks, health, simulation; `--sessions` and `--resume` cover the campaign registry and the resume plan. |
 | `ready` | The current-wave ready node ids, the wave index, and `paused`. |
 | `plan` | The design's campaign split joined with the registry state. |
-| `deliver` | Push the campaign worktree branch and open the delivery pull request after approval. |
+| `deliver` | Push the campaign branch and open the delivery pull request against the delivery base after the confirmation. |
 | `check` | The one combined-tree check runner for the current wave. |
 | `wave` | The campaign worktree: `--open` or `--record --current`/`--wave N`. |
 | `review` | One campaign decision, or the report. |
+| `evidence` | The deterministic evidence document (commits, checks, diffs, logs). |
 
 To add an action: define it once in `surface.ACTIONS`, implement a handler in a
 verb group and a `Service` method, and add the parameter forwarding in
 `integrations/pi/coordinator.ts`. The CLI follows automatically.
 
 A plane holds one `campaigns` registry and one or more campaigns. A campaign is
-identified by its target branch. Every campaign-scoped action accepts
-`--campaign REF`, where `REF` is a target branch, a branch key, or a unit name.
+identified by its campaign branch. Every campaign-scoped action accepts
+`--campaign REF`, where `REF` is a campaign branch, a branch key, or a unit name.
 A plane with one campaign makes the flag optional. A plane with several
 campaigns returns a plane summary when the flag is absent.
 
@@ -205,10 +207,10 @@ sequenceDiagram
   participant G as Git
 
   U->>C: /sliceme DESIGN.md
-  C->>E: start --no-unit --target feature-branch
-  C->>E: wave --open (campaign worktree)
+  C->>E: start --no-unit --design DESIGN.md (derive the branch; record main)
   C->>P: start (planner subagent)
   P->>P: writes the campaign dag.json
+  C->>E: wave --open (fetch main; worktree from origin/main)
   C->>R: launch the workflow (async)
   loop each ready node (dependencies done)
     R->>W: runs.run a worker per ready node (pure editor)
@@ -219,9 +221,10 @@ sequenceDiagram
     R->>V: runs.run the builtin reviewer with the evidence
     V-->>R: findings
   end
-  U->>E: review --decision approve
-  C->>E: review --report
-  C->>E: deliver (push + pull request into the target)
+  C->>E: evidence + review --report
+  U->>C: confirm the pull request one time
+  C->>E: review --decision approve
+  C->>E: deliver (push the campaign branch; pull request against main)
 ```
 
 The coordinator is **not** a unit. The plane starts with `--no-unit`, so the
@@ -342,18 +345,18 @@ sequenceDiagram
   participant G as Git
   participant F as Forge (gh)
 
-  C->>E: deliver (when every wave is done and a human approved the campaign)
+  C->>E: deliver (when every wave is done and the user confirmed)
   E->>E: require a newest unconsumed approve for the campaign
-  E->>E: refuse if target is main, master, or the default branch
-  E->>G: resolve the campaign worktree branch (source)
-  alt target already contains the source
+  E->>E: refuse if the campaign branch is main, master, or the default branch
+  E->>G: resolve the campaign branch (source)
+  alt delivery base already contains the source
     E->>D: mark candidates landed
     E-->>C: no-op (already contained)
   else pull request already open
     E->>D: mark candidates landed
     E-->>C: no-op (existing pull request)
   else
-    E->>G: git merge-tree target source (pre-check)
+    E->>G: git merge-tree base source (pre-check)
     alt merge conflict
       E-->>C: failed: structured conflict, nothing pushed
     else merge clean
@@ -362,7 +365,7 @@ sequenceDiagram
         E-->>C: failed: pull request not opened
       else checks pass
         E->>G: git push origin source
-        E->>F: gh pr create (body = campaign report)
+        E->>F: gh pr create (body = evidence document)
         E->>D: candidate=landed, unit=landed, state=delivered
         E-->>C: delivered with the pull request URL
       end
@@ -371,10 +374,10 @@ sequenceDiagram
 ```
 
 Delivery is deterministic and idempotent. Sliceme returns an open pull request as
-it is. A target that already contains the campaign worktree is a no-op. Delivery
-pushes the campaign worktree branch and opens one pull request with `gh`. The
-engine never merges and never mutates the target branch. The default branch is
-never a valid target.
+it is. A delivery base that already contains the campaign branch is a no-op.
+Delivery pushes the campaign branch and opens one pull request with `gh`. The
+engine never merges and never mutates the delivery base. The campaign branch is
+never the default branch.
 
 ## 10. State and persistence
 
@@ -398,6 +401,7 @@ erDiagram
     text key UK
     text target_branch UK
     text worktree_branch UK
+    text delivery_base
     text state
   }
   units {
@@ -438,6 +442,8 @@ erDiagram
   <branch-key>.dag.json            # canonical plan (never committed)
   <branch-key>.state.json          # optional read-only legacy override (never written by the engine)
   <branch-key>.report.md           # deterministic report (kept on cleanup)
+  <branch-key>.evidence.json       # complete evidence (full check output)
+  <branch-key>.evidence.md         # human evidence; the pull request body
   <branch-key>.session.json        # adapter-written suspend/resume descriptor
   <branch-key>.control.json        # cooperative pause flag
   <branch-key>.worker_<id>.log     # one log per worker id
@@ -475,7 +481,7 @@ stateDiagram-v2
 | A wave record touches a path outside every node's `owns` | Plan conformance rejects it; the coordinator widens `owns` or adds a `depends_on` edge; waves reproject. |
 | Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; structured findings return; nothing is pushed. |
 | Checks fail at `deliver` | Sliceme does not open the pull request; candidates stay unlanded. |
-| Default-branch target | Refused at `start` and at `deliver`; there is no override. |
+| Default-branch campaign branch | Refused at `start` and at `deliver`; there is no override. |
 | Orchestrator crash | The children of the coordinator die. On resume, `running` and `recorded` nodes become `paused` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. |
 | Concurrent spawns completing together | Coordinator state is a rebuildable cache; git and `state.db` are the source of truth. |
 
@@ -530,5 +536,5 @@ resource and the engine own the campaign".
 - [database.md](./database.md) — the SQLite schema and row lifecycle.
 - [observability.md](./observability.md) — status projections and check counts.
 - [sessions.md](./sessions.md) — suspend and resume, checkpoints, and the campaign registry.
-- [review.md](./review.md) — the campaign approval gate and the report.
+- [review.md](./review.md) — the confirmation gate, the report, and the evidence.
 - [publishing.md](./publishing.md) — packaging and release.

@@ -1,8 +1,9 @@
-"""Target-branch selection and the hard default-branch guard.
+"""Campaign-branch selection and the delivery base.
 
-The target (feature) branch is chosen once at start as the current branch, an
-existing branch, or a new branch.  Sliceme never commits to ``main``,
-``master``, or the repository default branch, and there is no override.
+The campaign branch is the pull request head.  It is chosen once at start: an
+explicit ``feature_branch``, else ``feat/<slug(design-stem)>``.  The delivery
+base (the pull request base) is the repository default branch.  Sliceme never
+commits to ``main``, ``master``, or the repository default branch.
 """
 
 import subprocess
@@ -37,87 +38,69 @@ class TargetBranchCase(unittest.TestCase):
             self.svc.close()
         self.tmp.cleanup()
 
-    def branch_exists(self, branch):
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", branch],
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-            ).returncode
-            == 0
-        )
-
-    def test_current_mode_records_the_checked_out_branch(self):
-        run("git", "checkout", "-q", "-b", "feat/current", cwd=self.root)
-        Service.init_plane(self.root, checks=self.checks)
+    def test_the_design_derives_the_campaign_branch(self):
+        Service.init_plane(self.root, design="DESIGN.md", checks=self.checks)
         self.svc = Service(self.root)
-        self.assertEqual(self.svc.config["target_branch"], "feat/current")
-        self.assertEqual(self.svc.config["main_branch"], "feat/current")
+        self.assertEqual(self.svc.config["target_branch"], "feat/design")
+        self.assertEqual(self.svc.config["main_branch"], "feat/design")
+        self.assertEqual(self.svc.config["worktree_branch"], "feat/design")
+        self.assertEqual(self.svc.config["delivery_base"], "main")
         self.assertEqual(self.svc.config["default_branch"], "main")
-        self.assertTrue(self.svc.config["worktree_branch"].startswith("sliceme/"))
 
-    def test_existing_mode_adopts_a_named_branch(self):
-        run("git", "checkout", "-q", "-b", "feat/existing", cwd=self.root)
-        run("git", "checkout", "-q", "main", cwd=self.root)
+    def test_the_feature_branch_override_wins(self):
         Service.init_plane(
-            self.root,
-            target_branch="feat/existing",
-            target_mode="existing",
-            checks=self.checks,
+            self.root, feature_branch="feat/existing", checks=self.checks
         )
         self.svc = Service(self.root)
         self.assertEqual(self.svc.config["target_branch"], "feat/existing")
 
-    def test_new_mode_creates_the_target_branch(self):
+    def test_a_delivery_base_override_is_recorded(self):
+        run("git", "branch", "develop", cwd=self.root)
         Service.init_plane(
-            self.root,
-            target_branch="feat/brand-new",
-            target_mode="new",
-            checks=self.checks,
+            self.root, feature_branch="feat/x", base="develop", checks=self.checks
         )
         self.svc = Service(self.root)
-        self.assertEqual(self.svc.config["target_branch"], "feat/brand-new")
-        self.assertTrue(self.branch_exists("feat/brand-new"))
+        self.assertEqual(self.svc.config["delivery_base"], "develop")
 
-    def test_missing_existing_branch_is_rejected(self):
+    def test_a_design_or_a_feature_branch_is_required(self):
         with self.assertRaises(SlicemeError):
-            Service.init_plane(
-                self.root,
-                target_branch="feat/missing",
-                target_mode="existing",
-                checks=self.checks,
-            )
+            Service.init_plane(self.root, checks=self.checks)
 
-    def test_target_is_persisted_for_the_whole_campaign(self):
-        run("git", "checkout", "-q", "-b", "feat/persist", cwd=self.root)
-        Service.init_plane(self.root, checks=self.checks)
+    def test_a_second_design_cannot_reuse_the_campaign_branch(self):
+        # Two design names can slugify to one campaign branch.  The engine
+        # refuses the collision instead of silently sharing the campaign.
+        Service.init(self.root, design="web/DESIGN.md", checks=self.checks, no_unit=True)
+        with self.assertRaises(SlicemeError) as ctx:
+            Service.init(self.root, design="api/design.md", checks=self.checks, no_unit=True)
+        self.assertIn("already belongs to design", str(ctx.exception))
+
+    def test_start_has_no_target_parameters(self):
+        # `--target` and `--target-mode` are gone: the campaign branch derives
+        # from the design name, and the delivery base is the default branch.
+        from sliceme import surface
+
+        names = {param.name for param in surface.ACTION_BY_NAME["start"].params}
+        self.assertNotIn("target", names)
+        self.assertNotIn("target_mode", names)
+        self.assertIn("design", names)
+        self.assertIn("feature_branch", names)
+        self.assertNotIn("target", {p.name for p in surface.ACTION_BY_NAME["deliver"].params})
+
+    def test_the_default_branch_is_rejected_as_the_campaign_branch(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            Service.init_plane(self.root, feature_branch="main", checks=self.checks)
+        self.assertIn("campaign branch", str(ctx.exception))
+
+    def test_the_branch_is_persisted_for_the_whole_campaign(self):
+        Service.init_plane(
+            self.root, feature_branch="feat/persist", checks=self.checks
+        )
         import json
 
         first = json.loads(config_path(self.root).read_text())
         self.svc = Service(self.root)
-        second = self.svc.config
-        self.assertEqual(first["target_branch"], second["target_branch"])
-        self.assertEqual(first["worktree_branch"], second["worktree_branch"])
-
-    def test_deliver_refuses_main_even_when_it_is_not_the_recorded_default(self):
-        # Simulate a repository whose recorded default is a non-main branch:
-        # main is still reserved and must be refused.
-        run("git", "checkout", "-q", "-b", "develop", cwd=self.root)
-        Service.init_plane(self.root, target_branch="develop", target_mode="existing",
-                           checks=self.checks)
-        cfg = config_path(self.root).read_text()
-        self.assertIn("develop", cfg)
-        # Retarget the plane at main and confirm delivery refuses it.
-        run("git", "checkout", "-q", "main", cwd=self.root)
-        Service.init_plane(
-            self.root, target_branch="main", target_mode="existing", force=True,
-            checks=self.checks,
-        )
-        self.svc = Service(self.root)
-        with self.assertRaises(SlicemeError) as ctx:
-            self.svc.deliver()
-        self.assertIn("default branch", str(ctx.exception))
+        self.assertEqual(first["target_branch"], self.svc.config["target_branch"])
+        self.assertEqual(first["worktree_branch"], self.svc.config["worktree_branch"])
 
 
 if __name__ == "__main__":

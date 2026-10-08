@@ -45,7 +45,7 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
-            out = run_cli(["--json", "start", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--design", "DESIGN.md", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue((root / ".sliceme" / "config.json").is_file())
 
@@ -67,7 +67,7 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
             # First call from the main checkout initialises the plane and a unit.
-            out = run_cli(["--json", "start"], root)
+            out = run_cli(["--json", "start", "--design", "DESIGN.md"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             first = json.loads(out.stdout)
             self.assertTrue(first["initialized"])
@@ -106,7 +106,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            run_cli(["--json", "start"], root)
+            run_cli(["--json", "start", "--design", "DESIGN.md"], root)
             run_cli(["--json", "start", "--name", "alpha"], root)
             run_cli(["--json", "start", "--name", "beta"], root)
 
@@ -128,7 +128,7 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
-            out = run_cli(["--json", "start"], root)
+            out = run_cli(["--json", "start", "--design", "DESIGN.md"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             worktree = Path(json.loads(out.stdout)["worktree"])
 
@@ -167,9 +167,8 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
-            run_cli(["--json", "start", "--no-unit"], root)
-            out = run_cli(["--json", "start", "--name", "alpha", "--base", "feat/x"], root)
+            run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x"], root)
+            out = run_cli(["--json", "start", "--name", "alpha", "--base", "main"], root)
             worktree = Path(json.loads(out.stdout)["worktree"])
 
             out = run_cli(["status", "--short"], worktree)
@@ -186,16 +185,15 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
-            # Campaign bootstrap: check out the feature branch first; `start`
-            # records it as the target and never creates one.
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
+            # Campaign bootstrap: `start` records the campaign branch; the
+            # worktree is created later from the delivery base.
             remote_tmp = tempfile.TemporaryDirectory()
             self.addCleanup(remote_tmp.cleanup)
             remote = Path(remote_tmp.name) / "origin.git"
             subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
             subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=tmp, check=True)
             out = run_cli(
-                ["--json", "start", "--no-unit", "--check", "ok=true"],
+                ["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
@@ -240,7 +238,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
             pr = delivered["pull_request"]
             self.assertTrue(pr and pr["url"])
-            # The campaign branch is pushed; the target branch stays as it was
+            # The campaign branch is pushed; the delivery base stays as it was
             # until a human merges the pull request.
             self.assertEqual(
                 subprocess.run(
@@ -253,7 +251,7 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(
                 subprocess.run(
-                    ["git", "show", "feat/x:a.txt"], cwd=tmp, capture_output=True, text=True
+                    ["git", "show", "main:a.txt"], cwd=tmp, capture_output=True, text=True
                 ).stdout,
                 "hi\n",
             )
@@ -281,8 +279,7 @@ class CliTests(unittest.TestCase):
             (root / "src" / "b" / "y.py").write_text("b = 1\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             write_json(
                 campaign.dag_path(root, "feat/x"),
@@ -335,8 +332,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
 
             nodes = [
@@ -365,8 +361,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
-            run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
 
             state_dir = root / ".sliceme"
             (state_dir / "feat--x.dag.json").write_text(
@@ -420,13 +415,13 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
             out = run_cli(
-                ["start", "--no-unit", "--target", "feat/x", "--target-mode", "new",
+                ["start", "--no-unit", "--feature-branch", "feat/x",
                  "--check", "ok=true"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
             out = run_cli(
-                ["start", "--no-unit", "--target", "feat/y", "--target-mode", "new"],
+                ["start", "--no-unit", "--feature-branch", "feat/y"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
@@ -457,8 +452,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             write_json(
                 campaign.dag_path(root, "feat/x"),
@@ -522,7 +516,7 @@ class CliTests(unittest.TestCase):
             # --short still prints only the unit name, from inside its worktree;
             # it also wins over --dense (both are explicit status views).
             out = run_cli(
-                ["--json", "start", "--name", "alpha", "--base", "feat/x"], root
+                ["--json", "start", "--name", "alpha", "--base", "main"], root
             )
             self.assertEqual(out.returncode, 0, out.stderr)
             worktree = Path(json.loads(out.stdout)["worktree"])
@@ -546,10 +540,8 @@ class CliTests(unittest.TestCase):
                 [
                     "--json",
                     "start",
-                    "--target",
+                    "--feature-branch",
                     "feat/x",
-                    "--target-mode",
-                    "new",
                     "--no-unit",
                     "--check",
                     "ok=true",
@@ -561,10 +553,8 @@ class CliTests(unittest.TestCase):
                 [
                     "--json",
                     "init",
-                    "--target",
+                    "--feature-branch",
                     "feat/y",
-                    "--target-mode",
-                    "new",
                     "--no-unit",
                     "--base",
                     "main",
@@ -592,8 +582,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             write_json(
                 campaign.dag_path(root, "feat/x"),

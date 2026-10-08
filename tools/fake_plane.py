@@ -294,7 +294,6 @@ def build_git_project(root: Path) -> None:
         write_text(root, rel, text)
     run("git", "add", "-A", cwd=root)
     run("git", "commit", "-qm", "initial checkout service", cwd=root)
-    run("git", "checkout", "-q", "-b", FEATURE_BRANCH, cwd=root)
 
 
 def build_campaign(svc: Service) -> dict[str, str]:
@@ -308,7 +307,7 @@ def build_campaign(svc: Service) -> dict[str, str]:
         "w5": "document usage and configuration",
     }
     for wave in range(3):
-        svc.create_campaign_workspace(base=FEATURE_BRANCH)
+        svc.create_campaign_workspace(base="main")
         members = (
             [("w1", "w2"), ("w3", "w4"), ("w5",)][wave]
         )
@@ -372,6 +371,7 @@ def write_state(root: Path, config: dict, commits: dict[str, str]) -> None:
         "target_branch": FEATURE_BRANCH,
         "worktree_branch": config.get("worktree_branch"),
         "base": "main",
+        "delivery_base": "main",
         "delivered": False,
         "wave_size": 2,
         "current_wave": 2,
@@ -464,7 +464,7 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
     decoy = {
         "campaign": "notifications-service",
         "feature_branch": DECOY_BRANCH,
-        "worktree_branch": "sliceme/feat-notifications",
+        "worktree_branch": DECOY_BRANCH,
         "design": "DESIGN.md",
         "pi": {
             "session_id": "demo-session-0002",
@@ -531,7 +531,7 @@ def main() -> int:
     build_git_project(root)
     config = Service.init_plane(
         root,
-        target_branch=FEATURE_BRANCH,
+        feature_branch=FEATURE_BRANCH,
         base="main",
         checks=[{"name": "smoke", "command": "true", "required": True}],
     )

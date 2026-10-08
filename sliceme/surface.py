@@ -44,7 +44,7 @@ class Action:
 
 
 CAMPAIGN_HELP = (
-    "campaign to operate on: a target branch, a branch key, or a unit name "
+    "campaign to operate on: a campaign branch, a branch key, or a unit name "
     "(default: the only campaign)"
 )
 
@@ -58,11 +58,9 @@ ACTIONS: tuple[Action, ...] = (
             Param("name", "string", "unit name (default: slug of the directory name)"),
             Param("path", "string", "directory to bootstrap (default: cwd)"),
             Param("kind", "string", "unit kind", choices=("worker",)),
-            Param("base", "string", "base branch/ref for new worktrees"),
-            Param("target", "string", "target (feature) branch delivery lands on; never main/master", flag="target"),
-            Param("target_mode", "string", "how to resolve --target", choices=("current", "existing", "new")),
-            Param("worktree_branch", "string", "campaign accumulation branch (default derived)"),
-            Param("main_branch", "string", "deprecated alias for --target", flag="main"),
+            Param("design", "string", "design document path; the campaign branch derives from its name"),
+            Param("feature_branch", "string", "campaign branch (pull request head); default feat/<design-stem>"),
+            Param("base", "string", "delivery base override (the pull request base; default the default branch)"),
             Param("checks", "list", "trusted check NAME=COMMAND (repeatable)", flag="check"),
             Param("force", "boolean", "overwrite an existing config"),
             Param("no_unit", "boolean", "initialise the plane without creating a unit for cwd"),
@@ -104,7 +102,6 @@ ACTIONS: tuple[Action, ...] = (
         name="deliver",
         summary="push the campaign worktree and open the delivery pull request (after approval)",
         params=(
-            Param("target", "string", "target feature branch for the pull request (default: recorded target)"),
             Param("source", "string", "campaign worktree branch (default: recorded worktree branch)"),
             Param("cleanup", "string", "cleanup after delivery", choices=("none", "worktrees", "all")),
             Param("no_checks", "boolean", "skip the plane's trusted checks"),
@@ -145,6 +142,14 @@ ACTIONS: tuple[Action, ...] = (
             Param("commit", "string", "commit to approve"),
             Param("note", "string", "decision note"),
             Param("actor", "string", "who recorded the decision"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
+        name="evidence",
+        summary="write the deterministic evidence document (commits, checks, diffs, logs)",
+        params=(
+            Param("design", "string", "evidence: design document reference"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -192,12 +197,10 @@ def start(params: dict[str, Any], *, cwd: str | Path | None = None) -> dict[str,
     return Service.init(
         path,
         name=params.get("name"),
+        design=params.get("design"),
+        feature_branch=params.get("feature_branch"),
         base=params.get("base"),
         kind=params.get("kind") or "worker",
-        main_branch=params.get("main_branch"),
-        target_branch=params.get("target"),
-        target_mode=params.get("target_mode"),
-        worktree_branch=params.get("worktree_branch"),
         checks=parse_checks(params.get("checks") or []),
         force=bool(params.get("force")),
         no_unit=bool(params.get("no_unit")),
@@ -267,7 +270,6 @@ def _dispatch_ready(service: "Service", p: dict[str, Any]) -> Any:
 
 def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
     return service.deliver(
-        target=p.get("target"),
         source=p.get("source"),
         cleanup=p.get("cleanup") or "none",
         run_checks_flag=not p.get("no_checks"),
@@ -324,6 +326,10 @@ def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
     raise SlicemeError("review needs --decision or --report")
 
 
+def _dispatch_evidence(service: "Service", p: dict[str, Any]) -> Any:
+    return service.evidence(design=p.get("design"))
+
+
 _HANDLERS = {
     "status": _dispatch_status,
     "ready": _dispatch_ready,
@@ -332,6 +338,7 @@ _HANDLERS = {
     "check": _dispatch_check,
     "wave": _dispatch_wave,
     "review": _dispatch_review,
+    "evidence": _dispatch_evidence,
 }
 
 

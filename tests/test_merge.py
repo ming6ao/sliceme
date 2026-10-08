@@ -225,10 +225,9 @@ class NormalizeDagTest(unittest.TestCase):
         (self.root / "a.txt").write_text("a\n")
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=self.root, check=True)
-        subprocess.run(["git", "checkout", "-q", "-b", "feat/x"], cwd=self.root, check=True)
         Service.init_plane(
             self.root,
-            base="feat/x",
+            feature_branch="feat/x",
             checks=[{"name": "ok", "command": "true", "required": True}],
         )
         self.svc = Service(self.root)
@@ -243,7 +242,7 @@ class NormalizeDagTest(unittest.TestCase):
             {
                 "campaign": "demo",
                 "feature_branch": "feat/x",
-                "base": "feat/x",
+                "base": "main",
                 "concurrency": 3,
                 "nodes": nodes,
             },

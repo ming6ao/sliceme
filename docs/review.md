@@ -30,8 +30,8 @@ Out:
 - Per-commit approval.
 - Remote or shared review.
 - Uncommitted working-tree changes. The review unit is commits.
-- Promotion from the target feature branch to the default branch. That step
-  stays a human act on the forge.
+- Promotion from the campaign branch to the default branch. That step stays a
+  human act on the forge.
 
 ## 2. Architecture
 
@@ -60,8 +60,10 @@ file, so the review surface adds no second store.
 ## 3. Review model
 
 - The review unit is the campaign worktree. Commits accumulate as waves land.
-- A review packet is the diff `target_tip...source_tip`, the commit list, the
-  report, and the check evidence.
+- A review packet is the diff from the delivery base to the campaign head
+  (`target_tip...source_tip`), the commit list, the report, and the check
+  evidence. The diff base is the delivery base, not the campaign branch: the
+  campaign branch is the head.
 - The packet reads the diff from git and the report from disk.
 - The reviewer approves or requests changes on the whole campaign commit set.
 - One approval is one row keyed by `(branch_key, commit_hash)` with a null
@@ -109,9 +111,12 @@ on its own.
   or a failed forge call leaves the decision unconsumed, so a retry needs no new
   review.
 
-The coordinator does not prompt for a final approval. The human decision is the
-trigger. When a human approves the campaign and every wave has completed, the
-coordinator runs `deliver`.
+The coordinator prompts for confirmation one time, after the last wave. It
+writes the evidence and the report, shows the evidence summary and the pull
+request details to the user, and asks for one confirmation. On a confirmation it
+records the approval and runs `deliver`; on a decline it stops and keeps the
+campaign for a later attempt. The confirmation is the only pause; suspension
+stays an explicit user command.
 
 ## 6. The report
 
@@ -120,9 +125,10 @@ sliceme review --report [--narrative TEXT] [--design REF]
 ```
 
 `review --report` writes `.sliceme/<branch-key>.report.md`. The skeleton is
-deterministic: the design reference, the feature branch, the nodes, the
+deterministic: the design reference, the campaign branch, the nodes, the
 candidates, and the newest check per candidate. `--narrative` appends the
-coordinator's summary. The report is the body of the delivery pull request.
+coordinator's summary. The evidence document is the body of the delivery pull
+request; the report stays reviewable next to it.
 
 ## 7. Delivery
 
@@ -140,7 +146,7 @@ Preconditions, enforced in `Service`:
 
 - every wave reaches done, or an `override` decision records a note;
 - the campaign worktree has no uncommitted changes;
-- the target worktree is clean;
+- the delivery base worktree is clean;
 - a human approved the campaign, or an override records a note;
 - if `policy.require_verification`, no candidate is `failed` or `blocked`,
   unless an override records a note.

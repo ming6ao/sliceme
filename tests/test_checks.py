@@ -56,15 +56,14 @@ class ChecksCase(unittest.TestCase):
         (self.root / "src" / "a" / "x.py").write_text("a = 1\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
-        Service.init_plane(self.root, base="feat/x", checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         self.svc = Service(self.root)
         write_json(
             campaign.dag_path(self.root, "feat/x"),
             {
                 "campaign": "checks",
                 "feature_branch": "feat/x",
-                "base": "feat/x",
+                "base": "main",
                 "nodes": self.nodes,
             },
         )
@@ -83,7 +82,7 @@ class ChecksCase(unittest.TestCase):
         )
 
     def workspace(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         return Path(unit["worktree"])
 
 

@@ -44,10 +44,12 @@ class CampaignCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def campaign_plane(self, branch="feat/x", base="main"):
-        # `start` adopts the current branch, so check the campaign branch out
-        # first instead of asking init_plane to create it.
-        run("git", "checkout", "-q", "-b", branch, cwd=self.root)
-        Service.init_plane(self.root, base=base, checks=self.checks)
+        # The campaign branch is the pull request head and the campaign worktree
+        # branch.  The root stays on the delivery base, so the worktree can
+        # check out the campaign branch.
+        Service.init_plane(
+            self.root, feature_branch=branch, base=base, checks=self.checks
+        )
         self.svc = Service(self.root)
         return self.svc
 
@@ -64,7 +66,7 @@ class CampaignCase(unittest.TestCase):
         )
 
     def record(self, wave, edits):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         for rel, content in edits.items():
             (Path(unit["worktree"]) / rel).write_text(content)
         dag = campaign.load_dag(self.root, "feat/x")
@@ -88,43 +90,42 @@ class CampaignCase(unittest.TestCase):
 
 class NoUnitBootstrapTests(CampaignCase):
     def test_no_unit_leaves_no_phantom_unit_and_records_default(self):
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
-        result = Service.init(self.root, no_unit=True)
+        result = Service.init(self.root, design="DESIGN.md", no_unit=True)
         self.assertIsNone(result["unit"])
         self.assertIsNone(result["worktree"])
         service = Service(self.root)
         try:
             self.assertEqual(service.list_units(), [])
-            self.assertTrue(self.branch_exists("feat/x"))
-            self.assertEqual(service.config["main_branch"], "feat/x")
+            self.assertEqual(service.config["target_branch"], "feat/design")
+            self.assertEqual(service.config["main_branch"], "feat/design")
+            self.assertEqual(service.config["worktree_branch"], "feat/design")
+            self.assertEqual(service.config["delivery_base"], "main")
             self.assertEqual(service.config["default_branch"], "main")
         finally:
             service.close()
 
-    def test_init_adopts_the_current_branch_and_never_creates_one(self):
-        run("git", "checkout", "-q", "-b", "feat/adopt", cwd=self.root)
-        Service.init(self.root, no_unit=True)
+    def test_init_uses_the_feature_branch_override(self):
+        Service.init(self.root, feature_branch="feat/adopt", no_unit=True)
         service = Service(self.root)
         try:
-            self.assertEqual(service.config["main_branch"], "feat/adopt")
-            self.assertEqual(service.config["default_branch"], "main")
+            self.assertEqual(service.config["target_branch"], "feat/adopt")
+            self.assertEqual(service.config["delivery_base"], "main")
         finally:
             service.close()
 
-    def test_init_rejects_a_missing_branch(self):
+    def test_init_needs_a_design_or_a_feature_branch(self):
         with self.assertRaises(SlicemeError):
-            Service.init(self.root, main_branch="feat/missing", no_unit=True)
-        self.assertFalse(self.branch_exists("feat/missing"))
+            Service.init(self.root, no_unit=True)
 
-    def test_start_retargets_an_existing_plane_to_the_current_branch(self):
-        Service.init(self.root, no_unit=True)  # plane starts on main
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
-        Service.init(self.root, main_branch="feat/x", no_unit=True)
+    def test_start_adds_a_campaign_for_a_second_feature_branch(self):
+        Service.init(self.root, feature_branch="feat/x", no_unit=True)
+        Service.init(self.root, feature_branch="feat/y", no_unit=True)
         service = Service(self.root)
         try:
-            self.assertEqual(service.config["main_branch"], "feat/x")
-            self.assertEqual(service.config["base"], "feat/x")
-            self.assertEqual(service.config["default_branch"], "main")
+            self.assertEqual(
+                {c["target_branch"] for c in service.store.list_campaigns()},
+                {"feat/x", "feat/y"},
+            )
         finally:
             service.close()
 
@@ -140,19 +141,19 @@ class RecordWaveTests(CampaignCase):
                 {"id": "w2", "owns": ["dir:docs"], "depends_on": []},
             ]
         )
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "a.py").write_text("a = 2\n")
         (Path(unit["worktree"]) / "docs").mkdir(exist_ok=True)
         (Path(unit["worktree"]) / "docs" / "readme.md").write_text("docs\n")
         result = self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
         self.assertEqual([c["node"] for c in result["candidates"]], ["w1", "w2"])
-        # The target branch is untouched until delivery.
-        self.assertEqual(self.file_on("feat/x", "src/a.py"), "a = 1\n")
+        # The delivery base is untouched until the pull request merges.
+        self.assertEqual(self.file_on("main", "src/a.py"), "a = 1\n")
 
     def test_record_rejects_a_path_outside_every_node(self):
         self.campaign_plane()
         self.dag([{"id": "w1", "owns": ["dir:src"], "depends_on": []}])
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "README.md").write_text("# changed\n")
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.record_wave(0)
@@ -304,8 +305,7 @@ class DagStateTests(unittest.TestCase):
 
 class ConfigMigrationTests(CampaignCase):
     def test_default_branch_is_recorded_from_origin_head(self):
-        # Simulate a remote default of ``main`` while checked out elsewhere.
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
+        # Simulate a remote default of ``main``.
         run("git", "update-ref", "refs/remotes/origin/main", "main", cwd=self.root)
         run(
             "git",
@@ -314,9 +314,10 @@ class ConfigMigrationTests(CampaignCase):
             "refs/remotes/origin/main",
             cwd=self.root,
         )
-        Service.init_plane(self.root, checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         cfg = json.loads(config_path(self.root).read_text())
         self.assertEqual(cfg["default_branch"], "main")
+        self.assertEqual(cfg["delivery_base"], "main")
 
 
 class CurrentWaveAdvanceTests(CampaignCase):

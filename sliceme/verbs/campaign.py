@@ -25,7 +25,6 @@ from ..util import (
 )
 from .support import (
     _changed_entries,
-    _default_worktree_branch,
     _describe_violation,
     _owners_of,
     _record_error,
@@ -56,22 +55,15 @@ class CampaignVerbs:
                 return existing
             return self._recreate_campaign_worktree(existing, base=base)
         config = self.config
-        base_ref = (
-            base
-            or campaign_row.get("base")
-            or config.get("base")
-            or campaign_row["target_branch"]
-        )
+        base_ref, fallback = self._delivery_base_ref(base)
         base_commit = gitutil.rev_parse(self.root, base_ref)
-        branch = str(campaign_row.get("worktree_branch") or "").strip()
-        if not branch:
-            branch = _default_worktree_branch(self.root, str(campaign_row["target_branch"]))
-            self.store.update_campaign_target(
-                key,
-                target_branch=str(campaign_row["target_branch"]),
-                worktree_branch=branch,
-            )
-            self.store.conn.commit()
+        # Single-source the branch with every other consumer (delivery, review,
+        # evidence): the recorded worktree branch.  A new row keeps
+        # worktree_branch equal to target_branch, so the fallback only covers a
+        # row migrated from the older two-branch model.
+        branch = str(
+            campaign_row.get("worktree_branch") or campaign_row["target_branch"]
+        )
         if integrate.is_default_branch(self.root, branch, config):
             raise SlicemeError(
                 f"refusing to use the default branch '{branch}' as the campaign worktree"
@@ -97,7 +89,35 @@ class CampaignVerbs:
             gitutil.cleanup_worktree(self.root, worktree)
             raise
         self.store.conn.commit()
-        return self.store.get_unit(unit_id)  # type: ignore[return-value]
+        unit = self.store.get_unit(unit_id)
+        if unit is None:  # pragma: no cover - the insert just succeeded
+            return unit  # type: ignore[return-value]
+        if fallback:
+            unit = {**unit, "base_fallback": fallback}
+        return unit  # type: ignore[return-value]
+
+    def _delivery_base_ref(self, base: str | None) -> tuple[str, str | None]:
+        """The ref the campaign worktree starts from, and any fallback note.
+
+        The worktree starts at the newest delivery base on the remote, so it
+        holds commits the local default branch may not have.  An explicit
+        *base* wins.  When the remote or the delivery base is absent, the local
+        delivery base is used and the fallback is reported to the caller.
+        """
+        if base:
+            return base, None
+        config = self.config
+        delivery_base = integrate.delivery_base_of(config)
+        remote = (config.get("policy") or {}).get("remote") or "origin"
+        fetched = f"{remote}/{delivery_base}"
+        if gitutil.fetch(self.root, remote, delivery_base).ok:
+            return fetched, None
+        if not gitutil.branch_exists(self.root, delivery_base):
+            raise SlicemeError(
+                f"cannot resolve the delivery base '{delivery_base}': "
+                f"fetching {fetched} failed and no local branch exists"
+            )
+        return delivery_base, f"could not fetch {fetched}; using local {delivery_base}"
 
     def _recreate_campaign_worktree(
         self, existing: dict[str, Any], *, base: str | None = None

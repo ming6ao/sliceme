@@ -187,10 +187,9 @@ export function writeJson(file: string, data: unknown): void {
 /**
  * Resolve the campaign branch from an engine reply.
  *
- * ``status`` and ``start`` return ``feature_branch`` (with the deprecated
- * ``main_branch`` mirror); ``deliver`` returns ``target_branch``.  Delivery
- * marks the descriptor, so it must resolve the branch from the deliver reply
- * shape too.
+ * ``status``, ``start``, and ``deliver`` return ``feature_branch`` (with the
+ * deprecated ``target_branch`` / ``main_branch`` mirrors).  Delivery marks the
+ * descriptor, so it must resolve the branch from the deliver reply shape too.
  */
 export function replyBranch(json: any): string | undefined {
 	const branch = json?.feature_branch ?? json?.target_branch ?? json?.main_branch;
@@ -234,7 +233,7 @@ export function markDescriptorCompleted(cwd: string, branch: string): void {
  *
  * The active-campaign pointer follows the reply's branch.  A successful
  * ``deliver`` marks the descriptor ``completed`` regardless of the pointer
- * guard, because the deliver reply carries ``target_branch`` and may arrive
+ * guard, because the deliver reply carries ``feature_branch`` and may arrive
  * before any pointer exists.
  */
 export function applyEngineReply(cwd: string, action: string, json: any): string | undefined {

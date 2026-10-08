@@ -34,22 +34,23 @@ session.
 
 ### 1.2 Campaign
 
-A **campaign** is one piece of work with a target branch. A campaign owns:
+A **campaign** is one piece of work with a campaign branch. A campaign owns:
 
-- one target (feature) branch;
-- one campaign worktree branch;
+- one campaign branch (`feat/<name>`), the pull request head and the worktree
+  branch;
+- one delivery base (the pull request base, `main`);
 - one campaign worktree;
 - one DAG file and one state file;
-- one approval gate and one delivery.
+- one confirmation gate and one delivery.
 
-Two campaigns in one plane differ by target branch. Two campaigns cannot share
-a target branch.
+Two campaigns in one plane differ by campaign branch. Two campaigns cannot share
+a campaign branch.
 
 ## 2. Goal
 
 The engine must support several campaigns in one plane at the same time.
 
-Each campaign must have its own target branch, worktree, DAG, waves, and
+Each campaign must have its own campaign branch, worktree, DAG, waves, and
 delivery gate. The campaigns must share one check runner and one database.
 
 ### 2.1 Constraints
@@ -58,7 +59,7 @@ delivery gate. The campaigns must share one check runner and one database.
   protect the device.
 - Keep the engine as the owner of state. Adapters stay thin.
 - Keep backward compatibility. An old plane must work as a one-campaign plane.
-- Keep the rule that a target branch is unique in one plane.
+- Keep the rule that a campaign branch is unique in one plane.
 
 ## 3. Where each data item lives
 
@@ -105,8 +106,8 @@ registry.
 
 ### 4.1 Campaign identity
 
-Use the target branch as the campaign identity. The primary key is the existing
-`branch_key(target)`.
+Use the campaign branch as the campaign identity. The primary key is the
+existing `branch_key(campaign_branch)`.
 
 The `branch_key` function replaces `/` with `--`. Two branch names can collide.
 For example, `feat/x` and `feat--x` give the same key. Sliceme checks this at
@@ -117,8 +118,9 @@ create time. Two campaigns must not share a key.
 `config.json` keeps the plane fields: `version`, `default_branch`, `checks`,
 `policy`, and `created_at`.
 
-The registry keeps the campaign fields: `target_branch`, `worktree_branch`,
-`base`, `unit_name`, `name`, `design`, and `state`.
+The registry keeps the campaign fields: `target_branch` (the campaign branch),
+`worktree_branch` (equal to it), `delivery_base`, `base`, `unit_name`, `name`,
+`design`, and `state`.
 
 `Service.config` returns the plane fields plus the bound campaign fields. Most
 call sites that read `config["target_branch"]` then keep working.
@@ -153,8 +155,9 @@ The `campaigns` table in `sliceme/store.py`:
 CREATE TABLE IF NOT EXISTS campaigns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL UNIQUE,            -- branch_key(target_branch)
-  target_branch TEXT NOT NULL UNIQUE,
-  worktree_branch TEXT NOT NULL UNIQUE,
+  target_branch TEXT NOT NULL UNIQUE,   -- the campaign branch (pull request head)
+  worktree_branch TEXT NOT NULL UNIQUE, -- equal to target_branch
+  delivery_base TEXT,                   -- the pull request base (default branch)
   base TEXT,
   unit_name TEXT NOT NULL UNIQUE,
   name TEXT,
@@ -188,7 +191,7 @@ hash is unique across campaigns.
 
 - `Service.__init__` takes the argument `campaign`. `Service.campaign` resolves
   it in this order: the explicit reference, the only campaign, or an error that
-  says to pass a campaign. The reference accepts a key, a target branch, or a
+  says to pass a campaign. The reference accepts a key, a campaign branch, or a
   unit name.
 - Every campaign-scoped method reads `self.config`. Plane-only readers use
   `self.plane_config`.
@@ -216,7 +219,8 @@ hash is unique across campaigns.
 
 - `start`, `status`, `ready`, `plan`, `deliver`, `check`, `wave`, and `review`
   all accept `campaign`.
-- `start --target` creates a campaign. It does not retarget the plane.
+- `start` creates a campaign for the derived (or `--feature-branch`) campaign
+  branch. It does not retarget the plane.
 - The CLI resolves the campaign before the code builds the `Service`.
 
 ## 7. Review surface
@@ -238,7 +242,7 @@ instead of one review.
 
 - `activeCampaignPath(cwd, pid)`, `readActiveCampaign`, `writeActiveCampaign`,
   and `clearActiveCampaign` own the pointer file.
-- The `sliceme` tool writes the pointer when a reply carries a target branch,
+- The `sliceme` tool writes the pointer when a reply carries a campaign branch,
   and it passes `--campaign <branch>` to every campaign-scoped engine call.
 - The `sliceme.campaign` resource accepts the optional `campaign` field, so one
   plane can run one named campaign.
@@ -258,8 +262,8 @@ instead of one review.
 
 Tests under `tests/`:
 
-- `test_campaigns.py`: two campaigns in one plane. The target, worktree, unit,
-  DAG path, and state path differ.
+- `test_campaigns.py`: two campaigns in one plane. The campaign branch,
+  worktree, unit, DAG path, and state path differ.
 - Scoping: record a wave in each campaign. The `candidates` and `checks` rows do
   not mix.
 - Delivery isolation: deliver one campaign. The other campaign stays `prepared`
@@ -308,8 +312,8 @@ Each entry has these fields:
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | The campaign name. Unique in the plan. |
-| `target` | yes | The feature branch for the campaign. |
-| `base` | no | The base ref. The default is the previous entry's target, or the plane base for the first entry. |
+| `target` | yes | The campaign branch for the campaign. |
+| `base` | no | Deprecated and ignored. The delivery base is the plane delivery base (`main`). |
 | `dirs` | no | The directory scope for the planner. |
 
 ### 12.2 Why a plan exists
@@ -324,17 +328,19 @@ campaign owned.
 
 - `sliceme plan --design DESIGN.md` prints the entries in order, the registry
   state of each, and the next entry to run.
-- `sliceme start --target <branch> --campaign <name> --no-unit` starts one
-  entry. The coordinator reads the entry's target, base, and directory scope.
+- `sliceme start --feature-branch <branch> --campaign <name> --no-unit` starts
+  one entry. The coordinator reads the entry's target (the campaign branch) and
+  directory scope.
 - The planner receives the scope and plans every node inside it.
 - After delivery, the coordinator reports the next entry.
 
 ### 12.4 The order
 
-The coordinator runs the entries in plan order. Each entry's base defaults to
-the previous entry's target, so the changes accumulate. Delivery needs human
-approval, so the coordinator reports the next entry instead of starting it
-without a command.
+The coordinator runs the entries in plan order. Each entry bases its campaign
+on the plane delivery base (`main`). A later campaign sees an earlier
+campaign's files only after those files merge into the delivery base. Delivery
+needs user confirmation, so the coordinator reports the next entry instead of
+starting it without a command.
 
 ## 13. Related documents
 

@@ -74,12 +74,14 @@ Then, inside the session:
 
 ```text
 /sliceme DESIGN.md                # activate the tool and start a campaign
-sliceme start DESIGN.md           # choose the target branch; planner -> dag.json
+sliceme start DESIGN.md           # derive the campaign branch; planner -> dag.json
 sliceme plan --design DESIGN.md   # the campaign split and the next entry
+sliceme wave --open               # fetch main; create the worktree from origin/main
 subagent(workflow: "sliceme.campaign", async: true)   # the campaign loop
-sliceme review --decision approve # record the campaign approval
-sliceme deliver                   # push the campaign branch and open the pull request
-sliceme review --report --narrative "..."  # the deterministic report plus your summary
+sliceme evidence                  # write the deterministic evidence document
+sliceme review --report           # the deterministic report
+sliceme review --decision approve # record the one campaign approval
+sliceme deliver                   # push the campaign branch and open a pull request
 ```
 
 Local development without installing:

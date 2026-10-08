@@ -127,12 +127,28 @@ class PiPackageTests(unittest.TestCase):
         # The tool forwards the engine verbs and their flags; it does not own a
         # scheduler.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for verb in ("start", "status", "ready", "plan", "wave", "check", "review", "deliver"):
+        for verb in ("start", "status", "ready", "plan", "wave", "check", "review", "evidence", "deliver"):
             self.assertIn(f'"{verb}"', coordinator, verb)
         self.assertIn("ENGINE_ACTIONS", coordinator)
         self.assertIn("ACTION_FLAGS", coordinator)
         self.assertIn('name: "sliceme"', coordinator)
         self.assertIn("function engineArgs(", coordinator)
+
+    def test_the_single_gate_is_documented(self):
+        # After the campaign resource completes, the coordinator writes the
+        # evidence and the report, then asks for the one confirmation before
+        # the approval and delivery (`docs/main-based-campaigns-plan.md` Phase 6).
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"evidence"', coordinator)
+        self.assertIn("review --report", coordinator)
+        self.assertIn("confirmation one time", coordinator)
+        self.assertIn("review --decision approve", coordinator)
+
+    def test_the_coordinator_opens_the_worktree_before_the_resource(self):
+        # The campaign resource has no `open` grant, so the coordinator must run
+        # `wave --open` before it starts the resource (plan correction 4).
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn("wave --open", coordinator)
 
     def test_campaign_resource_is_registered(self):
         # The trusted resource is registered in `session_start` and disposed in
@@ -144,14 +160,12 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("loadPiSubagents(\"workflow-resources\")", coordinator)
         self.assertIn("hostCommands", resource)
         self.assertIn('resolve: (args', coordinator)
-        # The six fixed host commands, built from literals.
+        # The four fixed host commands, built from literals.
         for verb in (
             '["status"]',
             '["ready"]',
             '["wave", "--record", "--current"]',
             '["check", "--current"]',
-            '["review", "--decision", "approve"]',
-            '["deliver"]',
         ):
             self.assertIn(verb, resource, verb)
         # Registration is disposed on shutdown.
@@ -365,7 +379,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_deliver_descriptor_unit_test(self):
-        # The deliver reply names `target_branch`; the handler must mark the
+        # The deliver reply names `feature_branch`; the handler must mark the
         # descriptor `completed` without an active-campaign pointer.
         node = shutil.which("node")
         harness = REPO_ROOT / "tests" / "deliver_descriptor_test.mjs"

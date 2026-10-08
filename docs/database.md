@@ -55,6 +55,7 @@ Structural changes go through `Store._migrate`, which calls `_ensure_columns`
 to add columns that predate the current schema:
 
 - `campaigns.pr_url`, `campaigns.pr_number`
+- `campaigns.delivery_base` (backfilled once from `found_default_branch`)
 - `candidates.node`
 - `units.campaign`
 - `candidates.campaign`
@@ -74,8 +75,9 @@ checks            (standalone; carries campaign)
 review_decisions  (standalone; keyed by branch_key)
 ```
 
-- A **campaign** is one target branch, one campaign worktree branch, one DAG,
-  and one approval gate. A plane holds one or more campaigns.
+- A **campaign** is one campaign branch (the pull request head and the
+  worktree branch), one delivery base (the pull request base), one DAG, and one
+  confirmation gate. A plane holds one or more campaigns.
 - A **unit** is one writer: a git worktree plus a branch. A campaign unit
   belongs to its campaign; `start` may create one more unit for a directory.
 - A **candidate** is a committed head a unit offers for delivery. The campaign
@@ -188,7 +190,7 @@ Read by `Store.find_check` (the cache lookup), `Store.get_check` (`check
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `branch_key` | TEXT NOT NULL | target-branch key (`feat/x` → `feat--x`) |
+| `branch_key` | TEXT NOT NULL | campaign-branch key (`feat/x` → `feat--x`) |
 | `commit_hash` | TEXT | null for a campaign-level decision |
 | `action` | TEXT NOT NULL | `approve`, `request_changes`, `override` |
 | `actor` | TEXT | who recorded the decision |
@@ -211,8 +213,9 @@ retry needs no new review.
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `key` | TEXT NOT NULL UNIQUE | `branch_key(target_branch)` |
-| `target_branch` | TEXT NOT NULL UNIQUE | the feature branch delivery lands on |
-| `worktree_branch` | TEXT NOT NULL UNIQUE | the campaign accumulation branch |
+| `target_branch` | TEXT NOT NULL UNIQUE | the campaign branch (the pull request head) |
+| `worktree_branch` | TEXT NOT NULL UNIQUE | equal to `target_branch` |
+| `delivery_base` | TEXT | the pull request base (the default branch; migration) |
 | `base` | TEXT | fork point |
 | `unit_name` | TEXT NOT NULL UNIQUE | the campaign worktree unit name |
 | `name` | TEXT | display name |
@@ -225,17 +228,17 @@ retry needs no new review.
 
 Index: `idx_campaigns_state(state)`.
 
-Created by `Service._ensure_legacy_campaign`, `Service._sync_campaign_retarget`,
+Created by `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`,
 and `Store.create_campaign` (idempotent on the key or target). Read by
-`Service.campaign`, `Service.status`, the report, and `plan`. A legacy plane
-gets one row on first open. `Service.deliver` sets `delivered` and records
-`pr_url` / `pr_number`.
+`Service.campaign`, `Service.status`, the report and evidence, and `plan`. A
+legacy plane gets one row on first open. `Service.deliver` sets `delivered` and
+records `pr_url` / `pr_number`.
 
 ## 6. Row lifecycle
 
 1. **Plane bootstrap.** `start` writes `.sliceme/config.json` and opens
    `Store`, which creates the schema. Sliceme registers one campaign for the
-   recorded target branch.
+   recorded campaign branch and delivery base.
 2. **Unit.** `start` or `wave --open` creates a worktree and branch, then
    inserts a `units` row with `state='working'`.
 3. **Wave record.** `wave --record --current` runs conformance-by-ownership on
@@ -244,9 +247,9 @@ gets one row on first open. `Service.deliver` sets `delivered` and records
 4. **Check.** `check --current` calls the one runner. The runner inserts a
    `checks` row, or the cache serves a terminal fingerprint. `packet.build_packet`
    reads the newest terminal check per commit as evidence.
-5. **Delivery.** After every wave completes and a human approves the campaign,
-   `deliver` pushes the campaign worktree branch and opens a pull request, then
-   `_mark_delivered` sets the candidates and their unit to `landed`.
+5. **Delivery.** After every wave completes and the user confirms, `deliver`
+   pushes the campaign branch and opens a pull request against the delivery
+   base, then `_mark_delivered` sets the candidates and their unit to `landed`.
 6. **Review.** The human records one campaign decision through
    `review --decision`. The delivery gate reads the newest unconsumed row.
 7. **Status and report.** `Service.status` reads units, candidates, waves, and
@@ -260,7 +263,7 @@ gets one row on first open. `Service.deliver` sets `delivered` and records
 
 | Table | Writers | Readers |
 |---|---|---|
-| `campaigns` | `Service._ensure_legacy_campaign`, `_sync_campaign_retarget`, `Store.create_campaign`, `Service.deliver` | `Service.campaign`, `Service.status`, `plan`, the report |
+| `campaigns` | `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`, `Store.create_campaign`, `Service.deliver` | `Service.campaign`, `Service.status`, `plan`, the report and evidence |
 | `units` | `Service.create_workspace`, `create_campaign_workspace`, `integrate._mark_delivered`, `gc` (branch prune) | `Service.status`, `current_unit`, `unit_detail`, `gc`, `campaign.build_skeleton` |
 | `candidates` | `Service._record_wave_commits`, `integrate._mark_delivered` | `Service.status`, `packet.build_packet`, `campaign.build_skeleton` |
 | `checks` | `CheckRunner.run` | `Store.find_check/get_check/latest_check_for_commit/check_counts`, `packet._evidence_map` |
@@ -302,7 +305,9 @@ gets one row on first open. `Service.deliver` sets `delivered` and records
 - Child events, per-child progress, and run control belong to pi-subagents.
   Sliceme keeps no `events.jsonl`, no per-node heartbeat, and no `jobs` table.
 - Worker logs are files, one per node.
-- The report is a Markdown file, included in the review packet.
+- The report and the evidence document are Markdown files. The report is
+  included in the review packet; the evidence document is the pull request
+  body.
 
 ## 11. Suspend/resume
 
@@ -317,7 +322,7 @@ does not re-run a full check.
 `review_decisions` is an append-only decision log: the newest row for a campaign
 wins, and `consumed_at` marks a delivery that already used the decision. One
 approval covers the whole campaign commit set, so `Service.deliver` refuses
-until a human approves the campaign. `gc` prunes rows for campaigns without a
+until the user confirms the campaign. `gc` prunes rows for campaigns without a
 descriptor older than the retention window (`policy.review_retention_days`,
 default 30) and never prunes the current campaign. See `docs/review.md` for the
 design.

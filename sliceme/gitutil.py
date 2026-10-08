@@ -170,6 +170,11 @@ def add_detached_worktree(repo: str | os.PathLike[str], path: Path, commit: str)
     git(repo, "worktree", "add", "--detach", str(path), commit, check=True)
 
 
+def fetch(repo: str | os.PathLike[str], remote: str, ref: str) -> GitResult:
+    """Fetch *ref* from *remote*; the caller handles a failure."""
+    return git(repo, "fetch", "--quiet", remote, ref, check=False)
+
+
 def push(
     repo: str | os.PathLike[str],
     remote: str,

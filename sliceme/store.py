@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   key TEXT NOT NULL UNIQUE,
   target_branch TEXT NOT NULL UNIQUE,
   worktree_branch TEXT NOT NULL UNIQUE,
+  delivery_base TEXT,
   base TEXT,
   unit_name TEXT NOT NULL UNIQUE,
   name TEXT,
@@ -150,11 +151,31 @@ class Store:
         self._ensure_columns("candidates", {"node": "TEXT"})
         self._ensure_columns("units", {"campaign": "TEXT"})
         self._ensure_columns("candidates", {"campaign": "TEXT"})
+        self._ensure_columns("campaigns", {"delivery_base": "TEXT"})
+        self._backfill_delivery_base()
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_units_campaign ON units(campaign)"
+        )
+
+    def _backfill_delivery_base(self) -> None:
+        """Fill a missing delivery base from the repository default branch.
+
+        The delivery base is the pull request base.  Older rows have no value,
+        so the migration records the found default branch once.
+        """
+        missing = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM campaigns WHERE delivery_base IS NULL"
+        ).fetchone()["c"]
+        if not missing:
+            return
+        from .integrate import found_default_branch
+
+        self.conn.execute(
+            "UPDATE campaigns SET delivery_base=? WHERE delivery_base IS NULL",
+            (found_default_branch(self.root),),
         )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -192,6 +213,7 @@ class Store:
         target_branch: str,
         worktree_branch: str,
         base: str | None = None,
+        delivery_base: str | None = None,
         unit_name: str | None = None,
         name: str | None = None,
         design: str | None = None,
@@ -203,12 +225,13 @@ class Store:
         with self.tx() as c:
             c.execute(
                 "INSERT OR IGNORE INTO campaigns(key, target_branch, worktree_branch,"
-                " base, unit_name, name, design, state, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                " delivery_base, base, unit_name, name, design, state, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     target_branch,
                     worktree_branch,
+                    delivery_base,
                     base,
                     unit_name,
                     name,

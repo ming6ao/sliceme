@@ -21,8 +21,6 @@ export interface CampaignCommands {
 	ready: string;
 	record: string;
 	check: string;
-	approve: string;
-	deliver: string;
 }
 
 export interface CampaignHostGrant {
@@ -49,15 +47,13 @@ function engineCommand(engine: string[], verb: readonly string[], campaign?: str
 	return tokens.map(shellToken).join(" ");
 }
 
-/** The six fixed host commands of the resource. */
+/** The four fixed host commands of the resource. */
 export function campaignCommands(engine: string[], campaign?: string): CampaignCommands {
 	return {
 		status: engineCommand(engine, ["status"], campaign),
 		ready: engineCommand(engine, ["ready"], campaign),
 		record: engineCommand(engine, ["wave", "--record", "--current"], campaign),
 		check: engineCommand(engine, ["check", "--current"], campaign),
-		approve: engineCommand(engine, ["review", "--decision", "approve"], campaign),
-		deliver: engineCommand(engine, ["deliver"], campaign),
 	};
 }
 
@@ -173,8 +169,6 @@ export function resolveCampaignResource(
 			{ key: "ready", command: commands.ready },
 			{ key: "record", command: commands.record },
 			{ key: "check", command: commands.check },
-			{ key: "approve", command: commands.approve },
-			{ key: "deliver", command: commands.deliver },
 		],
 	};
 }

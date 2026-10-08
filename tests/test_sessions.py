@@ -54,14 +54,13 @@ class SessionsCase(unittest.TestCase):
         (self.root / "src" / "c" / "z.py").write_text("c = 1\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
         self.remote_tmp = tempfile.TemporaryDirectory()
         remote = Path(self.remote_tmp.name) / "origin.git"
         subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
         run("git", "remote", "add", "origin", str(remote), cwd=self.root)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
-        Service.init_plane(self.root, checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         self.svc = Service(self.root)
         write_json(
             campaign.dag_path(self.root, "feat/x"),
@@ -122,7 +121,7 @@ class SessionsCase(unittest.TestCase):
         return data
 
     def record_w1(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         result = self.svc.record_wave(0, messages={"w1": "test"})
         return next(c for c in result["candidates"] if c["node"] == "w1")
@@ -208,7 +207,7 @@ class ResumePlanTests(SessionsCase):
         self.assertEqual(plan["current_wave"], 0)
 
     def test_preserved_worktree_maps_to_paused_and_records_the_wave(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")  # uncommitted
         self.write_state({"w1": {"status": "running", "attempts": 1}})
         campaign.write_session(self.root, "feat/x", self.descriptor())
@@ -219,7 +218,7 @@ class ResumePlanTests(SessionsCase):
         self.assertIn("w1", plan["resume_plan"]["resume"])
 
     def test_missing_worktree_falls_back_to_a_fresh_spawn(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         shutil.rmtree(unit["worktree"])
         self.write_state({"w1": {"status": "running", "attempts": 1}})
@@ -247,7 +246,7 @@ class ResumePlanTests(SessionsCase):
         # Simulate a suspend while w1's worker was mid-edit: the worktree is
         # dirty and the node is running. Resume must ask for a record, and after
         # recording the node becomes a prepared candidate to verify.
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.write_state({"w1": {"status": "running", "attempts": 1}})
         campaign.write_session(self.root, "feat/x", self.descriptor())

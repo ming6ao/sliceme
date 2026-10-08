@@ -56,6 +56,11 @@ plan.
   record a wave until a human adds one. Never invent a sandbox command.
 - A barrier is an explicit node that every member of the prior group depends on,
   or a `depends_on` edge; `phase` is a display label only.
+- **Campaign branch.** The coordinator fixes the campaign branch before you run.
+  Write it as `feature_branch`; it is required. Set `base` to the delivery base:
+  the default branch the pull request lands on (for example `main`). The
+  coordinator creates the worktree from the delivery base, so files from an
+  earlier campaign may not be present.
 
 ## Output
 
@@ -65,8 +70,8 @@ It must be valid JSON with this shape:
 ```jsonc
 {
   "campaign": "name",
-  "feature_branch": "feat/name",
-  "base": "main",
+  "feature_branch": "feat/name",   // required: the campaign branch
+  "base": "main",                  // the delivery base (pull request base)
   "design": "DESIGN.md",
   "concurrency": 4,
   "sandbox": { "path": "sliceme.sandbox.json" },

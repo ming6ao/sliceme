@@ -107,9 +107,11 @@ class ServicePlanCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def plane(self):
-        run("git", "checkout", "-q", "-b", "feat/other", cwd=self.root)
         Service.init_plane(
-            self.root, base="main", checks=[{"name": "ok", "command": "true"}]
+            self.root,
+            feature_branch="feat/other",
+            base="main",
+            checks=[{"name": "ok", "command": "true"}],
         )
         self.svc = Service(self.root)
         return self.svc
@@ -128,7 +130,7 @@ class ServicePlanCase(unittest.TestCase):
         svc.store.create_campaign(
             key="feat--core",
             target_branch="feat/core",
-            worktree_branch="sliceme/feat-core",
+            worktree_branch="feat/core",
             base="main",
             unit_name="campaign:feat--core",
             name="core",
@@ -137,7 +139,7 @@ class ServicePlanCase(unittest.TestCase):
         result = svc.campaign_plan("DESIGN.md")
         self.assertEqual(result["entries"][0]["state"], "delivered")
         self.assertEqual(result["next"], "api")
-        self.assertEqual(result["entries"][1]["base"], "feat/core")
+        self.assertEqual(result["entries"][1]["base"], "main")
 
     def test_missing_design_fails(self):
         svc = self.plane()

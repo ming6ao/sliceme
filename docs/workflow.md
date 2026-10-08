@@ -5,11 +5,12 @@
 > reference. Start a campaign with `/sliceme [DESIGN.md]` or by asking the model
 > to run one.
 
-Sliceme delivers a design document as a set of parts on a **target (feature)
-branch**. A top-level **coordinator** turns the design into a machine-readable
-DAG (`dag.json`). The trusted `sliceme.campaign` workflow resource then runs the
-loop. The `sliceme` engine owns isolation, checks, and delivery. Sliceme decides
-all serialization at **plan time** from directory ownership.
+Sliceme delivers a design document as a set of parts on a **campaign branch**
+(`feat/<name>`). A top-level **coordinator** turns the design into a
+machine-readable DAG (`dag.json`). The trusted `sliceme.campaign` workflow
+resource then runs the loop. The `sliceme` engine owns isolation, checks, and
+delivery. Sliceme decides all serialization at **plan time** from directory
+ownership.
 
 ```text
 COORDINATOR (this session)
@@ -20,12 +21,15 @@ COORDINATOR (this session)
        └── REVIEWER  builtin reviewer per recorded wave: reads the evidence
 ```
 
-- At `start` the user chooses the **target branch** once: the current branch, a
-  named existing branch, or a new branch. Sliceme remembers the target for the
-  whole campaign. The target is **never** `main`, `master`, or the repository
-  default branch. There is no override.
-- All waves commit onto one **campaign worktree** branch (for example
-  `sliceme/<campaign>`), forked once from the target. Sliceme never recreates or
+- At `start` the engine derives the **campaign branch** from the design file
+  name (`feat/<slug(design-stem)>`), or the user passes `--feature-branch`.
+  Sliceme records the campaign branch and the **delivery base** (the default
+  branch, `main`) for the whole campaign. The campaign branch is the pull
+  request head and is **never** `main`, `master`, or the repository default
+  branch. There is no override.
+- All waves commit onto the **campaign branch**. `wave --open` fetches the
+  delivery base and creates the worktree from `origin/<delivery_base>`, so the
+  worktree holds the newest default-branch commits. Sliceme never recreates or
   rebases the worktree. Files from an earlier wave are still present for the
   next wave.
 - The DAG is the **only authored schedule**. Sliceme computes waves as a
@@ -70,10 +74,12 @@ COORDINATOR (this session)
   invoked by resolved path. The check runner composes it outside the project
   sandbox for a GPU job. A project can override the GPU invocation through its
   sandbox manifest. The scheduler owns the one-GPU-lane rule.
-- Nothing lands on the target per wave. Commits accumulate on the campaign
-  worktree. A human approves the campaign once, before or after the last wave.
-  When every wave completes and a human approves the campaign, the coordinator runs
-  `deliver` and opens one pull request with the trusted checks.
+- Nothing lands on the delivery base per wave. Commits accumulate on the
+  campaign branch. The engine writes the evidence document after the last wave.
+  The coordinator shows the evidence summary and the pull request details to
+  the user and asks for confirmation one time. On a confirmation the
+  coordinator records the approval and runs `deliver`, which opens one pull
+  request against the delivery base (`main`) with the trusted checks.
 - `wave --record` enforces **plan conformance**: it rejects a changed path
   outside the owned directories of its node. `wave --record --only <node>`
   scopes the record to one node and fails that node alone with a reason code.
@@ -98,24 +104,27 @@ review.
    rejection means the planner under-declared; do not widen your own scope.
 3. **Finish without landing.** Workers are pure editors: edit only your owned
    directories and stop. Never run `git`, never commit, never run `git push`,
-   and never call the engine. The resource owns recording and delivery.
+   and never call the engine. The resource owns the wave record. The
+   coordinator owns delivery.
 4. **The planner authors ordering in the DAG.** If two nodes would touch the
    same directory, the planner must put them in different waves (disjoint
    `owns`) or add a `depends_on` edge. Never rely on runtime arbitration.
 5. **The GPU is the check runner's.** The one check runner composes the sandbox
    and the GPU runner. Workers never touch the GPU, and the reviewer only judges
    the recorded evidence.
-6. **Never commit to the default branch.** The target is always a feature branch
-   chosen at start. `deliver` refuses `main`, `master`, and the repository
-   default branch with no override.
+6. **Never push the default branch.** The campaign branch is the pull request
+   head and is never `main`, `master`, or the repository default branch.
+   `deliver` refuses a campaign branch that equals the default branch, with no
+   override. The pull request base is the delivery base (`main`).
 
 ## Campaign loop (the coordinator)
 
 Use the `sliceme` tool, then start the resource:
 
 ```text
-sliceme start DESIGN.md     choose the target branch; planner -> dag.json + waves
+sliceme start DESIGN.md     derive the campaign branch; planner -> dag.json + waves
 sliceme plan --design DESIGN.md   the design's campaign split and the next entry
+sliceme wave --open         fetch the delivery base; create the worktree from origin/main
 subagent(workflow: "sliceme.campaign", cwd: <repo>, async: true)
 ```
 
@@ -128,12 +137,14 @@ check --current             run the combined-tree checks for the wave
 runs.run reviewer           one builtin reviewer reads the recorded evidence
 ```
 
-The coordinator stops at the human gates and then runs:
+When the resource returns `complete`, the coordinator writes the evidence and
+shows the summary to the user, then runs:
 
 ```text
-sliceme review --decision approve   record the one campaign approval
+sliceme evidence                    write the deterministic evidence document
 sliceme review --report             the deterministic report (--narrative appends the summary)
-sliceme deliver                     push the campaign branch and open a pull request
+sliceme review --decision approve   record the one campaign approval (after the user confirms)
+sliceme deliver                     push the campaign branch and open a pull request against main
 ```
 
 The resource bounds the loop with the `waveCap` and `nodeCap` fields. The
@@ -146,24 +157,25 @@ coordinator also registers two commands and two lifecycle hooks
 ```
 
 The coordinator's own checkout is **not** an Sliceme unit. `sliceme start`
-bootstraps the plane with `--no-unit` and records the chosen target branch. The
-campaign work commits to a separate worktree branch. `deliver` pushes that
-branch and opens a pull request against the target. This step waits for every
-wave and for the campaign approval. Sliceme refuses `main`, `master`, and the
-default branch at both steps.
+bootstraps the plane with `--no-unit` and records the campaign branch and the
+delivery base. The campaign work commits to the campaign branch. `deliver`
+pushes that branch and opens a pull request against the delivery base (`main`).
+This step waits for every wave and for the user confirmation. Sliceme refuses a
+campaign branch that equals the default branch.
 
 ## Engine actions
 
 | Action | Purpose |
 |---|---|
-| `start` | bootstrap the plane; `no_unit` for the coordinator's checkout; `target`/`target_mode` chooses the feature branch; `name` + `base` creates a worker unit |
+| `start` | bootstrap the plane; `design` derives the campaign branch; `feature_branch` overrides it; `base` overrides the delivery base; `no_unit` for the coordinator's checkout; `name` creates a worker unit |
 | `status` | units, candidates, waves, checks; `short`, `unit`, `simulate`, `health`, `gc`; `--sessions` lists registered campaigns; `--resume` reconciles a suspended campaign from git plus `state.db` |
 | `ready` | the current-wave ready node ids, the wave index, and `paused` |
 | `plan` | the design's `sliceme-campaigns` split joined with the registry state, plus the next entry |
-| `deliver` | push the campaign worktree branch and open the delivery pull request against the target feature branch; `target`, `source`, `cleanup`, `no_checks` |
+| `deliver` | push the campaign branch and open the delivery pull request against the delivery base (`main`); `source`, `cleanup`, `no_checks` |
 | `check` | run the one combined-tree check runner for the current wave (`--current`) |
 | `wave` | the campaign worktree: `--open` (create/reuse it), `--record --current` (per-node commits, conformance) |
 | `review` | `--decision approve\|request_changes\|override` (one campaign decision); `--report --narrative` writes the deterministic report |
+| `evidence` | write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs |
 
 ## Worker workflow
 
@@ -179,8 +191,8 @@ Workers are pure editors: they edit only their owned directories and stop. The
 resource runs `wave --record --current` to enforce conformance and create
 per-node commits, then `check --current` runs the combined-tree checks. A worker
 never runs the suite, never runs `git`, and never touches the GPU. Nothing lands
-on the target branch until a human approves the campaign and the coordinator
-runs its single `deliver` step.
+on the delivery base until a human merges the pull request that the
+coordinator's single `deliver` step opens.
 
 Ownership syntax is `dir:PATH` (a bare path is also accepted). It is always a
 directory at the deepest level that contains the paths the node touches:

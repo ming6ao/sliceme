@@ -4,9 +4,9 @@
 
 Sliceme turns a design document into a DAG of work. It runs the
 non-conflicting nodes in parallel. It checks each wave against a content
-fingerprint. It delivers the result as a pull request against a target feature
-branch. Sliceme decides ownership at plan time, so parallel agents never author
-the same files.
+fingerprint. It delivers the result as a pull request against the default
+branch (`main`). Sliceme decides ownership at plan time, so parallel agents
+never author the same files.
 
 - **Plan-time ownership** — nodes own directories; overlapping subtrees go into
   different waves.
@@ -17,10 +17,12 @@ the same files.
   files persist.
 - **One combined-tree check** — one synchronous runner checks the recorded wave
   tree and caches the verdict. A resumed node reads the cache.
-- **Approved delivery** — a human approves the campaign once. Sliceme then
-  pushes the campaign branch and opens one pull request against the target
-  feature branch. Sliceme refuses the default branch (`main`, `master`, or the
-  repository default) with no override.
+- **One human gate** — the user confirms the campaign one time. Sliceme then
+  pushes the campaign branch and opens one pull request against the default
+  branch (`main`). Sliceme never pushes the default branch.
+- **Deterministic evidence** — the engine writes the campaign commits, checks,
+  diffs, and worker logs to one evidence document. The document is the pull
+  request body. There is no narrative agent.
 - **One workflow resource** — the `sliceme.campaign` pi-subagents resource owns
   the campaign loop. The extension registers the loop, the plan, and delivery.
 
@@ -42,14 +44,15 @@ with `subagent({ workflow: "sliceme.campaign", async: true })`. The resource
 drives the engine verbs:
 
 ```text
-sliceme start DESIGN.md           choose the target branch; planner -> dag.json + waves
+sliceme start DESIGN.md           derive the campaign branch; planner -> dag.json + waves
+sliceme wave --open               fetch main; create the worktree from origin/main
 sliceme ready                     current-wave nodes whose dependencies are done
 sliceme status                    waves, nodes, and paused
 sliceme wave --record --current   commit the finished nodes as per-node commits
 sliceme check --current           run the combined-tree checks for the wave
+sliceme evidence                  write the deterministic evidence document
 sliceme review --decision approve record the one campaign approval
-sliceme review --report           write the deterministic report
-sliceme deliver                   push the campaign branch and open a pull request
+sliceme deliver                   push the campaign branch and open a pull request against main
 ```
 
 ## Docs

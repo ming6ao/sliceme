@@ -17,6 +17,7 @@ from pathlib import Path
 
 from sliceme import campaign
 from sliceme.service import Service
+from sliceme.store import Store
 from sliceme.util import write_json
 
 FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
@@ -60,21 +61,24 @@ class MultiCampaignCase(unittest.TestCase):
         os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
         Service.init_plane(
             self.root,
-            target_branch="feat/x",
-            target_mode="new",
+            feature_branch="feat/x",
             base="main",
             checks=self.checks,
         )
         self.svc = Service(self.root)
         self.svc.close()
-        # A second campaign with a different target branch.
+        # A second campaign with a different campaign branch.
         Service.init(
             self.root,
-            target_branch="feat/y",
-            target_mode="new",
+            feature_branch="feat/y",
             base="main",
             no_unit=True,
         )
+        # The campaign branch is the pull request head and the worktree branch.
+        # The fixture creates it from the delivery base; a real run opens the
+        # worktree from the remote.
+        run("git", "branch", "feat/x", "main", cwd=self.root)
+        run("git", "branch", "feat/y", "main", cwd=self.root)
 
     def tearDown(self):
         os.environ["PATH"] = self._old_path
@@ -205,11 +209,12 @@ class DeliveryIsolationTests(MultiCampaignCase):
             worktree_branch = x.store.get_campaign("feat--x")["worktree_branch"]
         finally:
             x.close()
-        # The approved work is on the campaign branch; the target is untouched.
+        # The approved work is on the campaign branch; the delivery base is
+        # untouched.
         self.assertEqual(self.file_on(worktree_branch, "src/a/x.py"), "a = 2\n")
-        self.assertEqual(self.file_on("feat/x", "src/a/x.py"), "a = 1\n")
-        # The other campaign is untouched.
-        self.assertEqual(self.file_on("feat/y", "src/a/x.py"), "a = 1\n")
+        self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
+        # The other campaign keeps its own unlanded work.
+        self.assertEqual(self.file_on("feat/y", "src/a/x.py"), "a = 3\n")
         y = self.service("feat/y")
         try:
             self.assertTrue(
@@ -373,8 +378,12 @@ class MigrationTests(MultiCampaignCase):
             (root / "a.txt").write_text("hi\n")
             run("git", "add", "-A", cwd=root)
             run("git", "commit", "-qm", "initial", cwd=root)
-            run("git", "checkout", "-q", "-b", "feat/old", cwd=root)
-            Service.init_plane(root, checks=self.checks)
+            Service.init_plane(root, feature_branch="feat/old", checks=self.checks)
+            # Simulate a plane from before campaign rows existed.
+            store = Store(root)
+            store.conn.execute("DELETE FROM campaigns")
+            store.conn.commit()
+            store.close()
             svc = Service(root)
             try:
                 rows = svc.store.list_campaigns()
@@ -385,20 +394,82 @@ class MigrationTests(MultiCampaignCase):
             finally:
                 svc.close()
 
+    def test_a_migrated_plane_keeps_one_branch_across_consumers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run("git", "init", "-q", "-b", "main", cwd=root)
+            run("git", "config", "user.email", "t@example.com", cwd=root)
+            run("git", "config", "user.name", "Tester", cwd=root)
+            (root / "a.txt").write_text("hi\n")
+            run("git", "add", "-A", cwd=root)
+            run("git", "commit", "-qm", "initial", cwd=root)
+            # A plane from the older two-branch model: the target feature branch
+            # and a separate accumulation branch for the campaign worktree.
+            run("git", "branch", "feat/old", "main", cwd=root)
+            run("git", "branch", "sliceme/feat-old", "main", cwd=root)
+            from sliceme.util import config_path
+
+            write_json(
+                config_path(root),
+                {
+                    "version": 1,
+                    "target_branch": "feat/old",
+                    "main_branch": "feat/old",
+                    "worktree_branch": "sliceme/feat-old",
+                    "base": "main",
+                    "checks": self.checks,
+                    "policy": {"remote": "origin"},
+                    "created_at": 0,
+                },
+            )
+            svc = Service(root)
+            try:
+                row = svc.store.get_campaign("feat/old")
+                self.assertEqual(row["worktree_branch"], "sliceme/feat-old")
+                unit = svc.create_campaign_workspace()
+                # The worktree branch is the one every consumer records, so the
+                # worktree, the review source, and the pull request head agree.
+                self.assertEqual(unit["branch"], "sliceme/feat-old")
+                self.assertEqual(svc.config["worktree_branch"], "sliceme/feat-old")
+            finally:
+                svc.close()
+
+    def test_a_null_delivery_base_is_backfilled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run("git", "init", "-q", "-b", "main", cwd=root)
+            run("git", "config", "user.email", "t@example.com", cwd=root)
+            run("git", "config", "user.name", "Tester", cwd=root)
+            (root / "a.txt").write_text("hi\n")
+            run("git", "add", "-A", cwd=root)
+            run("git", "commit", "-qm", "initial", cwd=root)
+            Service.init_plane(root, feature_branch="feat/old", checks=self.checks)
+            store = Store(root)
+            # A row from before the delivery base column existed.
+            store.conn.execute("UPDATE campaigns SET delivery_base=NULL")
+            store.conn.commit()
+            store.close()
+            store = Store(root)
+            try:
+                self.assertEqual(
+                    store.get_campaign("feat/old")["delivery_base"], "main"
+                )
+            finally:
+                store.close()
+
     def test_campaign_registration_is_idempotent(self):
         svc = self.service()
         try:
             again = svc.store.create_campaign(
                 key="feat--x",
                 target_branch="feat/x",
-                worktree_branch="sliceme/feat-x",
+                worktree_branch="feat/x",
                 unit_name="campaign:feat--x",
             )
             self.assertEqual(again["target_branch"], "feat/x")
             self.assertEqual(len(svc.store.list_campaigns()), 2)
         finally:
             svc.close()
-
 
 if __name__ == "__main__":
     unittest.main()

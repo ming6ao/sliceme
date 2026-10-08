@@ -23,14 +23,12 @@ assert.ok(CAMPAIGN_TOKEN.test("feat.x"));
 assert.ok(!CAMPAIGN_TOKEN.test("feat/x"));
 assert.ok(!CAMPAIGN_TOKEN.test(""));
 
-// The six fixed host commands, built from literals plus the engine path.
+// The four fixed host commands, built from literals plus the engine path.
 assert.deepEqual(campaignCommands(ENGINE), {
 	status: "python3 /opt/sliceme/bin/sliceme --json status",
 	ready: "python3 /opt/sliceme/bin/sliceme --json ready",
 	record: "python3 /opt/sliceme/bin/sliceme --json wave --record --current",
 	check: "python3 /opt/sliceme/bin/sliceme --json check --current",
-	approve: "python3 /opt/sliceme/bin/sliceme --json review --decision approve",
-	deliver: "python3 /opt/sliceme/bin/sliceme --json deliver",
 });
 
 // The campaign token is the only variable text and is bound with --campaign.
@@ -44,14 +42,24 @@ assert.equal(
 	"python3 /opt/sliceme/bin/sliceme --json wave --record --current --campaign feat.x",
 );
 
-// A full resolution exposes the six grants and a script that uses the state
+// A full resolution exposes the four grants and a script that uses the state
 // commands.
 const resolved = resolveCampaignResource({ campaign: "feat.x", waveCap: 3, nodeCap: 9 }, ENGINE);
 assert.ok(!("error" in resolved), JSON.stringify(resolved));
 assert.deepEqual(
 	resolved.hostCommands.map((grant) => grant.key),
-	["status", "ready", "record", "check", "approve", "deliver"],
+	["status", "ready", "record", "check"],
 );
+
+// The resource cannot approve or deliver: the user permission is the only gate
+// (`docs/main-based-campaigns-plan.md` Phase 6).
+assert.ok(!resolved.hostCommands.some((grant) => grant.key === "approve"));
+assert.ok(!resolved.hostCommands.some((grant) => grant.key === "deliver"));
+
+// No `open` host grant: the coordinator opens the worktree with
+// `sliceme wave --open` before it starts the resource (plan correction 4).
+assert.ok(!resolved.hostCommands.some((grant) => grant.key === "open"));
+assert.ok(!resolved.script.includes("wave --open"));
 for (const key of ["status", "ready", "record", "check"]) {
 	const grant = resolved.hostCommands.find((entry) => entry.key === key);
 	assert.ok(grant, `missing grant ${key}`);

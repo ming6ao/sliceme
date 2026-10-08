@@ -59,7 +59,7 @@ class SandboxGateCase(unittest.TestCase):
         (self.root / "a.txt").write_text("hi\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
-        Service.init_plane(self.root, checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         self.svc = Service(self.root)
         self.runner = self.svc.checks()
 

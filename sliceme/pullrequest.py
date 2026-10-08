@@ -1,9 +1,9 @@
 """Open a delivery pull request with the ``gh`` command line program.
 
 Sliceme never merges a campaign locally.  Delivery pushes the campaign worktree
-branch and opens one pull request against the target feature branch.  The
-``gh`` program is the only forge client.  The engine shells out to it, so the
-Python package keeps no network dependency of its own.
+branch and opens one pull request against the delivery base (the repository
+default branch).  The ``gh`` program is the only forge client.  The engine
+shells out to it, so the Python package keeps no network dependency of its own.
 
 A process started from a desktop launcher or a service often has a small
 ``PATH`` that omits the user-local and Homebrew directories.  This module

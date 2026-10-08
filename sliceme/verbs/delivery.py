@@ -27,22 +27,24 @@ class DeliveryVerbs:
     def deliver(
         self,
         *,
-        target: str | None = None,
         source: str | None = None,
         cleanup: str = "none",
         run_checks_flag: bool = True,
     ) -> dict[str, Any]:
         """Push the campaign worktree branch and open the delivery pull request.
 
-        This is the single, end-of-campaign delivery.  The target branch is
-        never the default branch and there is no override.  Once the pull
-        request is open, the campaign is done.
+        This is the single, end-of-campaign delivery.  The campaign branch is
+        never the default branch and there is no override.  The pull request
+        base is the delivery base (the default branch).  Once the pull request
+        is open, the campaign is done.
         """
         if cleanup not in {"none", "worktrees", "all"}:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
         from ..review import packet
 
-        target_branch = target or self.config.get("target_branch") or self.config.get("main_branch")
+        feature_branch = (
+            self.config.get("target_branch") or self.config.get("main_branch") or ""
+        )
         source_branch = source or self.config.get("worktree_branch") or ""
         key = self.campaign_key()
         stored = self.store.get_campaign(key) if key else None
@@ -63,7 +65,6 @@ class DeliveryVerbs:
                     self.root,
                     self.config,
                     campaign=key,
-                    target=target,
                     source=source,
                     run_checks_flag=run_checks_flag,
                 )
@@ -90,7 +91,9 @@ class DeliveryVerbs:
         if cleanup == "all":
             artifacts_removed = self.remove_campaign_artifacts(keep_report=True)
         return {
-            "target_branch": target_branch,
+            "feature_branch": feature_branch,
+            # Deprecated mirror kept for one release; read feature_branch first.
+            "target_branch": feature_branch,
             "source": source_branch,
             "results": [r.to_dict() for r in results],
             "pull_request": results[0].pull_request if results else None,
@@ -111,6 +114,21 @@ class DeliveryVerbs:
             design=design,
         )
 
+    def evidence(self, *, design: str | None = None) -> dict[str, Any]:
+        """Write the deterministic evidence document for the campaign.
+
+        The engine writes ``.sliceme/<key>.evidence.json`` (the full check
+        output) and ``.sliceme/<key>.evidence.md`` (the bounded output).  The
+        Markdown document is the pull request body.  This action is not a gate.
+        """
+        return campaign.write_evidence(
+            self.root,
+            self.config,
+            self.store,
+            campaign=self.campaign_key(),
+            design=design,
+        )
+
     def remove_campaign_artifacts(
         self, *, branch: str | None = None, keep_report: bool = True
     ) -> list[str]:
@@ -127,6 +145,8 @@ class DeliveryVerbs:
         ]
         if not keep_report:
             paths.append(campaign.report_path(self.root, branch))
+            paths.append(campaign.evidence_json_path(self.root, branch))
+            paths.append(campaign.evidence_md_path(self.root, branch))
         return self._remove_files(paths)
 
     @staticmethod

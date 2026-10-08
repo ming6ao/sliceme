@@ -3,17 +3,17 @@
 ``integrate`` opens the delivery pull request for a campaign:
 
 * every approved commit accumulates on one campaign worktree branch;
-* delivery pushes that branch and opens one pull request against the target
-  feature branch with the ``gh`` program;
+* delivery pushes that branch and opens one pull request against the delivery
+  base, the repository default branch, with the ``gh`` program;
 * a ``git merge-tree`` pre-check refuses a conflicting merge before the push;
 * the plane's trusted checks run on the campaign head before the push;
 * candidates move to ``landed`` and units to ``landed``, keeping branches for
   provenance;
 * re-running is a no-op: an open pull request is returned as is.
 
-A **safety rail** refuses delivery when the target equals the plane's recorded
-(default) branch (captured once at init, §6.1).  Promotion to the default
-branch stays a human act on the forge.
+A **safety rail** refuses delivery when the campaign branch equals the plane's
+recorded (default) branch (captured once at init, §6.1).  The campaign branch
+is the pull request head, so it must stay a feature branch.
 
 When ``check_only`` is set (the orchestrator's ``verify`` step), the node's
 acceptance commands run at the candidate commit, the verdict is recorded with
@@ -42,6 +42,7 @@ __all__ = [
     "LandResult",
     "Wave",
     "deliver_pull_request",
+    "delivery_base_of",
     "found_default_branch",
     "is_default_branch",
     "plan_waves",
@@ -69,12 +70,16 @@ class LandResult:
         }
 
 
-#: Conventional names that can never be a campaign target branch.
+#: Conventional names that can never be a campaign branch.
 DEFAULT_BRANCH_NAMES = ("main", "master")
 
 
 def target_branch_of(config: dict[str, Any]) -> str:
-    """The campaign's target (feature) branch: where delivery finally lands."""
+    """The campaign branch: the feature branch the campaign works on.
+
+    The campaign branch is the campaign identity.  It must never be the
+    default branch; the pull request base is :func:`delivery_base_of`.
+    """
     return (
         config.get("target_branch")
         or config.get("main_branch")
@@ -82,8 +87,22 @@ def target_branch_of(config: dict[str, Any]) -> str:
     )
 
 
-# Backwards-compatible name (the target branch used to be called main_branch).
+# Backwards-compatible name (the campaign branch used to be called main_branch).
 main_branch_of = target_branch_of
+
+
+def delivery_base_of(config: dict[str, Any]) -> str:
+    """The pull request base: the repository's default branch.
+
+    ``target_branch`` is the campaign branch (the pull request head).  The
+    delivery base is the branch the pull request lands on.  The plane records
+    it once at ``start`` so ``origin/HEAD`` may change later.
+    """
+    return (
+        config.get("delivery_base")
+        or config.get("default_branch")
+        or "main"
+    )
 
 
 def found_default_branch(root: Path, *, exclude: str | None = None) -> str:
@@ -94,9 +113,9 @@ def found_default_branch(root: Path, *, exclude: str | None = None) -> str:
     existing branch among ``main``/``master`` (skipping *exclude*), then
     ``main``.
 
-    The checked-out branch is deliberately **not** a fallback: ``start`` adopts
-    the current branch as the campaign feature branch, so at plane-init time the
-    current branch is the feature branch, never the default.
+    The checked-out branch is deliberately **not** a fallback: the campaign
+    branch comes from the design name or an explicit flag, so the current
+    checkout is never the default branch by accident.
     """
     origin = gitutil.git(root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
     if origin.ok and origin.stdout.strip():
@@ -212,20 +231,27 @@ def deliver_pull_request(
     config: dict[str, Any],
     *,
     campaign: str | None = None,
-    target: str | None = None,
     source: str | None = None,
     run_checks_flag: bool = True,
 ) -> list[LandResult]:
     """Push the campaign worktree branch and open the delivery pull request.
 
     Called once, after every wave is recorded and every commit is approved.
-    The target branch is never the default branch: there is no override.
+    The pull request head is the campaign worktree branch.  The pull request
+    base is the delivery base (the repository default branch).  The campaign
+    branch is never the default branch: there is no override.
     """
-    target = target or target_branch_of(config)
-    if is_default_branch(root, target, config):
+    campaign_branch = target_branch_of(config)
+    if is_default_branch(root, campaign_branch, config):
         raise SlicemeError(
-            f"refusing to deliver onto the default branch '{target}'; "
-            "sliceme opens a pull request against a feature branch only"
+            f"refusing to deliver the default branch '{campaign_branch}' as the "
+            "campaign branch; sliceme pushes a feature branch only"
+        )
+    base = delivery_base_of(config)
+    if campaign_branch == base:
+        raise SlicemeError(
+            f"refusing to deliver: the campaign branch '{campaign_branch}' equals "
+            "the delivery base"
         )
     source = source or config.get("worktree_branch")
     if not source or not gitutil.branch_exists(root, source):
@@ -233,20 +259,20 @@ def deliver_pull_request(
             "no campaign worktree branch to deliver; run `sliceme wave --open` first"
         )
     source = str(source)
-    if not gitutil.branch_exists(root, target):
-        raise SlicemeError(f"target branch '{target}' does not exist")
+    if not gitutil.branch_exists(root, base):
+        raise SlicemeError(f"delivery base '{base}' does not exist")
 
     # Fail before the push (and the checks) when the forge client is absent, so
     # a missing program never leaves a pushed branch without a pull request.
     pullrequest.require()
 
     source_head = gitutil.rev_parse(root, source)
-    target_head = gitutil.rev_parse(root, target)
-    if gitutil.merge_base(root, target_head, source_head) == source_head:
+    base_head = gitutil.rev_parse(root, base)
+    if gitutil.merge_base(root, base_head, source_head) == source_head:
         _mark_delivered(store, campaign)
-        return [landed(f"already contained in {target}")]
+        return [landed(f"already contained in {base}")]
 
-    outcome = gitutil.merge_tree(root, target_head, source_head)
+    outcome = gitutil.merge_tree(root, base_head, source_head)
     if not outcome.clean:
         return [
             LandResult(
@@ -291,7 +317,7 @@ def deliver_pull_request(
             root, config, store, campaign=campaign
         )
         found = pullrequest.create(
-            root, head=source, base=target, title=title, body=body
+            root, head=source, base=base, title=title, body=body
         )
 
     _mark_delivered(store, campaign)

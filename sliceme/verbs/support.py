@@ -8,11 +8,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
-from .. import campaign, gitutil
+from .. import gitutil
 from ..ownership import path_within_owns
-from ..store import Store
 from ..util import SlicemeError, slugify, state_dir
 
 
@@ -61,15 +59,6 @@ def _delivery_lock(root: Path):
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _campaign_has_work(store: Store, root: Path, campaign_row: dict[str, Any]) -> bool:
-    """Whether a campaign already recorded a DAG, a candidate, or a unit."""
-    if campaign.dag_path(root, str(campaign_row["target_branch"])).exists():
-        return True
-    if store.list_candidates(campaign=str(campaign_row["key"])):
-        return True
-    return store.get_unit_by_campaign(str(campaign_row["key"])) is not None
 
 
 def _owners_of(path: str, owners: dict[str, list[str]]) -> list[str]:
@@ -125,42 +114,6 @@ def _changed_entries(
         else:
             entries.append((status, parts[1], None))
     return entries
-
-
-def _resolve_target_branch(
-    root: Path,
-    *,
-    target_branch: str | None,
-    target_mode: str | None,
-    base: str | None,
-) -> str:
-    """Resolve the campaign target branch from the user's choice.
-
-    ``current`` adopts the checked-out branch; ``existing`` requires the named
-    branch to exist; ``new`` creates it from *base* (default ``HEAD``).  A bare
-    target name with no mode is treated as an existing branch.
-    """
-    mode = (target_mode or "").strip().lower()
-    if mode not in {"", "current", "existing", "new"}:
-        raise SlicemeError("target_mode must be one of: current, existing, new")
-    if mode == "new":
-        if not target_branch:
-            raise SlicemeError("target_mode 'new' requires a target branch name")
-        if gitutil.branch_exists(root, target_branch):
-            raise SlicemeError(f"branch '{target_branch}' already exists")
-        from_commit = base or gitutil.rev_parse(root, "HEAD")
-        gitutil.create_branch(root, target_branch, from_commit)
-        return target_branch
-    if target_branch:
-        if not gitutil.branch_exists(root, target_branch):
-            raise SlicemeError(f"branch '{target_branch}' does not exist")
-        return target_branch
-    current = gitutil.current_branch(root)
-    if not current:
-        raise SlicemeError(
-            "not on a branch; create or check out the campaign branch before start"
-        )
-    return current
 
 
 def _default_worktree_branch(root: Path, target: str) -> str:

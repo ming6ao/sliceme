@@ -118,6 +118,9 @@ class Service(
             cfg["target_branch"] = campaign["target_branch"]
             cfg["main_branch"] = campaign["target_branch"]
             cfg["worktree_branch"] = campaign["worktree_branch"]
+            cfg["delivery_base"] = campaign.get("delivery_base") or cfg.get(
+                "delivery_base"
+            )
             cfg["base"] = campaign.get("base") or cfg.get("base")
             cfg["campaign_name"] = campaign.get("name")
             cfg["campaign_design"] = campaign.get("design")
@@ -142,6 +145,7 @@ class Service(
             key=branch_key(str(target)),
             target_branch=str(target),
             worktree_branch=str(worktree_branch),
+            delivery_base=cfg.get("delivery_base") or cfg.get("default_branch"),
             base=cfg.get("base"),
             unit_name="campaign",
         )

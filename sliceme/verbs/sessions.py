@@ -26,8 +26,12 @@ class SessionVerbs:
         no-op kept for the CLI surface.
         """
         config = self.config
+        campaign_row = self.campaign
         branch = (
-            config.get("target_branch") or config.get("main_branch") or "main"
+            (campaign_row or {}).get("target_branch")
+            or config.get("target_branch")
+            or config.get("main_branch")
+            or "main"
         )
         descriptor = campaign.load_session(self.root, branch) or {}
         descriptor_nodes = descriptor.get("nodes") or {}

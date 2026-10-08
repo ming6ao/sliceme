@@ -40,8 +40,7 @@ class ReportCase(unittest.TestCase):
         (self.root / "src" / "b" / "y.py").write_text("b = 1\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
-        Service.init_plane(self.root, checks=[{"name": "ok", "command": "true"}])
+        Service.init_plane(self.root, feature_branch="feat/x", checks=[{"name": "ok", "command": "true"}])
         self.svc = Service(self.root)
         write_json(
             campaign.dag_path(self.root, "feat/x"),
@@ -59,7 +58,7 @@ class ReportCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def record_wave0(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
         (Path(unit["worktree"]) / "src" / "b" / "y.py").write_text("b = 2\n")
         return self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})

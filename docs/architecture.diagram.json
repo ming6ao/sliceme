@@ -9,7 +9,7 @@
       { "id": "campaign-loop", "label": "Campaign loop", "focus": ["request", "coordinator", "subagents", "surface", "service"], "note": "A design becomes a DAG; the coordinator spawns waves of one-shot subagents through the engine verbs." },
       { "id": "engine-core", "label": "Engine core", "focus": ["surface", "service", "store", "integrate"], "note": "One action registry dispatches to the service, which owns plane state and landing." },
       { "id": "verification", "label": "Check path", "focus": ["service", "checks", "sandbox"], "note": "One synchronous runner checks the recorded wave tree and caches the verdict." },
-      { "id": "landing", "label": "Approved delivery", "focus": ["service", "integrate", "git"], "note": "After every wave and user approval, Sliceme pushes the campaign branch and opens a pull request against the target feature branch." }
+      { "id": "landing", "label": "Approved delivery", "focus": ["service", "integrate", "git"], "note": "After every wave and user approval, Sliceme pushes the campaign branch and opens a pull request against the delivery base (the default branch)." }
     ]
   },
   "components": [

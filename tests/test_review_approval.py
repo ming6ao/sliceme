@@ -47,14 +47,13 @@ class ApprovalCase(unittest.TestCase):
         (self.root / "src" / "b" / "y.py").write_text("b = 1\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "initial", cwd=self.root)
-        run("git", "checkout", "-q", "-b", "feat/x", cwd=self.root)
         self.remote_tmp = tempfile.TemporaryDirectory()
         remote = Path(self.remote_tmp.name) / "origin.git"
         subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
         run("git", "remote", "add", "origin", str(remote), cwd=self.root)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = str(FAKE_GH_BIN) + os.pathsep + self._old_path
-        Service.init_plane(self.root, checks=self.checks)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         self.svc = Service(self.root)
         write_json(
             campaign.dag_path(self.root, "feat/x"),
@@ -77,7 +76,7 @@ class ApprovalCase(unittest.TestCase):
         (Path(worktree) / rel).write_text(content)
 
     def record_wave0(self):
-        unit = self.svc.create_campaign_workspace(base="feat/x")
+        unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
         return self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})

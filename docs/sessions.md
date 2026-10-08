@@ -60,7 +60,7 @@ every campaign-scoped engine call passes `--campaign <branch>`.
 |---|---|
 | `/sliceme [DESIGN.md]` | The start entry point. It activates the tool and starts a campaign. It refuses while the agent is busy (`ctx.isIdle()`). |
 | `/suspend [label]` | Parks the current session: writes the pause control flag, aborts the in-flight turn, waits for idle, and writes the resume descriptor. An interrupted node becomes `paused`, so resume continues its edits. |
-| `/campaigns` | An interactive list of registered campaigns: label, target branch, wave, done/total, last activity, status. Actions: resume, show, prune, delete. |
+| `/campaigns` | An interactive list of registered campaigns: label, campaign branch, wave, done/total, last activity, status. Actions: resume, show, prune, delete. |
 
 Pi owns `/resume`, so the adapter does not register it. The `session_start`
 hook with reason `"resume"` provides the campaign hook instead.
@@ -145,7 +145,7 @@ The adapter writes the descriptor. The engine reads it.
 {
   "campaign": "nanochat-cpp",
   "feature_branch": "feat/nanochat-cpp",
-  "worktree_branch": "sliceme/feat-nanochat-cpp",
+  "worktree_branch": "feat/nanochat-cpp",
   "design": "DESIGN.md",
   "pi": {
     "session_id": "uuid",

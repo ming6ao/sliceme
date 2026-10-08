@@ -12,9 +12,10 @@ reviewer, not a merge gate.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import campaign, gitutil
+from .. import campaign, gitutil, integrate
 from ..util import SlicemeError, now
 from . import diff
 
@@ -22,13 +23,60 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..service import Service
 
 __all__ = [
+    "MARKDOWN_OUTPUT_LIMIT",
+    "bound_output",
     "build_packet",
     "campaign_branch_key",
     "campaign_commits",
+    "commit_changes",
     "commit_hashes",
+    "diffstat",
     "report_info",
     "review_commits",
 ]
+
+#: The largest check-output text that the Markdown evidence document keeps.
+#: The JSON evidence keeps the full output, so a reviewer can read all of it.
+MARKDOWN_OUTPUT_LIMIT = 2000
+
+
+def bound_output(output: str | None, limit: int = MARKDOWN_OUTPUT_LIMIT) -> str:
+    """Truncate one check output for the Markdown evidence document.
+
+    The JSON evidence keeps the full output.  The Markdown keeps *limit*
+    characters and states how many characters it omitted, so the document
+    stays a manageable size.
+    """
+    text = str(output or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [{len(text) - limit} characters omitted]"
+
+
+def diffstat(files: list[dict[str, Any]]) -> dict[str, int]:
+    """The one-commit summary: the file count, the additions, and the deletions."""
+    return {
+        "files": len(files),
+        "additions": sum(int(row.get("additions") or 0) for row in files),
+        "deletions": sum(int(row.get("deletions") or 0) for row in files),
+    }
+
+
+def _parent_of(root: Path, commit: str) -> str | None:
+    res = gitutil.git(root, "rev-parse", f"{commit}^", check=False)
+    return res.stdout.strip() if res.ok else None
+
+
+def commit_changes(root: Path, commit: str) -> dict[str, Any]:
+    """The changed files and the diffstat for one commit.
+
+    The change set is the commit against its first parent, so an evidence row
+    names what that one commit changed.  A root commit has no parent, so its
+    change set is empty.
+    """
+    parent = _parent_of(root, commit)
+    files = diff.file_index(root, parent, commit) if parent else []
+    return {"diffstat": diffstat(files), "files": files}
 
 
 def campaign_branch_key(service: "Service") -> str:
@@ -37,9 +85,19 @@ def campaign_branch_key(service: "Service") -> str:
     return campaign.branch_key(branch)
 
 
-def _target_branch(service: "Service") -> str:
+def _campaign_branch(service: "Service") -> str:
     config = service.config
     return str(config.get("target_branch") or config.get("main_branch") or "main")
+
+
+def _target_branch(service: "Service") -> str:
+    """The review diff base: the delivery base (the pull request base).
+
+    ``_campaign_branch`` is the pull request head.  Diffing the head against
+    itself gives an empty campaign, so the diff base is the delivery base
+    instead.
+    """
+    return integrate.delivery_base_of(service.config)
 
 
 def _worktree_branch(service: "Service") -> str | None:
@@ -94,7 +152,7 @@ def review_commits(service: "Service") -> list[str]:
 
 def report_info(service: "Service") -> dict[str, Any]:
     """The generated report as a virtual, git-ignored file."""
-    branch = _target_branch(service)
+    branch = _campaign_branch(service)
     path = campaign.report_path(service.root, branch)
     if not path.is_file():
         return {"path": str(path), "exists": False, "content": "", "updated_at": None}
@@ -140,7 +198,7 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
 
     return {
         "branch_key": branch_key,
-        "feature_branch": target,
+        "feature_branch": _campaign_branch(service),
         "source_tip": source_tip,
         "target_tip": target_tip,
         "commit": commit,
@@ -164,6 +222,7 @@ def _evidence_map(service: "Service", hashes: set[str]) -> dict[str, dict[str, A
         check = service.store.latest_check_for_commit(head)
         if check is None:
             continue
+        changes = commit_changes(service.root, head)
         found[head] = {
             "candidate": int(candidate["id"]),
             "node": candidate.get("node"),
@@ -175,6 +234,8 @@ def _evidence_map(service: "Service", hashes: set[str]) -> dict[str, dict[str, A
             "output": check.get("output"),
             "gpu": check.get("gpu"),
             "created_at": check.get("finished_at") or check.get("created_at"),
+            "diffstat": changes["diffstat"],
+            "files": changes["files"],
         }
     return found
 

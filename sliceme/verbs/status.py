@@ -506,7 +506,6 @@ class StatusVerbs:
         entries = plan_mod.load_campaign_plan(self.root, design)
         rows = self.store.list_campaigns()
         result: list[dict[str, Any]] = []
-        previous_target: str | None = None
         next_name: str | None = None
         for index, entry in enumerate(entries):
             row = next(
@@ -524,8 +523,7 @@ class StatusVerbs:
                     "index": index,
                     "name": entry["name"],
                     "target": entry["target"],
-                    "base": entry["base"]
-                    or previous_target
+                    "base": self.plane_config.get("delivery_base")
                     or self.plane_config.get("base"),
                     "dirs": entry["dirs"],
                     "state": state,
@@ -534,7 +532,6 @@ class StatusVerbs:
             )
             if next_name is None and state not in ("delivered", "landed", "closed"):
                 next_name = entry["name"]
-            previous_target = entry["target"]
         return {
             "design": str(design),
             "entries": result,
