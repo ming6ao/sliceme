@@ -335,8 +335,12 @@ class CampaignVerbs:
                 continue
             # The subject is the human description, never a wave prefix.  A
             # node with changes must have its own description; Sliceme never
-            # invents one.
-            description = _subject_line(messages.get(node_id))
+            # invents one.  Fall back to the DAG node ``label``, which the
+            # planner authors, so the trusted resource records without a
+            # per-node ``--messages`` argument.
+            description = _subject_line(
+                messages.get(node_id) or node.get("label")
+            )
             if not description:
                 raise _record_error(
                     "missing_description",

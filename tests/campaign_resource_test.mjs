@@ -46,9 +46,13 @@ assert.equal(
 // commands.
 const resolved = resolveCampaignResource({ campaign: "feat.x", waveCap: 3, nodeCap: 9 }, ENGINE);
 assert.ok(!("error" in resolved), JSON.stringify(resolved));
+const expectedKeys = ["status"];
+for (let index = 0; index < 3; index++) {
+	expectedKeys.push(`ready-${index}`, `record-${index}`, `check-${index}`);
+}
 assert.deepEqual(
 	resolved.hostCommands.map((grant) => grant.key),
-	["status", "ready", "record", "check"],
+	expectedKeys,
 );
 
 // The resource cannot approve or deliver: the user permission is the only gate
@@ -60,7 +64,7 @@ assert.ok(!resolved.hostCommands.some((grant) => grant.key === "deliver"));
 // `sliceme wave --open` before it starts the resource (plan correction 4).
 assert.ok(!resolved.hostCommands.some((grant) => grant.key === "open"));
 assert.ok(!resolved.script.includes("wave --open"));
-for (const key of ["status", "ready", "record", "check"]) {
+for (const key of ["status", "ready-0", "record-0", "check-0"]) {
 	const grant = resolved.hostCommands.find((entry) => entry.key === key);
 	assert.ok(grant, `missing grant ${key}`);
 	assert.ok(
@@ -69,6 +73,9 @@ for (const key of ["status", "ready", "record", "check"]) {
 	);
 }
 assert.ok(resolved.script.includes('"sliceme-worker"'));
+assert.ok(resolved.script.includes('"ready-" + waves'));
+assert.ok(resolved.script.includes('"record-" + waves'));
+assert.ok(resolved.script.includes('"check-" + waves'));
 assert.ok(resolved.script.includes('"reviewer"'));
 assert.ok(resolved.script.includes("const WAVE_CAP = 3;"));
 assert.ok(resolved.script.includes("const NODE_CAP = 9;"));
