@@ -1,23 +1,18 @@
-"""Parse git diffs for the review page.
+"""Parse git diffs for the review packet.
 
-The client renders one file at a time.  The server sends a file index for the
-whole packet and a line list for one file, so the first load stays small.
-
-Every function here is read-only.  The git calls use the three-dot form
-``target...source`` so the diff is against the merge base, never a moving tip.
+The packet sends a file index for the whole commit set.  Every function here is
+read-only.  The git calls use the three-dot form ``target...source`` so the diff
+is against the merge base, never a moving tip.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from .. import gitutil
 
-__all__ = ["file_diff", "file_index", "parse_unified_diff", "commits"]
-
-_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+__all__ = ["commits", "file_index"]
 
 
 def _three_dot(target: str, source: str) -> str:
@@ -115,67 +110,3 @@ def file_index(root: Path, target: str, source: str) -> list[dict[str, Any]]:
         )
     rows.sort(key=lambda row: row["path"])
     return rows
-
-
-def parse_unified_diff(text: str) -> list[dict[str, Any]]:
-    """Turn one file's unified diff into renderable lines.
-
-    Each row holds a ``type`` (``hunk``, ``context``, ``add``, or ``delete``),
-    the old and new line numbers, and the raw text.  Header lines are dropped.
-    """
-    lines: list[dict[str, Any]] = []
-    old_no = 0
-    new_no = 0
-    for raw in text.splitlines():
-        match = _HUNK_RE.match(raw)
-        if match:
-            old_no = int(match.group(1))
-            new_no = int(match.group(3))
-            lines.append(
-                {"type": "hunk", "old": None, "new": None, "text": raw}
-            )
-            continue
-        if raw.startswith(("diff --git ", "index ", "--- ", "+++ ", "new file", "deleted file", "similarity", "rename ", "old mode", "new mode", "Binary files ")):
-            continue
-        if raw.startswith("\\"):
-            lines.append({"type": "meta", "old": None, "new": None, "text": raw})
-            continue
-        if raw.startswith("+"):
-            lines.append({"type": "add", "old": None, "new": new_no, "text": raw[1:]})
-            new_no += 1
-            continue
-        if raw.startswith("-"):
-            lines.append({"type": "delete", "old": old_no, "new": None, "text": raw[1:]})
-            old_no += 1
-            continue
-        if raw.startswith(" "):
-            lines.append(
-                {"type": "context", "old": old_no, "new": new_no, "text": raw[1:]}
-            )
-            old_no += 1
-            new_no += 1
-            continue
-        # A trailing empty line or an unexpected header: keep it as context.
-        if raw:
-            lines.append({"type": "context", "old": old_no, "new": new_no, "text": raw})
-            old_no += 1
-            new_no += 1
-    return lines
-
-
-def file_diff(root: Path, target: str, source: str, path: str) -> list[dict[str, Any]]:
-    """The parsed line list for one file in the packet diff."""
-    res = gitutil.git(
-        root,
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "-M",
-        _three_dot(target, source),
-        "--",
-        path,
-        check=False,
-    )
-    if not res.ok:
-        return []
-    return parse_unified_diff(res.stdout)

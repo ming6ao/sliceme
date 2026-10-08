@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gpu.sh — the single GPU broker for sliceme campaigns.
+# gpu.sh — the single GPU runner for sliceme campaigns.
 #
 # Only the verifier is given this tool. Workers never touch the GPU; T0 CPU
 # remains the inner development loop (docs/orchestration.md §8).

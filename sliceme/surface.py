@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .sandbox import SANDBOX_MODES
 from .util import SlicemeError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -84,9 +83,14 @@ ACTIONS: tuple[Action, ...] = (
             Param("no_checks", "boolean", "with --simulate: plan only, do not run checks"),
             Param("sessions", "boolean", "list registered campaigns instead of the plane"),
             Param("resume", "boolean", "reconcile a suspended campaign and return its resume plan"),
-            Param("plan_only", "boolean", "with --resume: report without side effects"),
+            Param("plan_only", "boolean", "with --resume: accepted for compatibility; resume writes nothing"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
+    ),
+    Action(
+        name="ready",
+        summary="current-wave nodes ready to spawn, the wave index, and paused",
+        params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
         name="plan",
@@ -108,28 +112,10 @@ ACTIONS: tuple[Action, ...] = (
         ),
     ),
     Action(
-        name="exec",
-        summary="single sandboxed verification executor: submit/run/wait/cancel check jobs",
+        name="check",
+        summary="run the synchronous combined-tree checks for the current wave",
         params=(
-            Param("submit", "boolean", "enqueue a check job"),
-            Param("validate", "boolean", "resolve and validate the project sandbox gate"),
-            Param("gpu_required", "boolean", "with --validate: require a GPU runner"),
-            Param("run", "boolean", "drain the queue with the single executor"),
-            Param("wait", "boolean", "wait for a job to finish (requires --job)"),
-            Param("cancel", "boolean", "cancel a queued job (requires --job)"),
-            Param("job", "string", "job id for --wait/--cancel"),
-            Param("source", "string", "fingerprint source, e.g. node:w1 or wave:0"),
-            Param("commit", "string", "commit/ref to run the checks at"),
-            Param("commits", "list", "submit: commit refs run as one batch (repeatable)", flag="commits"),
-            Param("only", "list", "submit: keep only these checks, matched by name or command", flag="only"),
-            Param("command", "list", "check command (repeatable)", flag="command"),
-            Param("sandbox", "string", "sandbox mode", choices=SANDBOX_MODES),
-            Param("gpu", "string", "GPU tier reserved by the executor", choices=("none", "T1", "T2")),
-            Param("priority", "int", "higher priority runs first"),
-            Param("timeout", "int", "per-command timeout seconds"),
-            Param("wave", "int", "campaign wave the job belongs to"),
-            Param("requester", "string", "verifier id that submitted the job"),
-            Param("limit", "int", "with --run: at most this many jobs"),
+            Param("current", "boolean", "run the checks for the current wave (the engine reads its own wave index)"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -140,6 +126,7 @@ ACTIONS: tuple[Action, ...] = (
             Param("open", "boolean", "create or reuse the single campaign worktree"),
             Param("record", "boolean", "record a wave: conformance + per-node commits"),
             Param("wave", "int", "wave index to record"),
+            Param("current", "boolean", "record: the current wave (the engine reads its own wave index)"),
             Param("only", "list", "record: scope to these nodes, one commit each (repeatable)", flag="only"),
             Param("messages", "string", "record: JSON object of node id to description"),
             Param("summary", "string", "record: candidate summary"),
@@ -148,73 +135,16 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="review",
-        summary="local review: serve the browser client, poll comments, or record one review action",
+        summary="local review: record one campaign decision, or write the campaign report",
         params=(
-            Param("serve", "boolean", "start the foreground review server (loopback only)"),
-            Param("plane", "list", "plane root to serve (repeatable; default: this workspace)", flag="plane"),
-            Param("host", "string", "bind host (loopback only)"),
-            Param("port", "int", "bind port (0 chooses a free port)"),
-            Param("no_browser", "boolean", "serve: do not open a browser automatically"),
-            Param("url_file", "string", "serve: write the URL to this file (mode 0600)"),
-            Param("poll", "boolean", "print open comments and the newest decision"),
-            Param("ack", "boolean", "acknowledge one comment (requires --comment-id)"),
-            Param("state", "boolean", "print one review snapshot"),
-            Param("diff", "boolean", "print one file diff"),
-            Param("comment", "boolean", "record a comment"),
-            Param("reply", "boolean", "record a reply row (requires --comment-id and --body)"),
-            Param("addressed", "boolean", "mark a root comment addressed (requires --comment-id)"),
-            Param("resolve", "boolean", "route one comment to a node (requires --comment-id)"),
             Param("decision", "string", "record a decision", choices=("approve", "request_changes", "override")),
             Param("all", "boolean", "with --decision approve: approve the whole campaign commit set"),
             Param("report", "boolean", "write the deterministic campaign report"),
             Param("narrative", "string", "report: what-changed/risks text"),
             Param("design", "string", "report: design document reference"),
-            Param("comment_id", "int", "comment id for --ack/--reply/--addressed/--resolve"),
-            Param("parent_comment_id", "int", "with --comment: create a reply under this comment"),
-            Param("addressing_commit", "string", "commit that answers the comment"),
-            Param("target", "string", "deliver: target branch override"),
-            Param("commit", "string", "commit to review or approve"),
-            Param("file", "string", "file path"),
-            Param("side", "string", "comment side", choices=("old", "new")),
-            Param("line", "int", "line number"),
-            Param("line_end", "int", "end line for a range"),
-            Param("body", "string", "comment body"),
+            Param("commit", "string", "commit to approve"),
             Param("note", "string", "decision note"),
             Param("actor", "string", "who recorded the decision"),
-            Param("campaign", "string", CAMPAIGN_HELP),
-        ),
-    ),
-    Action(
-        name="attempt",
-        summary="record a subagent attempt's begin/end and metrics",
-        params=(
-            Param("begin", "boolean", "start an attempt"),
-            Param("end", "boolean", "finish the running attempt for --node"),
-            Param("node", "string", "node id"),
-            Param("unit", "string", "unit name"),
-            Param("agent", "string", "worker | planner | verifier"),
-            Param("attempt", "int", "attempt number (default 1)"),
-            Param("status", "string", "end: status, e.g. ok | failed | cancelled"),
-            Param("exit_code", "int", "end: process exit code"),
-            Param("turns", "int", "end: turn count"),
-            Param("tool_calls", "int", "end: tool call count"),
-            Param("tools", "string", "end: JSON tool histogram"),
-            Param("tool_seconds", "string", "end: total tool seconds"),
-            Param("tool_durations", "string", "end: JSON tool duration map"),
-            Param("slowest_commands", "string", "end: JSON slowest command list"),
-            Param("tokens_in", "int", "end: input tokens"),
-            Param("tokens_out", "int", "end: output tokens"),
-            Param("cost", "string", "end: approximate cost"),
-            Param("last_tool", "string", "end: last tool name"),
-            Param("error", "string", "end: error text"),
-            Param("campaign", "string", CAMPAIGN_HELP),
-        ),
-    ),
-    Action(
-        name="progress",
-        summary="time and tool breakdown for a campaign",
-        params=(
-            Param("node", "string", "show one node instead of the campaign"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -331,6 +261,10 @@ def _dispatch_plan(service: "Service", p: dict[str, Any]) -> Any:
     return service.campaign_plan(str(design))
 
 
+def _dispatch_ready(service: "Service", p: dict[str, Any]) -> Any:
+    return service.ready()
+
+
 def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
     return service.deliver(
         target=p.get("target"),
@@ -340,69 +274,22 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
     )
 
 
-def _dispatch_attempt(service: "Service", p: dict[str, Any]) -> Any:
-    node = p.get("node")
-    if not node:
-        raise SlicemeError("attempt requires --node")
-    attempt_number = int(p["attempt"]) if p.get("attempt") is not None else None
-    if p.get("begin"):
-        return service.begin_attempt(
-            node=str(node),
-            unit=p.get("unit"),
-            attempt=attempt_number or 1,
-            agent=p.get("agent") or "worker",
-        )
-    if p.get("end"):
-        fields: dict[str, Any] = {}
-        for key in (
-            "status",
-            "exit_code",
-            "turns",
-            "tool_calls",
-            "tools",
-            "tool_seconds",
-            "tool_durations",
-            "slowest_commands",
-            "tokens_in",
-            "tokens_out",
-            "cost",
-            "last_tool",
-            "error",
-        ):
-            value = p.get(key)
-            if value is None:
-                continue
-            if key in {"exit_code", "turns", "tool_calls", "tokens_in", "tokens_out"}:
-                value = int(value)
-            elif key in {"cost", "tool_seconds"}:
-                value = float(value)
-            elif key in {"tool_durations", "slowest_commands"}:
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError as exc:
-                    raise SlicemeError(
-                        f"attempt --end {key} is not valid JSON: {exc}"
-                    ) from None
-            fields[key] = value
-        result = service.end_attempt(
-            node=str(node), attempt=attempt_number, **fields
-        )
-        if result is None:
-            raise SlicemeError(f"no running attempt for node '{node}'")
-        return result
-    return service.attempts(node=str(node))
-
-
-def _dispatch_progress(service: "Service", p: dict[str, Any]) -> Any:
-    return service.progress(node=p.get("node"))
+def _dispatch_check(service: "Service", p: dict[str, Any]) -> Any:
+    if not p.get("current"):
+        raise SlicemeError("check requires --current")
+    return service.check_wave()
 
 
 def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
     if p.get("open"):
         return {"unit": service.create_campaign_workspace()}
     if p.get("record"):
-        if p.get("wave") is None:
-            raise SlicemeError("wave --record requires --wave")
+        if p.get("current"):
+            wave_index = service.current_wave_index()
+        elif p.get("wave") is not None:
+            wave_index = int(p["wave"])
+        else:
+            raise SlicemeError("wave --record requires --wave or --current")
         messages = p.get("messages")
         if isinstance(messages, str):
             try:
@@ -414,10 +301,12 @@ def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
         if messages is not None and not isinstance(messages, dict):
             raise SlicemeError("wave --record --messages must be a JSON object")
         only = list(p.get("only") or []) or None
-        # Serialize git mutation with the single executor's check runs.
-        with service.executor().lock():
+        # Serialize git mutation with campaign creation and wave recording.
+        from .service import campaign_lock
+
+        with campaign_lock(service.root):
             return service.record_wave(
-                int(p["wave"]),
+                wave_index,
                 only=only,
                 messages=messages,
                 summary=p.get("summary"),
@@ -425,83 +314,22 @@ def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
     raise SlicemeError("wave needs --open or --record")
 
 
-def _dispatch_exec(service: "Service", p: dict[str, Any]) -> Any:
-    executor = service.executor()
-    if p.get("validate"):
-        info = service.sandbox_info(gpu_required=bool(p.get("gpu_required")))
-        if not info.get("ok"):
-            raise SlicemeError(str(info.get("error") or "sandbox gate failed"))
-        return info
-    if p.get("cancel"):
-        if not p.get("job"):
-            raise SlicemeError("exec --cancel requires --job")
-        return {"job": executor.cancel(p["job"])}
-    if p.get("wait"):
-        if not p.get("job"):
-            raise SlicemeError("exec --wait requires --job")
-        return {"job": executor.wait(p["job"], timeout=float(p.get("timeout") or 600))}
-    if p.get("run"):
-        jobs = executor.drain(limit=p.get("limit") or None)
-        return {"executed": len(jobs), "jobs": jobs}
-    if p.get("submit"):
-        result = executor.submit(
-            source=p.get("source"),
-            commit=p.get("commit"),
-            commits=list(p.get("commits") or []),
-            commands=list(p.get("command") or []),
-            only=list(p.get("only") or []),
-            sandbox=p.get("sandbox"),
-            gpu=p.get("gpu") or "none",
-            wave=p.get("wave"),
-            requester=p.get("requester"),
-            priority=int(p.get("priority") or 0),
-            timeout=int(p.get("timeout") or 3600),
-        )
-        return {"cached": result["cached"], "jobs": result["jobs"], "job": result["job"]}
-    return executor.status()
-
-
 def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
     from .review import api as review_api
 
-    if p.get("serve"):
-        roots = [Path(item) for item in (p.get("plane") or [])] or [service.root]
-        return review_api.serve(
-            roots,
-            host=p.get("host") or "127.0.0.1",
-            port=int(p.get("port") or 0),
-            browser=not p.get("no_browser"),
-            url_file=p.get("url_file"),
-            campaign=p.get("campaign"),
-        )
-    if p.get("poll"):
-        return review_api.poll(service, p)
-    if p.get("ack"):
-        return review_api.ack(service, p)
-    if p.get("reply"):
-        return review_api.reply(service, p)
-    if p.get("addressed"):
-        return review_api.addressed(service, p)
-    if p.get("resolve"):
-        return review_api.resolve(service, p)
-    if p.get("comment"):
-        return review_api.comment(service, p)
     if p.get("decision"):
         return review_api.decision(service, p)
     if p.get("report"):
         return review_api.report(service, p)
-    if p.get("diff"):
-        return review_api.diff(service, p)
-    return review_api.state(service, p)
+    raise SlicemeError("review needs --decision or --report")
 
 
 _HANDLERS = {
     "status": _dispatch_status,
+    "ready": _dispatch_ready,
     "plan": _dispatch_plan,
     "deliver": _dispatch_deliver,
-    "attempt": _dispatch_attempt,
-    "progress": _dispatch_progress,
-    "exec": _dispatch_exec,
+    "check": _dispatch_check,
     "wave": _dispatch_wave,
     "review": _dispatch_review,
 }

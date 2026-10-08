@@ -99,15 +99,15 @@ def compute_fingerprint(
     checks: list[CheckSpec] | None = None,
     source: str = "plane",
     sandbox_digest: str = "",
-    executor_digest: str = "",
+    checks_digest: str = "",
 ) -> Fingerprint:
-    """Hash ``(tree, command vector, toolchain, policy, sandbox, executor, source)``.
+    """Hash ``(tree, command vector, toolchain, policy, sandbox, checks, source)``.
 
     ``checks`` defaults to the plane's configured checks; a campaign node
     passes its own ``acceptance`` commands and ``source='node:<id>'`` so a node
     verdict can never collide with a plane-check verdict (§6.4).  A non-empty
-    ``sandbox_digest`` pins the isolation profile and ``executor_digest`` pins
-    the executor semantics, so tightening either invalidates a cached verdict.
+    ``sandbox_digest`` pins the isolation profile and ``checks_digest`` pins
+    the check semantics, so tightening either invalidates a cached verdict.
     """
     tree = gitutil.tree_of(root, commit)
     specs = checks if checks is not None else checks_from_config(config)
@@ -122,7 +122,7 @@ def compute_fingerprint(
     policy_digest = sha256_json(policy)
     fingerprint = sha256_text(
         "\n".join(
-            [tree, cmd_digest, tool, policy_digest, sandbox_digest, executor_digest, source]
+            [tree, cmd_digest, tool, policy_digest, sandbox_digest, checks_digest, source]
         )
     )
     return Fingerprint(
@@ -152,8 +152,8 @@ def select_checks(
     ``only=None`` (or an empty list) keeps every check.  Matching is
     case-insensitive against both the check name and the command text, so a
     caller may pass a configured ``NAME`` or the acceptance command itself.
-    This is the single ``only`` filter (see ``Executor.submit``): it lets a
-    re-verify run just one command.
+    This is the single ``only`` filter (see :meth:`sliceme.checks.CheckRunner.run`):
+    it lets a re-verify run just one command.
     """
     if not only:
         return list(checks)

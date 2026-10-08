@@ -151,28 +151,6 @@ def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
         _print(result, as_json)
         return 0
 
-    # `review --serve` may point at a parent directory of planes, so it must not
-    # require a plane at cwd.
-    if action == "review" and getattr(args, "serve", False):
-        from .review import api as review_api
-
-        roots = [Path(item).resolve() for item in (getattr(args, "plane", None) or [])]
-        if not roots:
-            try:
-                roots = [_root(args)]
-            except SlicemeError:
-                roots = [Path.cwd()]
-        result = review_api.serve(
-            roots,
-            host=getattr(args, "host", None) or "127.0.0.1",
-            port=int(getattr(args, "port", 0) or 0),
-            browser=not getattr(args, "no_browser", False),
-            url_file=getattr(args, "url_file", None),
-            campaign=getattr(args, "campaign", None),
-        )
-        _print(result, as_json)
-        return 0
-
     service = Service(_root(args), campaign=getattr(args, "campaign", None))
     try:
         result = surface.dispatch(service, action, vars(args))

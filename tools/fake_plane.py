@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Build a fake Sliceme plane for local review-client testing.
+"""Build a fake Sliceme plane for engine inspection.
 
 The script creates a real git repository with a small project, a campaign
-worktree, three recorded waves, verification evidence, comments, review
-decisions, a report, subagent attempts, and suspend/resume descriptors.  The
-result is a complete plane that the review server can serve with no campaign
-run.
+worktree, three recorded waves, check evidence, review decisions, a report,
+and suspend/resume descriptors.  The result is a complete plane the engine can
+inspect with no campaign run.
 
 Example:
 
     python3 tools/fake_plane.py --dir /tmp/sliceme-fake
-    python3 -m sliceme review --serve --plane /tmp/sliceme-fake
+    python3 -m sliceme --root /tmp/sliceme-fake status
 
 The script is destructive: it removes the target directory before it builds
 the plane.
@@ -323,42 +322,30 @@ def build_campaign(svc: Service) -> dict[str, str]:
 
 
 def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int]) -> None:
-    """Insert one terminal check job per commit, plus one superseded failure."""
+    """Insert one terminal check per commit, plus one superseded failure."""
     store = svc.store
-    # A superseded failure for w2 first, so the later passing job is the newest
+    # A superseded failure for w2 first, so the later passing check is the newest
     # terminal row and wins in the evidence panel.
-    stale = store.create_job(
+    store.create_check(
+        fingerprint=sha256_text(f"stale:{commits['w2']}"),
         source="node:w2",
         commit_ref=commits["w2"],
+        status="failed",
         commands=["pytest tests/test_smoke.py"],
         wave=node_wave["w2"],
-        requester="verifier",
-        fingerprint=sha256_text(f"stale:{commits['w2']}"),
-    )
-    store.update_job(
-        stale,
-        status="failed",
-        started_at=now() - 30.0,
-        finished_at=now() - 29.0,
         duration=1.0,
         exit_code=1,
         output="pytest tests/test_smoke.py\n1 failed in 0.11s\n",
     )
     for node, spec in EVIDENCE.items():
         commit = commits[node]
-        job_id = store.create_job(
+        store.create_check(
+            fingerprint=sha256_text(f"{node}:{commit}:{spec['status']}"),
             source=f"node:{node}",
             commit_ref=commit,
+            status=spec["status"],
             commands=list(spec["commands"]),
             wave=node_wave[node],
-            requester="verifier",
-            fingerprint=sha256_text(f"{node}:{commit}:{spec['status']}"),
-        )
-        store.update_job(
-            job_id,
-            status=spec["status"],
-            started_at=now() - spec["duration"] - 1.0,
-            finished_at=now(),
             duration=spec["duration"],
             exit_code=0 if spec["status"] == "passed" else 1,
             output=spec["output"],
@@ -366,55 +353,7 @@ def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int
     store.conn.commit()
 
 
-def add_attempts(svc: Service, node_wave: dict[str, int]) -> None:
-    for node, wave in node_wave.items():
-        attempt_id = svc.store.create_attempt(
-            node=node, unit="campaign", attempt=1, agent="worker"
-        )
-        failed = node == "w3"
-        svc.store.finish_attempt(
-            attempt_id,
-            status="failed" if failed else "ok",
-            finished_at=now(),
-            duration=40.0 + wave * 5,
-            exit_code=1 if failed else 0,
-            turns=6 + wave,
-            tool_calls=11 + wave,
-            tools='{"edit": 4, "read": 5, "bash": 2}',
-            tokens_in=1200 + wave * 100,
-            tokens_out=800 + wave * 50,
-            cost=0.02 + wave * 0.01,
-            last_tool="edit",
-            error="assertion failed in tests/test_session.py" if failed else None,
-        )
-    svc.store.conn.commit()
-
-
 def add_review_data(svc: Service, commits: dict[str, str]) -> None:
-    svc.review_comment(
-        body="Please add a token expiry check here.",
-        commit=commits["w1"],
-        file="src/api/auth.py",
-        side="new",
-        line=6,
-        line_end=7,
-        node="w1",
-    )
-    svc.review_comment(
-        body="The failure looks like a missing fixture, not a product bug.",
-        commit=commits["w3"],
-        file="src/web/session.py",
-        side="new",
-        line=4,
-        node="w3",
-    )
-    delivered = svc.review_comment(
-        body="The risks section should mention the schema migration.",
-        commit=None,
-        node="w2",
-    )
-    svc.review_ack(int(delivered["id"]))
-
     svc.review_decision(
         action="approve", commit=commits["w1"], actor="demo-reviewer"
     )
@@ -509,9 +448,6 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
                 "attempt": 1,
                 "candidate": None,
                 "commit": commits[node],
-                "last_heartbeat": str(
-                    campaign.heartbeat_path(root, FEATURE_BRANCH, node)
-                ),
             }
             for node in commits
         },
@@ -560,20 +496,8 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
     write_json(campaign.session_path(root, DECOY_BRANCH), decoy)
 
 
-def write_heartbeats(root: Path, commits: dict[str, str]) -> None:
-    for index, node in enumerate(commits):
-        write_json(
-            campaign.heartbeat_path(root, FEATURE_BRANCH, node),
-            {
-                "node": node,
-                "attempt": 1,
-                "turns": 6 + index,
-                "tool_calls": 11 + index,
-                "last_tool": "edit",
-                "last_text": f"{node}: finished the planned edits.",
-                "updated_at": now() - 120.0 + index,
-            },
-        )
+def write_worker_logs(root: Path, commits: dict[str, str]) -> None:
+    for node in commits:
         log = campaign.worker_log_path(root, FEATURE_BRANCH, node)
         log.write_text(
             f"[demo] worker {node} finished\n", encoding="utf-8"
@@ -618,7 +542,6 @@ def main() -> int:
         commits = build_campaign(svc)
         node_wave = {"w1": 0, "w2": 0, "w3": 1, "w4": 1, "w5": 2}
         add_evidence(svc, commits, node_wave)
-        add_attempts(svc, node_wave)
         add_review_data(svc, commits)
         svc.report(
             narrative=(
@@ -629,7 +552,7 @@ def main() -> int:
         )
         write_state(root, config, commits)
         write_session_descriptors(root, config, commits)
-        write_heartbeats(root, commits)
+        write_worker_logs(root, commits)
         snapshot = svc.review_snapshot()
     finally:
         svc.close()
@@ -638,12 +561,13 @@ def main() -> int:
     print(f"  feature branch: {FEATURE_BRANCH}")
     print(f"  commits: {len(snapshot['commits'])}")
     print(f"  files: {len(snapshot['files'])}")
-    print(f"  comments: {len(snapshot['comments'])}")
     print(f"  all approved: {snapshot['all_approved']}")
     print()
-    print("serve the review client with:")
-    print(f"  python3 -m sliceme review --serve --plane {root}")
-    print("  # or: ./bin/sliceme review --serve --plane " + str(root))
+    print("inspect the plane with:")
+    print(f"  python3 -m sliceme --root {root} status")
+    print(
+        f"  python3 -m sliceme --root {root} review --report --campaign {FEATURE_BRANCH}"
+    )
     return 0
 
 

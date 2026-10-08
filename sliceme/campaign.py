@@ -6,9 +6,10 @@ campaigns collide.  ``/`` in the branch name is replaced with ``--``::
 
     feat/nanochat-cpp  ->  feat--nanochat-cpp
 
-The orchestrator (the pi `campaign` extension) owns writing ``dag.json`` and
-``state.json``; Python reads them for ``sliceme report`` and resolves their
-paths.  ``dag.json`` is plane state, never committed to the repository.
+The orchestrator (the pi extension) owns writing ``dag.json``; Python reads
+it for ``sliceme report`` and resolves its path.  ``state.json`` is an
+optional, read-only legacy override that the engine never writes.  ``dag.json``
+is plane state, never committed to the repository.
 
 This module also renders the deterministic report skeleton
 (``.sliceme/<branch-key>.report.md``): design ref, feature branch, nodes,
@@ -60,16 +61,6 @@ def session_path(root: Path, branch: str) -> Path:
 def control_path(root: Path, branch: str) -> Path:
     """The cooperative pause flag (``{"pause": true, ...}``) for a campaign."""
     return state_dir(root) / f"{branch_key(branch)}.control.json"
-
-
-def heartbeat_path(root: Path, branch: str, node: str) -> Path:
-    """The per-node progress heartbeat written by a running subagent."""
-    return state_dir(root) / f"{branch_key(branch)}.progress_{node}.json"
-
-
-def events_path(root: Path, branch: str) -> Path:
-    """The append-only audit log (``.events.jsonl``) for a campaign."""
-    return state_dir(root) / f"{branch_key(branch)}.events.jsonl"
 
 
 def load_session(root: Path, branch: str) -> dict[str, Any] | None:
@@ -154,8 +145,6 @@ __all__ = [
     "config_branch",
     "control_path",
     "dag_path",
-    "events_path",
-    "heartbeat_path",
     "list_sessions",
     "load_control",
     "load_dag",
@@ -218,7 +207,7 @@ def build_skeleton(
             latest = rows[-1] if rows else None
             unit = units_by_id.get(int(latest["unit_id"])) if latest is not None else None
             verification = (
-                store.latest_job_for_commit(str(latest["head_commit"]))
+                store.latest_check_for_commit(str(latest["head_commit"]))
                 if latest is not None
                 else None
             )
@@ -244,7 +233,7 @@ def build_skeleton(
             unit_candidates = [c for c in candidates if int(c["unit_id"]) == int(unit["id"])]
             latest = unit_candidates[-1] if unit_candidates else None
             verification = (
-                store.latest_job_for_commit(str(latest["head_commit"]))
+                store.latest_check_for_commit(str(latest["head_commit"]))
                 if latest is not None
                 else None
             )

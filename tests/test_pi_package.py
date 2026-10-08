@@ -1,8 +1,9 @@
 """Guards the pi package contract.
 
 Sliceme supports exactly one install path: ``pi install`` of this package, which
-registers one extension exposing the ``sliceme``/``sliceme-unit`` tools and the
-``/sliceme`` command. There is no separate skill. These tests fail if that
+registers one extension exposing the ``sliceme`` engine tool, the Sliceme agent
+definitions, and the ``sliceme.campaign`` workflow resource. There is no
+separate skill and no second (``sliceme-unit``) tool. These tests fail if that
 structure regresses.
 """
 
@@ -19,26 +20,14 @@ README = REPO_ROOT / "README.md"
 WORKFLOW = REPO_ROOT / "docs" / "workflow.md"
 PACKAGE = REPO_ROOT / "package.json"
 PI_DIR = REPO_ROOT / "integrations" / "pi"
-PI_UNIT = PI_DIR / "unit.ts"
+AGENTS_DIR = PI_DIR / "agents"
 PI_COORDINATOR = PI_DIR / "coordinator.ts"
 PI_COMMON = PI_DIR / "common.ts"
+PI_RESOURCE = PI_DIR / "campaign-resource.ts"
+PI_UNIT = PI_DIR / "unit.ts"
 
 sys.path.insert(0, str(REPO_ROOT))
 from sliceme import surface  # noqa: E402
-
-
-def _frontmatter(text: str) -> dict[str, str]:
-    match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
-    if not match:
-        raise AssertionError("file is missing YAML frontmatter")
-    data: dict[str, str] = {}
-    for line in match.group(1).splitlines():
-        if not line.strip() or line.startswith((" ", "\t", "#")):
-            continue
-        if ":" in line:
-            key, value = line.split(":", 1)
-            data[key.strip()] = value.strip().strip('"')
-    return data
 
 
 def _node_strip_supported(node: str) -> bool:
@@ -78,33 +67,33 @@ class PiPackageTests(unittest.TestCase):
             self.assertNotIn("SLICEME_AUTO_BOOTSTRAP", text, path)
 
     def test_sliceme_is_extension_only(self):
-        # No skill: the extension owns the `/sliceme` command and both tools.
+        # No skill: the extension owns the `/sliceme` command and the engine tool.
         manifest = json.loads(PACKAGE.read_text(encoding="utf-8"))
         self.assertEqual(manifest.get("pi", {}).get("skills", []), [])
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('pi.registerCommand("sliceme"', coordinator)
         self.assertIn("sendUserMessage", coordinator)
-        # The command activates both tools for the session.
+        # The command activates the engine tool for the session.
         self.assertIn("setActiveTools", coordinator)
         # The old skill-trigger glue is gone.
-        self.assertNotIn("pi.on(\"input\"", coordinator)
+        self.assertNotIn('pi.on("input"', coordinator)
         self.assertNotIn("/skill:sliceme", coordinator)
         self.assertNotIn("SKILL_INVOCATION", coordinator)
         self.assertNotIn("hasDesignDocument", coordinator)
 
-    def test_tools_register_inactive_and_are_activated_by_the_command(self):
-        # Re-gated: a plain session does not advertise Sliceme; `/sliceme` turns
-        # both tools on via `pi.setActiveTools`.
-        for path in (PI_UNIT, PI_COORDINATOR):
-            text = path.read_text(encoding="utf-8")
-            self.assertIn("defaultActive: false", text, path)
-            self.assertNotIn("defaultActive: true", text, path)
+    def test_engine_tool_registers_inactive(self):
+        # A plain session does not advertise Sliceme; `/sliceme` turns the tool
+        # on via `pi.setActiveTools`.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn("defaultActive: false", coordinator)
+        self.assertNotIn("defaultActive: true", coordinator)
 
     def test_pi_extension_is_a_thin_forwarder(self):
-        # There is no single-agent bootstrap: the extension only registers the
-        # `sliceme-unit` tool and forwards to the CLI via the shared helpers.
-        text = PI_UNIT.read_text(encoding="utf-8")
+        # There is no single-agent bootstrap: the extension registers the engine
+        # tool, the agents, and the resource through the shared helpers.
+        text = PI_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('from "./common.ts"', text)
+        self.assertIn('from "./campaign-resource.ts"', text)
         self.assertIn("runSliceme(pi, ctx", text)
         self.assertNotIn("bindingIsStale", text)
         self.assertNotIn("bootstrap(ctx)", text)
@@ -114,92 +103,147 @@ class PiPackageTests(unittest.TestCase):
         self.assertTrue(PACKAGE.is_file(), "package.json is required for `pi install`")
         manifest = json.loads(PACKAGE.read_text(encoding="utf-8"))
         self.assertIn("pi-package", manifest.get("keywords", []))
-        pi = manifest.get("pi", {})
-        extensions = pi.get("extensions", [])
-        self.assertIn("./integrations/pi/unit.ts", extensions)
-        self.assertIn("./integrations/pi/coordinator.ts", extensions)
-        # The shared helpers ship with the package and are imported by both tools.
+        extensions = manifest.get("pi", {}).get("extensions", [])
+        self.assertEqual(extensions, ["./integrations/pi/coordinator.ts"])
+        for shipped in (
+            "integrations/pi/common.ts",
+            "integrations/pi/campaign-resource.ts",
+            "integrations/pi/agents/",
+        ):
+            self.assertIn(shipped, manifest.get("files", []))
         self.assertTrue(PI_COMMON.is_file())
-        self.assertIn('from "./common.ts"', PI_COORDINATOR.read_text(encoding="utf-8"))
+        self.assertTrue(PI_RESOURCE.is_file())
 
-    def test_subagent_tools_are_scoped(self):
-        # runSubagent must pass the agent's `tools:` allowlist to `pi --tools`;
-        # this keeps workers on the `sliceme-unit` tool and away from the
-        # `sliceme` coordinator tool, and gives the read-only verifier neither.
-        common = PI_COMMON.read_text(encoding="utf-8")
-        self.assertIn('"--tools"', common)
-        self.assertIn("agentFrontmatterValue", common)
-        worker = _frontmatter((PI_DIR / "agents" / "worker.md").read_text(encoding="utf-8"))
-        worker_tools = [t.strip() for t in worker["tools"].split(",")]
-        self.assertIn("sliceme-unit", worker_tools)
-        self.assertNotIn("sliceme", worker_tools)
-        verifier = _frontmatter((PI_DIR / "agents" / "verifier.md").read_text(encoding="utf-8"))
-        verifier_tools = [t.strip() for t in verifier["tools"].split(",")]
-        self.assertNotIn("sliceme-unit", verifier_tools)
-        self.assertNotIn("bash", verifier_tools, "the verifier must not run commands")
-
-    def test_campaign_executor_and_gate_wiring(self):
-        # The coordinator drives the single executor and the sandbox gate, and
-        # the verifier judges recorded evidence rather than running a suite.
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        self.assertIn('"exec"', coordinator)
-        self.assertIn("sandboxGate", coordinator)
-        self.assertIn('["exec", "--validate"]', coordinator)
-        self.assertIn("EXEC_KEYS", coordinator)
-        verifier = (PI_DIR / "agents" / "verifier.md").read_text(encoding="utf-8")
-        self.assertNotIn("tools/gpu.sh", verifier)
-        self.assertIn("executor", verifier)
-
-    def test_coordinator_forwards_the_dense_status(self):
-        # The coordinator's `status` action can request the engine's dense
-        # summary: it forwards `--dense --json` and uses the returned lines.
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        self.assertIn('"status", "--dense", "--json"', coordinator)
-        self.assertIn("params.dense", coordinator)
-        self.assertIn("json?.lines", coordinator)
-        # The coordinator has no nested-dump renderer, so it must not advertise
-        # a dead `verbose` status param; the CLI owns `--verbose`.
-        self.assertNotIn("params.verbose", coordinator)
-        self.assertNotIn("full nested status dump", coordinator)
-
-    def test_no_console_scripts(self):
-        # The engine is internal: it is invoked from the package, never
-        # installed as a user-facing `sliceme` command.
-        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertNotIn("[project.scripts]", pyproject)
-
-    def test_package_ships_the_bundled_cli(self):
+    def test_no_second_unit_tool_or_agent(self):
+        # The `sliceme-unit` tool, the addressing agent, and the verifier agent
+        # are retired. The loop uses the builtin `reviewer`.
+        self.assertFalse(PI_UNIT.exists(), "unit.ts is retired")
+        self.assertFalse((AGENTS_DIR / "addressing.md").exists())
+        self.assertFalse((AGENTS_DIR / "verifier.md").exists())
         manifest = json.loads(PACKAGE.read_text(encoding="utf-8"))
-        files = manifest.get("files", [])
-        self.assertIn("bin/", files)
-        self.assertIn("sliceme/", files)
-        self.assertIn("docs/", files)
+        self.assertNotIn("./integrations/pi/unit.ts", manifest.get("files", []))
+
+    def test_engine_tool_forwards_verbs(self):
+        # The tool forwards the engine verbs and their flags; it does not own a
+        # scheduler.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        for verb in ("start", "status", "ready", "plan", "wave", "check", "review", "deliver"):
+            self.assertIn(f'"{verb}"', coordinator, verb)
+        self.assertIn("ENGINE_ACTIONS", coordinator)
+        self.assertIn("ACTION_FLAGS", coordinator)
+        self.assertIn('name: "sliceme"', coordinator)
+        self.assertIn("function engineArgs(", coordinator)
+
+    def test_campaign_resource_is_registered(self):
+        # The trusted resource is registered in `session_start` and disposed in
+        # `session_shutdown`.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        resource = PI_RESOURCE.read_text(encoding="utf-8")
+        self.assertIn('const CAMPAIGN_RESOURCE = "sliceme.campaign"', resource)
+        self.assertIn("registerWorkflowResource", coordinator)
+        self.assertIn("loadPiSubagents(\"workflow-resources\")", coordinator)
+        self.assertIn("hostCommands", resource)
+        self.assertIn('resolve: (args', coordinator)
+        # The six fixed host commands, built from literals.
+        for verb in (
+            '["status"]',
+            '["ready"]',
+            '["wave", "--record", "--current"]',
+            '["check", "--current"]',
+            '["review", "--decision", "approve"]',
+            '["deliver"]',
+        ):
+            self.assertIn(verb, resource, verb)
+        # Registration is disposed on shutdown.
+        self.assertIn("resourceRegistration?.dispose()", coordinator)
+        self.assertIn('pi.on("session_shutdown"', coordinator)
+
+    def test_resource_validates_bounded_fields(self):
+        # `resolve` validates every field and rejects the rest. The real unit
+        # test is `tests/campaign_resource_test.mjs`; these source checks keep the
+        # contract visible.
+        resource = PI_RESOURCE.read_text(encoding="utf-8")
+        self.assertIn("CAMPAIGN_TOKEN", resource)
+        self.assertIn("CAMPAIGN_RESOURCE_FIELDS", resource)
+        self.assertIn('new Set(["campaign", "waveCap", "nodeCap"])', resource)
+        for bound in ("1 to 64", "1 to 256"):
+            self.assertIn(bound, resource, bound)
+        self.assertIn("unsupported fields", resource)
+        # The engine path comes from the captured closure, never a relative path.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn("captureEngine()", coordinator)
+        self.assertIn("resolveSlicemeInvocation()", coordinator)
+        self.assertIn("path.resolve", coordinator)
+        self.assertIn("resolveCampaignResource(args, engine)", coordinator)
+
+    def test_sliceme_agents_are_registered(self):
+        # The planner and worker register through the installed pi-subagents
+        # owner; the verifier and addressing agents are gone.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"pi-subagents:runtime-agent-register:v1"', coordinator)
+        self.assertIn('"sliceme-planner"', coordinator)
+        self.assertIn('"sliceme-worker"', coordinator)
+        self.assertIn("registerAgentViaEvents", coordinator)
+        self.assertIn("readAgentDefinition(", coordinator)
+        self.assertIn("agentRegistrations", coordinator)
+        planner = (AGENTS_DIR / "planner.md").read_text(encoding="utf-8")
+        worker = (AGENTS_DIR / "worker.md").read_text(encoding="utf-8")
+        self.assertIn("name: planner", planner)
+        self.assertIn("name: worker", worker)
+        self.assertNotIn("sliceme-unit", worker)
+
+    def test_orchestration_duplication_is_deleted(self):
+        # The TypeScript orchestration code and the readiness/wave duplication
+        # are gone; pi-subagents owns child execution.
+        source = PI_COORDINATOR.read_text(encoding="utf-8") + PI_COMMON.read_text(encoding="utf-8")
+        for gone in (
+            "runSubagent",
+            "runTracked",
+            "spawnNodes",
+            "runWorker",
+            "verifyNodes",
+            "readyNodes",
+            "normalizeDir",
+            "ownsOverlap",
+            "ensureWaves",
+            "refreshWaves",
+            "reconcileWaves",
+            "dagFingerprint",
+            "spawnReviewServer",
+            "addressingBatches",
+            "CampaignStateStore",
+        ):
+            self.assertNotIn(gone, source, gone)
 
     def test_retired_actions_are_gone(self):
-        # The single-agent path (`handoff`), the old `submit`/`verify` verbs, and
-        # the per-wave `integrate` landing action, and the plain-plane `commit`
-        # action are retired; `deliver` is the end-of-campaign pull request and
-        # `review` is the local review surface.
+        # The executor queue verbs, attempts, progress, review comments, and the
+        # browser server are retired; the engine exposes one ready verb and one
+        # campaign review verb.
         names = {a.name for a in surface.ACTIONS}
-        for gone in ("submit", "verify", "handoff", "declare", "integrate", "commit"):
+        for gone in (
+            "submit",
+            "verify",
+            "handoff",
+            "declare",
+            "integrate",
+            "commit",
+            "exec",
+            "attempt",
+            "progress",
+        ):
             self.assertNotIn(gone, names)
-        self.assertIn("deliver", names)
-        self.assertIn("review", names)
-        self.assertIn("wave", names)
-        text = PI_UNIT.read_text(encoding="utf-8")
-        for gone in ("submit", "verify", "handoff", "declare", "integrate", "commit"):
-            self.assertNotIn(f'"{gone}"', text)
+        for present in ("deliver", "review", "wave", "check", "ready", "status"):
+            self.assertIn(present, names)
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        for gone in ("spawn", "record", "verify", "exec", "progress"):
+            self.assertNotIn(f'case "{gone}"', coordinator)
 
-    def test_campaign_actions_are_in_lockstep(self):
-        names = [a.name for a in surface.ACTIONS]
+    def test_campaign_actions_are_documented(self):
+        names = {a.name for a in surface.ACTIONS}
         self.assertIn("deliver", names)
         self.assertIn("wave", names)
         self.assertIn("review", names)
-        self.assertIn("progress", names)
-        text = PI_UNIT.read_text(encoding="utf-8")
-        match = re.search(r"SLICEME_ACTIONS\s*=\s*\[(.*?)\]\s*as const", text, re.DOTALL)
-        self.assertIsNotNone(match)
-        self.assertEqual(re.findall(r'"([a-z_]+)"', match.group(1)), names)
+        self.assertIn("check", names)
         # The workflow doc documents the campaign additions.
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("`deliver`", workflow)
@@ -207,38 +251,20 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("`review`", workflow)
         self.assertIn("--no-unit", workflow)
 
-    def test_campaign_scheduler_is_wave_aware(self):
-        # The coordinator projects the DAG into waves via the engine and gates
-        # spawns on the current wave; the wave planner is a first-class module.
-        coordinator_text = PI_COORDINATOR.read_text(encoding="utf-8")
-        for needle in ("dag_waves", "currentWave", "readyWaveNodes", "refreshWaves"):
-            self.assertIn(needle, coordinator_text)
-        self.assertTrue((REPO_ROOT / "sliceme" / "ownership.py").is_file())
-        self.assertTrue((REPO_ROOT / "tests" / "test_waves.py").is_file())
-
-    def test_commit_subjects_are_descriptions(self):
-        # A wave commit subject is the human description, never a wave prefix.
-        # The coordinator captures the worker report and passes a per-node map.
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for needle in ("function workerDescription", "function nodeDescriptions", '"--messages"'):
-            self.assertIn(needle, coordinator)
-
     def test_session_suspend_resume_contract(self):
-        # The adapter writes the descriptor, hard-aborts the in-flight turn to
-        # suspend quickly, resumes on the pi session_start hook, and never shadows
-        # pi's `/resume`.
+        # The extension writes the descriptor, sets and clears the pause flag,
+        # hard-aborts the in-flight turn to suspend, and resumes on the
+        # `session_start` hook. It never shadows pi's `/resume`.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         common = PI_COMMON.read_text(encoding="utf-8")
 
-        # Descriptor / pause / heartbeat helpers live in common.ts.
-        for needle in ("export function sessionPath", "export function controlPath", "export function heartbeatPath"):
+        # Descriptor / pause helpers live in common.ts.
+        for needle in (
+            "export function sessionPath",
+            "export function controlPath",
+            "export function activeCampaignPath",
+        ):
             self.assertIn(needle, common)
-        self.assertIn("heartbeat?: string", common)
-
-        # The on-disk heartbeat uses the `.sliceme/` snake_case convention that
-        # docs/observability.md documents, and the continuation reader matches.
-        self.assertIn("tool_calls: snapshot.toolCalls", common)
-        self.assertIn("heartbeat.tool_calls", coordinator)
 
         # Commands and lifecycle hooks.
         self.assertIn('pi.registerCommand("suspend"', coordinator)
@@ -249,83 +275,111 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("writeSessionDescriptor", coordinator)
         self.assertIn("controlPath(ctx.cwd, branch)", coordinator)
         self.assertIn("sessionPath(ctx.cwd, branch)", coordinator)
-        self.assertIn("heartbeatPath(ctx.cwd, branch", coordinator)
 
         # Hard stop: abort the tool signal so the worker dies quickly, then wait
-        # for idle and clear the flag on resume.  Steering is deliberately gone:
-        # it only arrives at the next turn boundary, after the node has finished.
+        # for idle and clear the flag on resume.
         self.assertIn("ctx.abort()", coordinator)
         self.assertIn("waitForIdle", coordinator)
-        self.assertNotIn('deliverAs: "steer"', coordinator)
         self.assertIn("clearPause", coordinator)
         self.assertIn("isPaused", coordinator)
         self.assertIn('event.reason === "resume"', coordinator)
 
-        # Resume must re-activate the campaign tools. Pi does not restore the
-        # active set from the transcript on resume, so the injected prompt would
-        # otherwise tell the model to call a tool that is not declared. Both the
-        # `/sliceme` command and the `session_start` hook share one helper.
-        self.assertIn("function activateCampaignTools", coordinator)
+        # Resume re-activates the engine tool: pi does not restore the active
+        # set from the transcript on resume.
+        self.assertIn("function activateTool", coordinator)
         start = coordinator.index('pi.on("session_start"')
         end = coordinator.index('pi.on("session_shutdown"', start)
         start_handler = coordinator[start:end]
-        self.assertIn("activateCampaignTools()", start_handler)
+        self.assertIn("activateTool()", start_handler)
         command_start = coordinator.index('pi.registerCommand("sliceme"')
         command_end = coordinator.index('pi.registerCommand("suspend"', command_start)
-        self.assertIn("activateCampaignTools()", coordinator[command_start:command_end])
+        self.assertIn("activateTool()", coordinator[command_start:command_end])
 
-        # A signal-killed worker is reported as interrupted and mapped to a
-        # paused node so resume continues its edits instead of respawning.
-        self.assertIn("interrupted?: boolean", common)
-        self.assertIn("interrupted: signal != null", common)
-        self.assertIn("result.interrupted", coordinator)
-
-        # The pause flag gates every work-performing path, and an interrupted
-        # worker or verifier (a second `pausedResult` after the subagent) is
-        # mapped to a paused result too.
-        for action in ("spawn", "record", "verify", "ready"):
-            self.assertIn(f'pausedResult("{action}")', coordinator)
-        self.assertGreaterEqual(coordinator.count('pausedResult("verify")'), 2)
-
-        # Attempts and switchSession are wired.
-        self.assertIn('"--begin"', coordinator)
-        self.assertIn('"--end"', coordinator)
-        self.assertIn("switchSession", coordinator)
+        # The pause flag gates the recovery path.
+        self.assertIn("readJson<any>(controlPath", coordinator)
 
     def test_resume_prompt_reports_progress(self):
-        # Resuming explains the progress (open wave, wave count, per-node status)
-        # from the engine's resume plan, instead of telling the model to run
-        # `status` to find out.
+        # Resuming explains the progress (open wave, per-node status) from the
+        # engine's resume plan.  A recorded node is finished, so a
+        # recorded-but-undelivered campaign reports `ready`.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn("async function fetchResumePlan", coordinator)
         self.assertIn("function planHasWork", coordinator)
-        self.assertIn(
-            "function resumePrompt(branch: string, descriptor: any, plan: any)", coordinator
-        )
+        self.assertIn("function resumePrompt", coordinator)
+        self.assertIn("function shutdownStatus", coordinator)
+        self.assertIn("function isFinishedStatus", coordinator)
+        self.assertIn('status === "recorded"', coordinator)
+        self.assertIn("statuses.every(isFinishedStatus)", coordinator)
+        self.assertIn("values.filter(isFinishedStatus)", coordinator)
         self.assertIn("Progress: wave", coordinator)
-        self.assertIn('lines.push("Waves:")', coordinator)
         self.assertIn("Resume plan:", coordinator)
         self.assertIn("resumePrompt(branch, descriptor, plan)", coordinator)
-        self.assertNotIn('action "status" to see the plan', coordinator)
 
-    def test_review_server_lifecycle_is_bounded(self):
-        # The review server starts after the first recorded commit and stops
-        # after delivery.  A delivered campaign must not restart it.  The URL
-        # file is per session, and a parent-death pipe stops an orphan server.
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+    def test_active_campaign_pointer_is_wired(self):
+        # The extension binds a session to one campaign with a per-process
+        # pointer file (`docs/multi-campaign.md`).
         common = PI_COMMON.read_text(encoding="utf-8")
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        for symbol in (
+            "activeCampaignPath",
+            "readActiveCampaign",
+            "writeActiveCampaign",
+            "clearActiveCampaign",
+        ):
+            self.assertIn(symbol, common, symbol)
+        # The tool applies each reply in `common.ts` (pointer + deliver marker).
+        self.assertIn("applyEngineReply(ctx.cwd, action, json)", coordinator)
+        self.assertIn("function applyEngineReply", common)
+        self.assertIn("clearActiveCampaign(ctx.cwd)", coordinator)
 
-        self.assertIn("function reviewNeeded", coordinator)
-        self.assertIn("!state.delivered", coordinator)
-        self.assertIn("stopReviewServer(ctx, branch)", coordinator)
-        self.assertIn('"review.stopped"', coordinator)
+    def test_campaign_resource_unit_test(self):
+        # The resolver is pure, so a Node harness drives the fixed grants and the
+        # bounded-field rejection. Node 22.6+ strips the TypeScript types.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "campaign_resource_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        self.assertIn("export function cleanStaleReviewUrls", common)
-        self.assertIn("review.${pid}.url", common)
-        self.assertIn('stdio: ["pipe", "ignore", err]', common)
+    def test_active_campaign_pointer_unit_test(self):
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "active_campaign_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        review_doc = (REPO_ROOT / "docs" / "review.md").read_text(encoding="utf-8")
-        self.assertIn("Server lifecycle:", review_doc)
+    def test_deliver_descriptor_unit_test(self):
+        # The deliver reply names `target_branch`; the handler must mark the
+        # descriptor `completed` without an active-campaign pointer.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "deliver_descriptor_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_typescript_extensions_type_check(self):
         # `npm run typecheck` must pass on the pi extensions. It resolves the pi
@@ -345,246 +399,26 @@ class PiPackageTests(unittest.TestCase):
             self.skipTest(result.stderr.strip() or "pi runtime or typescript not available")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_live_progress_view_is_wired(self):
-        # The live multi-subagent view (docs/observability.md Priority 0): the
-        # coordinator owns one registry and one render timer, the reducer reaches
-        # it through `onProgress`, and `spawn` streams its own row via `onUpdate`.
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        common = PI_COMMON.read_text(encoding="utf-8")
-        for needle in (
-            "liveAgents",
-            "ensureLiveTimer",
-            "stopLiveTimer",
-            "renderProgress",
-            "renderAgentLine",
-            "onProgress:",
-            "onUpdate",
-        ):
-            self.assertIn(needle, coordinator, needle)
-        self.assertIn("export function renderProgress", common)
-        self.assertIn("export function renderAgentLine", common)
-        self.assertIn("export function truncateToWidth", common)
-        # Every recognized stream event reaches the live view; only the heartbeat
-        # file stays debounced.
-        self.assertIn("emitProgress", common)
-        # The timer stops on session shutdown.
-        self.assertIn("stopLiveTimer()", coordinator)
-        # The metrics line and the tool and thinking split (docs/observability.md §3).
-        for needle in ("buildMetricsLine", "showMetrics", "toolSeconds", "toolStartedAt"):
-            self.assertIn(needle, common, needle)
+    def test_no_console_scripts(self):
+        # The engine is internal: it is invoked from the package, never
+        # installed as a user-facing `sliceme` command.
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertNotIn("[project.scripts]", pyproject)
 
-    def test_metrics_pipeline_is_wired(self):
-        # The reducer pairs tool calls by id, and the coordinator persists the
-        # metrics to `attempt --end` (docs/observability.md §2).
-        common = PI_COMMON.read_text(encoding="utf-8")
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for needle in ("reduceToolStart", "reduceToolEnd", "programName", "topCommands"):
-            self.assertIn(f"export function {needle}", common, needle)
-        for needle in (
-            "tool_seconds",
-            "tool_durations",
-            "slowest_commands",
-        ):
-            self.assertIn(needle, common, needle)
-        for needle in (
-            '"--tool-seconds"',
-            '"--tool-durations"',
-            '"--slowest-commands"',
-            '"--turns"',
-            '"--tokens-in"',
-        ):
-            self.assertIn(needle, coordinator, needle)
-
-    def test_metrics_unit_test(self):
-        # The metrics helpers are pure, so a Node harness drives them with a
-        # fixed event list. Node 22.6+ strips the TypeScript types at run time.
-        node = shutil.which("node")
-        harness = REPO_ROOT / "tests" / "metrics_test.mjs"
-        if node is None or not harness.is_file():
-            self.skipTest("node is not installed")
-        if not _node_strip_supported(node):
-            self.skipTest("this node cannot strip TypeScript types")
-        result = subprocess.run(
-            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_render_progress_unit_test(self):
-        # The renderer is pure, so a Node harness drives it with fixed snapshots
-        # and widths. Node 22.6+ strips the TypeScript types at run time.
-        node = shutil.which("node")
-        harness = REPO_ROOT / "tests" / "render_progress_test.mjs"
-        if node is None or not harness.is_file():
-            self.skipTest("node is not installed")
-        if not _node_strip_supported(node):
-            self.skipTest("this node cannot strip TypeScript types")
-        result = subprocess.run(
-            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_campaign_state_store_is_wired(self):
-        # One in-process store owns `state.json`; parallel spawn completions share
-        # the state object, so none of them drops another's node status
-        # (docs/observability.md §9 suggestion 2).
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        common = PI_COMMON.read_text(encoding="utf-8")
-        self.assertIn("class CampaignStateStore", common)
-        self.assertIn("export function writeJson", common)
-        self.assertIn("function stateStore", coordinator)
-        self.assertIn("new CampaignStateStore(file)", coordinator)
-        # No read-modify-write of the state file remains in the coordinator.
-        self.assertNotIn("readJson(stateFile", coordinator)
-        self.assertNotIn("writeJson(stateFile", coordinator)
-        self.assertNotIn("writeJson(statePath", coordinator)
-
-    def test_state_store_unit_test(self):
-        # The store keeps two parallel updates, persists atomically, and honors
-        # `save(false)` after delivery removed the file.
-        node = shutil.which("node")
-        harness = REPO_ROOT / "tests" / "state_store_test.mjs"
-        if node is None or not harness.is_file():
-            self.skipTest("node is not installed")
-        if not _node_strip_supported(node):
-            self.skipTest("this node cannot strip TypeScript types")
-        result = subprocess.run(
-            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_active_campaign_pointer_is_wired(self):
-        # The coordinator binds a session to one campaign with a per-process
-        # pointer file, and passes `--campaign` to campaign-scoped engine calls
-        # (docs/multi-campaign.md).
-        common = PI_COMMON.read_text(encoding="utf-8")
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for symbol in (
-            "activeCampaignPath",
-            "readActiveCampaign",
-            "writeActiveCampaign",
-            "clearActiveCampaign",
-        ):
-            self.assertIn(symbol, common, symbol)
-        self.assertIn("function activeCampaign", coordinator)
-        self.assertIn("withCampaign", coordinator)
-        self.assertIn("writeActiveCampaign(ctx.cwd, branch)", coordinator)
-        self.assertIn('"--campaign"', coordinator)
-        self.assertIn("clearActiveCampaign(ctx.cwd)", coordinator)
-
-    def test_active_campaign_pointer_unit_test(self):
-        node = shutil.which("node")
-        harness = REPO_ROOT / "tests" / "active_campaign_test.mjs"
-        if node is None or not harness.is_file():
-            self.skipTest("node is not installed")
-        if not _node_strip_supported(node):
-            self.skipTest("this node cannot strip TypeScript types")
-        result = subprocess.run(
-            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_addressing_subagent_is_wired(self):
-        # The comment-addressing loop (docs/review-plan.md §10) runs on a
-        # dedicated, persistent addressing subagent: a comment that resolves to
-        # a node reuses that node after the last wave, and a comment with no
-        # resolved node only records a reply row.
-        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        common = PI_COMMON.read_text(encoding="utf-8")
-        addressing = PI_DIR / "agents" / "addressing.md"
-        self.assertTrue(
-            addressing.is_file(), "integrations/pi/agents/addressing.md is required"
-        )
-        front = _frontmatter(addressing.read_text(encoding="utf-8"))
-        self.assertEqual(front.get("name"), "addressing")
-        tools = [t.strip() for t in front.get("tools", "").split(",")]
-        self.assertIn("sliceme-unit", tools)
-        self.assertNotIn("sliceme", tools, "the addressing subagent is not a coordinator")
-        self.assertIn("edit", tools)
-
-        # One persistent pi session per campaign, reused for every comment and
-        # turn (`pi --session-id <id>`).
-        self.assertIn("export function addressingSessionId", common)
-        self.assertIn('"--session-id"', common)
-        self.assertIn("sessionId?: string", common)
-        self.assertIn("sessionId: addressingSessionId(branch)", coordinator)
-
-        # Batching by resolved node, and the resolve / reply / addressed writes.
-        self.assertIn("export function addressingBatches", common)
-        self.assertIn("addressingBatches(", coordinator)
-        for needle in (
-            "function spawnAddressing",
-            "function reopenNodeWave",
-            "function recordReply",
-            "function recordAddressingCommit",
-            '["review", "--resolve"',
-            '"--reply"',
-            '"--addressed"',
-            '"--addressing-commit"',
-            "outside the `max_attempts` cap",
-            "addressing: true",
-        ):
-            self.assertIn(needle, coordinator, needle)
-
-        # The events log records the comment, the spawn, the wave record, the
-        # reply, and the addressing (docs/review-plan.md §10.4).
-        for needle in (
-            '"review.comment"',
-            '"node.spawn"',
-            '"wave.recorded"',
-            '"review.reply"',
-            '"review.addressed"',
-        ):
-            self.assertIn(needle, coordinator, needle)
-
-        # The delivery gate stays honest: a delivered-but-unaddressed comment
-        # blocks automatic delivery, and the engine's unaddressed finding is a
-        # transient gate, never a hard block.
-        self.assertIn("payload?.pending", coordinator)
-        self.assertIn("gate?.pending", coordinator)
-        self.assertIn("unaddressed-comments", coordinator)
-        self.assertIn("gate?.all_approved && !unaddressed.length", coordinator)
-
-    def test_addressing_helpers_unit_test(self):
-        # `addressingSessionId` and `addressingBatches` are pure, so a Node
-        # harness drives them with fixed inputs. Node 22.6+ strips the
-        # TypeScript types at run time.
-        node = shutil.which("node")
-        harness = REPO_ROOT / "tests" / "addressing_test.mjs"
-        if node is None or not harness.is_file():
-            self.skipTest("node is not installed")
-        if not _node_strip_supported(node):
-            self.skipTest("this node cannot strip TypeScript types")
-        result = subprocess.run(
-            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_package_ships_the_bundled_cli(self):
+        manifest = json.loads(PACKAGE.read_text(encoding="utf-8"))
+        files = manifest.get("files", [])
+        self.assertIn("bin/", files)
+        self.assertIn("sliceme/", files)
+        self.assertIn("docs/", files)
 
     def test_docs_document_the_session_actions(self):
         names = {a.name for a in surface.ACTIONS}
-        self.assertIn("attempt", names)
         self.assertIn("status", names)
-        self.assertIn("progress", names)
+        self.assertIn("check", names)
         reference = (REPO_ROOT / "docs" / "reference.md").read_text(encoding="utf-8")
-        for needle in ("`attempt`", "`progress`", "--resume", "--sessions", "--tool-seconds"):
+        for needle in ("--resume", "--sessions"):
             self.assertIn(needle, reference)
-        database = (REPO_ROOT / "docs" / "database.md").read_text(encoding="utf-8")
-        self.assertIn("attempts", database)
-        self.assertIn("tool_seconds", database)
 
 
 if __name__ == "__main__":

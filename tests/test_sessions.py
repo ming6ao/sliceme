@@ -1,4 +1,4 @@
-"""Suspend/resume: the descriptor, the resume plan, the registry, and attempts.
+"""Suspend/resume: the descriptor, the resume plan, and the registry.
 
 These pin the session contract from ``docs/sessions.md``:
 
@@ -9,7 +9,7 @@ These pin the session contract from ``docs/sessions.md``:
 * a preserved campaign worktree maps an interrupted node to ``paused`` and
   requests a wave record on resume;
 * the pause control flag can be written and cleared;
-* the ``attempts`` table is additive on an older plane.
+* the ``checks`` cache table is additive on an older plane.
 """
 
 import os
@@ -183,14 +183,29 @@ class ResumePlanTests(SessionsCase):
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertIn("w1", plan["resume_plan"]["verify"])
 
-    def test_prepared_candidate_without_recorded_commit_is_respawned(self):
+    def test_prepared_candidate_reads_its_commit_from_sqlite(self):
+        # Neither the state entry nor the descriptor carries a commit, so the
+        # candidate's own head_commit is the recorded commit and the node is
+        # verified instead of re-spawned.
         self.record_w1()
         self.write_state({"w1": {"status": "running", "attempts": 1}})
         campaign.write_session(self.root, "feat/x", self.descriptor())
 
         plan = self.svc.resume(plan_only=True)
-        self.assertEqual(plan["nodes"]["w1"], "pending")
-        self.assertIn("w1", plan["resume_plan"]["respawn"])
+        self.assertEqual(plan["nodes"]["w1"], "recorded")
+        self.assertIn("w1", plan["resume_plan"]["verify"])
+        self.assertNotIn("w1", plan["resume_plan"]["respawn"])
+
+    def test_resume_reads_progress_from_sqlite_without_state(self):
+        # No state.json is written.  The prepared candidate alone marks w1
+        # recorded, and the current wave comes from the recorded candidates.
+        self.record_w1()
+        campaign.write_session(self.root, "feat/x", self.descriptor(current_wave=None))
+
+        plan = self.svc.resume(plan_only=True)
+        self.assertEqual(plan["nodes"]["w1"], "recorded")
+        self.assertIn("w1", plan["resume_plan"]["verify"])
+        self.assertEqual(plan["current_wave"], 0)
 
     def test_preserved_worktree_maps_to_paused_and_records_the_wave(self):
         unit = self.svc.create_campaign_workspace(base="feat/x")
@@ -253,7 +268,9 @@ class ResumePlanTests(SessionsCase):
 
 class RegistryTests(SessionsCase):
     def test_sessions_lists_descriptors_and_projects_them(self):
-        self.write_state({"w1": {"status": "done"}, "w2": {"status": "pending"}})
+        # Progress is counted from the recorded candidates in SQLite, not from
+        # state.json (which the engine no longer writes).
+        self.record_w1()
         campaign.write_session(self.root, "feat/x", self.descriptor())
 
         result = self.svc.sessions()
@@ -316,8 +333,6 @@ class DeliveryCleanupTests(SessionsCase):
         self.record_w1()
         campaign.write_session(self.root, "feat/x", self.descriptor())
         campaign.write_control(self.root, "feat/x", {"pause": False})
-        campaign.events_path(self.root, "feat/x").write_text('{"kind":"x"}\n')
-        campaign.heartbeat_path(self.root, "feat/x", "w1").write_text("{}\n")
         campaign.worker_log_path(self.root, "feat/x", "w1").write_text("log\n")
         self.svc.report(narrative="done")
         self.approve()
@@ -330,45 +345,11 @@ class DeliveryCleanupTests(SessionsCase):
             campaign.state_path(self.root, "feat/x"),
             campaign.session_path(self.root, "feat/x"),
             campaign.control_path(self.root, "feat/x"),
-            campaign.events_path(self.root, "feat/x"),
-            campaign.heartbeat_path(self.root, "feat/x", "w1"),
             campaign.worker_log_path(self.root, "feat/x", "w1"),
         ):
             self.assertFalse(path.exists(), str(path))
         # The report is review evidence and survives every cleanup level.
         self.assertTrue(campaign.report_path(self.root, "feat/x").exists())
-
-
-class AttemptTests(SessionsCase):
-    def test_attempt_begin_and_end_record_metrics(self):
-        started = self.svc.begin_attempt(node="w1", unit="campaign", attempt=1)
-        self.assertEqual(started["status"], "running")
-        finished = self.svc.end_attempt(
-            node="w1",
-            attempt=1,
-            status="ok",
-            exit_code=0,
-            turns=7,
-            tool_calls=23,
-            tool_seconds=42.5,
-            tool_durations={"bash": 30.0, "read": 12.5},
-            slowest_commands=[
-                {"command": "cargo", "tool": "bash", "seconds": 30.0, "calls": 2}
-            ],
-            tokens_in=45210,
-            tokens_out=3120,
-            cost=0.42,
-            last_tool="bash",
-        )
-        self.assertEqual(finished["status"], "ok")
-        self.assertEqual(finished["turns"], 7)
-        self.assertEqual(finished["tool_calls"], 23)
-        self.assertEqual(finished["tool_seconds"], 42.5)
-        self.assertIsNotNone(finished["duration"])
-        self.assertEqual(self.svc.attempts(node="w1")["attempts"][0]["node"], "w1")
-
-    def test_end_without_a_running_attempt_is_rejected(self):
-        self.assertIsNone(self.svc.end_attempt(node="ghost", attempt=1))
 
 
 class MigrationTests(unittest.TestCase):
@@ -399,15 +380,38 @@ class MigrationTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-            self.assertIn("attempts", tables)
+            self.assertIn("checks", tables)
             self.assertIn("review_decisions", tables)
-            self.assertIn("comments", tables)
+            self.assertNotIn("jobs", tables)
             columns = {
-                row[1] for row in store.conn.execute("PRAGMA table_info(attempts)")
+                row[1] for row in store.conn.execute("PRAGMA table_info(checks)")
             }
-            self.assertIn("tool_seconds", columns)
-            self.assertIn("tool_durations", columns)
-            self.assertIn("slowest_commands", columns)
+            self.assertIn("fingerprint", columns)
+            self.assertIn("results", columns)
+            self.assertIn("status", columns)
+            store.close()
+
+    def test_retired_tables_are_dropped_on_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".sliceme").mkdir()
+            conn = sqlite3.connect(str(db_path(root)))
+            for table in ("jobs", "attempts", "comments"):
+                conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+            conn.commit()
+            conn.close()
+
+            store = Store(root)
+            tables = {
+                row[0]
+                for row in store.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertNotIn("jobs", tables)
+            self.assertNotIn("attempts", tables)
+            self.assertNotIn("comments", tables)
+            self.assertIn("checks", tables)
             store.close()
 
 

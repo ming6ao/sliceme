@@ -2,24 +2,24 @@
 
 Sliceme ships as **one pi package** (npm) and, secondarily, as a Python wheel.
 The npm tarball is the real distribution unit. It bundles the TypeScript pi
-tools, the `/sliceme` command, the GPU broker, and the entire dependency-free
-Python engine. So `pi install npm:sliceme` needs no `pip install` and no
-`sliceme` on `PATH`.
+extension, the `/sliceme` command, the GPU host runner, and the entire
+dependency-free Python engine. So `pi install npm:sliceme` needs no `pip install`
+and no `sliceme` on `PATH`.
 
 ## What ships where
 
 | Artifact | Command | Contains |
 |---|---|---|
-| npm pi package (primary) | `npm pack` / `npm publish` | `integrations/pi/*` tools, `docs/workflow.md`, `tools/gpu.sh`, `bin/sliceme`, `sliceme/*.py`, `docs/`, `README.md`, `LICENSE` |
+| npm pi package (primary) | `npm pack` / `npm publish` | `integrations/pi/*` (the tool, the resource, and the agents), `docs/`, `tools/gpu.sh`, `bin/sliceme`, `sliceme/*.py`, `README.md`, `LICENSE` |
 | Python wheel (secondary) | `python3 -m build` | only the `sliceme` Python package (engine library); **no** `bin/`, `tools/`, or pi extension |
 
 The `files` array in `package.json` is an allow-list with negations; keep the
 `!sliceme/__pycache__` / `!sliceme/**/*.pyc` entries so bytecode is not packed.
 
-The Python wheel is engine-only by design (there is no `[project.scripts]`).
-A pip-installed engine resolves its GPU broker from the package tree. A
-wheel-only deployment must therefore provide `gpu.command` in a sandbox manifest,
-or put a `sliceme-gpu` broker on `PATH`.
+The Python wheel is engine-only by design (there is no `[project.scripts]`). A
+pip-installed engine resolves its GPU runner from the package tree. A wheel-only
+deployment must therefore provide `gpu.command` in a sandbox manifest, or put a
+`sliceme-gpu` runner on `PATH`.
 
 ## Versioning
 
@@ -73,14 +73,13 @@ pi                                # launch pi
 Then, inside the session:
 
 ```text
-/sliceme DESIGN.md                # activate the tools and start a campaign
-sliceme start DESIGN.md           # choose target branch + run the planner
-sliceme ready                     # current-wave nodes whose deps are done
-sliceme spawn --nodes <ids>       # start a wave: one-shot pure editors, one worktree
-sliceme record                    # commit the current wave onto the campaign worktree
-sliceme verify --nodes <ids>      # one turn: the executor runs the wave; one verifier judges
-sliceme deliver                   # after all waves: approve, then open the pull request
-sliceme review --report --narrative "..."  # deterministic report + your summary
+/sliceme DESIGN.md                # activate the tool and start a campaign
+sliceme start DESIGN.md           # choose the target branch; planner -> dag.json
+sliceme plan --design DESIGN.md   # the campaign split and the next entry
+subagent(workflow: "sliceme.campaign", async: true)   # the campaign loop
+sliceme review --decision approve # record the campaign approval
+sliceme deliver                   # push the campaign branch and open the pull request
+sliceme review --report --narrative "..."  # the deterministic report plus your summary
 ```
 
 Local development without installing:
@@ -95,6 +94,6 @@ SLICEME_BIN=/path/to/bin/sliceme pi
 1. `npm test` passes.
 2. `package.json`, `pyproject.toml`, and `sliceme/__init__.py` versions match.
 3. `npm pack --dry-run` shows no `__pycache__`/`.pyc` and includes `bin/`,
-   `tools/`, `sliceme/`, `docs/workflow.md`, and `integrations/pi/`.
+   `tools/`, `sliceme/`, `docs/`, and `integrations/pi/`.
 4. `npm publish` (and, if shipping the library, `python3 -m build && twine upload`).
 5. Tag the release and push; point the README/`pi install` examples at it.

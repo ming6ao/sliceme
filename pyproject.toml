@@ -12,10 +12,7 @@ license = { text = "Apache-2.0" }
 dependencies = []
 
 [tool.setuptools]
-packages = ["sliceme", "sliceme.review"]
-
-[tool.setuptools.package-data]
-"sliceme.review" = ["web/*"]
+packages = ["sliceme", "sliceme.review", "sliceme.verbs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

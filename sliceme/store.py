@@ -66,11 +66,11 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
 CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign);
 
-CREATE TABLE IF NOT EXISTS jobs (
+CREATE TABLE IF NOT EXISTS checks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fingerprint TEXT NOT NULL,
   wave INTEGER,
   campaign TEXT,
-  requester TEXT,
   source TEXT NOT NULL,
   commit_ref TEXT NOT NULL,
   tree TEXT,
@@ -79,53 +79,19 @@ CREATE TABLE IF NOT EXISTS jobs (
   sandbox TEXT,
   sandbox_digest TEXT,
   gpu TEXT NOT NULL DEFAULT 'none',
-  priority INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'queued',
-  fingerprint TEXT,
-  timeout INTEGER NOT NULL DEFAULT 3600,
-  requested_at REAL NOT NULL,
-  started_at REAL,
-  finished_at REAL,
+  status TEXT NOT NULL,
   duration REAL,
   exit_code INTEGER,
   output TEXT,
   results TEXT,
   error TEXT,
-  runner_pid INTEGER
+  created_at REAL NOT NULL,
+  finished_at REAL
 );
 
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-CREATE INDEX IF NOT EXISTS idx_jobs_fingerprint ON jobs(fingerprint, status);
-CREATE INDEX IF NOT EXISTS idx_jobs_campaign ON jobs(campaign);
-
-CREATE TABLE IF NOT EXISTS attempts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  node TEXT NOT NULL,
-  unit TEXT,
-  campaign TEXT,
-  attempt INTEGER NOT NULL DEFAULT 1,
-  agent TEXT NOT NULL DEFAULT 'worker',
-  status TEXT NOT NULL DEFAULT 'running',
-  started_at REAL NOT NULL,
-  finished_at REAL,
-  duration REAL,
-  exit_code INTEGER,
-  turns INTEGER NOT NULL DEFAULT 0,
-  tool_calls INTEGER NOT NULL DEFAULT 0,
-  tools TEXT,
-  tool_seconds REAL NOT NULL DEFAULT 0,
-  tool_durations TEXT,
-  slowest_commands TEXT,
-  tokens_in INTEGER NOT NULL DEFAULT 0,
-  tokens_out INTEGER NOT NULL DEFAULT 0,
-  cost REAL NOT NULL DEFAULT 0,
-  last_tool TEXT,
-  last_activity_at REAL,
-  error TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_attempts_node ON attempts(node);
-CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status);
+CREATE INDEX IF NOT EXISTS idx_checks_fingerprint ON checks(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_checks_campaign ON checks(campaign);
+CREATE INDEX IF NOT EXISTS idx_checks_commit ON checks(commit_ref, id);
 
 CREATE TABLE IF NOT EXISTS review_decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,26 +107,17 @@ CREATE TABLE IF NOT EXISTS review_decisions (
 CREATE INDEX IF NOT EXISTS idx_review_decisions_commit
   ON review_decisions(branch_key, commit_hash, id);
 
-CREATE TABLE IF NOT EXISTS comments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  branch_key TEXT NOT NULL,
-  commit_hash TEXT,
-  file TEXT,
-  side TEXT,
-  line INTEGER,
-  line_end INTEGER,
-  body TEXT NOT NULL,
-  node TEXT,
-  status TEXT NOT NULL DEFAULT 'open',
-  parent_comment_id INTEGER,
-  addressing_commit TEXT,
-  created_at REAL NOT NULL,
-  addressed_at REAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_comments_branch
-  ON comments(branch_key, status, id);
+-- Retired tables from the executor queue.  They are dropped on every open so
+-- an upgraded plane loses the dead schema (the synchronous check runner and the
+-- campaign lock replace them).
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS attempts;
+DROP TABLE IF EXISTS comments;
 """
+
+#: Check verdicts a later run may reuse from the cache.  A ``cancelled`` or
+#: ``running`` row does not exist: the runner writes one terminal row per run.
+CHECK_VERDICTS = ("passed", "failed", "error")
 
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -190,39 +147,14 @@ class Store:
         self._ensure_columns(
             "campaigns", {"pr_url": "TEXT", "pr_number": "INTEGER"}
         )
-        self._ensure_columns(
-            "jobs",
-            {
-                "timeout": "INTEGER NOT NULL DEFAULT 3600",
-                "checks": "TEXT",
-                "results": "TEXT",
-            },
-        )
         self._ensure_columns("candidates", {"node": "TEXT"})
         self._ensure_columns("units", {"campaign": "TEXT"})
         self._ensure_columns("candidates", {"campaign": "TEXT"})
-        self._ensure_columns("jobs", {"campaign": "TEXT"})
-        self._ensure_columns("attempts", {"campaign": "TEXT"})
-        self._ensure_columns(
-            "attempts",
-            {
-                "tool_seconds": "REAL NOT NULL DEFAULT 0",
-                "tool_durations": "TEXT",
-                "slowest_commands": "TEXT",
-            },
-        )
-        self._ensure_columns(
-            "comments",
-            {"parent_comment_id": "INTEGER", "addressing_commit": "TEXT"},
-        )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_candidates_campaign ON candidates(campaign)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_units_campaign ON units(campaign)"
-        )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_attempts_campaign ON attempts(campaign)"
         )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -502,13 +434,14 @@ class Store:
         sql += " ORDER BY c.created_at ASC, c.id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
 
-    def latest_job_for_commit(self, commit_ref: str) -> dict[str, Any] | None:
-        """The newest terminal check job for a commit (the review evidence)."""
+    def latest_check_for_commit(self, commit_ref: str) -> dict[str, Any] | None:
+        """The newest terminal check for a commit (the review evidence)."""
+        placeholders = ",".join("?" for _ in CHECK_VERDICTS)
         return _dict(
             self.conn.execute(
-                "SELECT * FROM jobs WHERE commit_ref=?"
-                " AND status IN ('passed', 'failed', 'error') ORDER BY id DESC LIMIT 1",
-                (commit_ref,),
+                f"SELECT * FROM checks WHERE commit_ref=? AND status IN ({placeholders})"
+                " ORDER BY id DESC LIMIT 1",
+                (commit_ref, *CHECK_VERDICTS),
             ).fetchone()
         )
 
@@ -518,261 +451,90 @@ class Store:
             raise SlicemeError(f"unknown unit: {name_or_id}")
         return unit
 
-    # ---- executor jobs ------------------------------------------------
-    JOB_FIELDS = frozenset(
-        {
-            "wave",
-            "campaign",
-            "requester",
-            "source",
-            "commit_ref",
-            "tree",
-            "commands",
-            "checks",
-            "sandbox",
-            "results",
-            "sandbox_digest",
-            "gpu",
-            "priority",
-            "status",
-            "fingerprint",
-            "timeout",
-            "requested_at",
-            "started_at",
-            "finished_at",
-            "duration",
-            "exit_code",
-            "output",
-            "error",
-            "runner_pid",
-        }
-    )
-
-    def create_job(
+    # ---- checks (the persistent cache) --------------------------------
+    def create_check(
         self,
         *,
+        fingerprint: str,
         source: str,
         commit_ref: str,
-        commands: list[str],
+        status: str,
+        commands: list[str] | None = None,
         checks: list[dict[str, Any]] | None = None,
         wave: int | None = None,
         campaign: str | None = None,
-        requester: str | None = None,
         tree: str | None = None,
         sandbox: dict[str, Any] | None = None,
         sandbox_digest: str | None = None,
         gpu: str = "none",
-        priority: int = 0,
-        fingerprint: str | None = None,
-        timeout: int = 3600,
+        duration: float | None = None,
+        exit_code: int | None = None,
+        output: str | None = None,
+        results: str | None = None,
+        error: str | None = None,
     ) -> int:
+        """Write one terminal check row and return its id."""
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO jobs(wave, campaign, requester, source, commit_ref, tree,"
-                " commands, checks, sandbox, sandbox_digest, gpu, priority, status, fingerprint,"
-                " timeout, requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO checks(fingerprint, wave, campaign, source, commit_ref,"
+                " tree, commands, checks, sandbox, sandbox_digest, gpu, status, duration,"
+                " exit_code, output, results, error, created_at, finished_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
+                    fingerprint,
                     wave,
                     campaign,
-                    requester,
                     source,
                     commit_ref,
                     tree,
-                    json.dumps(commands),
+                    json.dumps(commands if commands is not None else []),
                     json.dumps(checks) if checks is not None else None,
                     json.dumps(sandbox) if sandbox is not None else None,
                     sandbox_digest,
                     gpu,
-                    priority,
-                    "queued",
-                    fingerprint,
-                    int(timeout),
+                    status,
+                    duration,
+                    exit_code,
+                    output,
+                    results,
+                    error,
+                    ts,
                     ts,
                 ),
             )
             return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
-    def get_job(self, job_id: str | int) -> dict[str, Any] | None:
+    def get_check(self, check_id: str | int) -> dict[str, Any] | None:
         return _dict(
-            self.conn.execute("SELECT * FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+            self.conn.execute(
+                "SELECT * FROM checks WHERE id=?", (int(check_id),)
+            ).fetchone()
         )
 
-    def list_jobs(
+    def find_check(
+        self, fingerprint: str, *, statuses: Sequence[str] | None = None
+    ) -> dict[str, Any] | None:
+        """The newest check row for *fingerprint*, newest first."""
+        sql = "SELECT * FROM checks WHERE fingerprint=?"
+        params: list[Any] = [fingerprint]
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            sql += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        sql += " ORDER BY id DESC LIMIT 1"
+        return _dict(self.conn.execute(sql, params).fetchone())
+
+    def list_checks(
         self,
         *,
         statuses: Sequence[str] | None = None,
         campaign: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM jobs"
+        sql = "SELECT * FROM checks"
         params: list[Any] = []
         clauses: list[str] = []
-        if statuses:
-            placeholders = ",".join("?" for _ in statuses)
-            clauses.append(f"status IN ({placeholders})")
-            params.extend(statuses)
-        if campaign is not None:
-            clauses.append("campaign=?")
-            params.append(campaign)
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY priority DESC, requested_at ASC, id ASC"
-        if limit:
-            sql += " LIMIT ?"
-            params.append(int(limit))
-        return _dicts(self.conn.execute(sql, params).fetchall())
-
-    def update_job(self, job_id: str | int, **fields: Any) -> None:
-        unknown = set(fields) - self.JOB_FIELDS
-        if unknown:
-            raise SlicemeError(f"unknown job fields: {', '.join(sorted(unknown))}")
-        if not fields:
-            return
-        sets = ", ".join(f"{name}=?" for name in fields)
-        params = list(fields.values()) + [int(job_id)]
-        self.conn.execute(f"UPDATE jobs SET {sets} WHERE id=?", params)
-
-    def claim_next_job(self, *, runner_pid: int | None = None) -> dict[str, Any] | None:
-        """Atomically claim the highest-priority queued job."""
-        with self.tx() as c:
-            row = c.execute(
-                "SELECT * FROM jobs WHERE status='queued'"
-                " ORDER BY priority DESC, requested_at ASC, id ASC LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            c.execute(
-                "UPDATE jobs SET status='running', started_at=?, runner_pid=? WHERE id=?",
-                (now(), runner_pid, int(row["id"])),
-            )
-            claimed = c.execute("SELECT * FROM jobs WHERE id=?", (int(row["id"]),)).fetchone()
-            return _dict(claimed)
-
-    def find_passed_job(self, fingerprint: str) -> dict[str, Any] | None:
-        """A passing job for the same fingerprint, for cache/dedupe."""
-        return _dict(
-            self.conn.execute(
-                "SELECT * FROM jobs WHERE fingerprint=? AND status='passed'"
-                " ORDER BY id DESC LIMIT 1",
-                (fingerprint,),
-            ).fetchone()
-        )
-
-    def recover_orphan_jobs(self, *, cutoff: float) -> int:
-        """Reset ``running`` jobs older than *cutoff* back to ``queued``."""
-        with self.tx() as c:
-            cursor = c.execute(
-                "UPDATE jobs SET status='queued', started_at=NULL, runner_pid=NULL,"
-                " error='recovered orphaned lease'"
-                " WHERE status='running' AND (started_at IS NULL OR started_at < ?)",
-                (cutoff,),
-            )
-            return int(cursor.rowcount)
-
-    def job_counts(self, *, campaign: str | None = None) -> dict[str, int]:
-        if campaign is None:
-            rows = self.conn.execute(
-                "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT status, COUNT(*) AS c FROM jobs WHERE campaign=? GROUP BY status",
-                (campaign,),
-            ).fetchall()
-        return {str(r["status"]): int(r["c"]) for r in rows}
-
-    # ---- attempts (per-subagent fidelity) ----------------------------
-    ATTEMPT_FIELDS = frozenset(
-        {
-            "node",
-            "unit",
-            "campaign",
-            "attempt",
-            "agent",
-            "status",
-            "started_at",
-            "finished_at",
-            "duration",
-            "exit_code",
-            "turns",
-            "tool_calls",
-            "tools",
-            "tool_seconds",
-            "tool_durations",
-            "slowest_commands",
-            "tokens_in",
-            "tokens_out",
-            "cost",
-            "last_tool",
-            "last_activity_at",
-            "error",
-        }
-    )
-
-    def create_attempt(
-        self,
-        *,
-        node: str,
-        unit: str | None = None,
-        campaign: str | None = None,
-        attempt: int = 1,
-        agent: str = "worker",
-        started_at: float | None = None,
-    ) -> int:
-        ts = now() if started_at is None else float(started_at)
-        with self.tx() as c:
-            c.execute(
-                "INSERT INTO attempts(node, unit, campaign, attempt, agent, status,"
-                " started_at, last_activity_at) VALUES(?,?,?,?,?,?,?,?)",
-                (node, unit, campaign, int(attempt), agent, "running", ts, ts),
-            )
-            return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
-
-    def finish_attempt(self, attempt_id: int, **fields: Any) -> dict[str, Any] | None:
-        unknown = set(fields) - self.ATTEMPT_FIELDS
-        if unknown:
-            raise SlicemeError(f"unknown attempt fields: {', '.join(sorted(unknown))}")
-        ts = now()
-        row = _dict(
-            self.conn.execute("SELECT * FROM attempts WHERE id=?", (int(attempt_id),)).fetchone()
-        )
-        if row is None:
-            return None
-        fields.setdefault("status", "ok")
-        fields.setdefault("finished_at", ts)
-        started = float(row.get("started_at") or ts)
-        fields.setdefault("duration", ts - started)
-        # The metric columns are TEXT; accept a structured value from a direct
-        # caller (the CLI already sends JSON text).
-        for name, value in list(fields.items()):
-            if isinstance(value, (dict, list)):
-                fields[name] = json.dumps(value)
-        sets = ", ".join(f"{name}=?" for name in fields)
-        params = list(fields.values()) + [int(attempt_id)]
-        self.conn.execute(f"UPDATE attempts SET {sets} WHERE id=?", params)
-        return _dict(
-            self.conn.execute("SELECT * FROM attempts WHERE id=?", (int(attempt_id),)).fetchone()
-        )
-
-    def get_attempt(self, attempt_id: str | int) -> dict[str, Any] | None:
-        return _dict(
-            self.conn.execute("SELECT * FROM attempts WHERE id=?", (int(attempt_id),)).fetchone()
-        )
-
-    def list_attempts(
-        self,
-        *,
-        node: str | None = None,
-        statuses: Sequence[str] | None = None,
-        campaign: str | None = None,
-    ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM attempts"
-        clauses: list[str] = []
-        params: list[Any] = []
-        if node:
-            clauses.append("node=?")
-            params.append(node)
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
             clauses.append(f"status IN ({placeholders})")
@@ -783,32 +545,22 @@ class Store:
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id ASC"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         return _dicts(self.conn.execute(sql, params).fetchall())
 
-    def latest_attempt(
-        self, node: str, *, campaign: str | None = None
-    ) -> dict[str, Any] | None:
-        sql = "SELECT * FROM attempts WHERE node=?"
-        params: list[Any] = [node]
-        if campaign is not None:
-            sql += " AND campaign=?"
-            params.append(campaign)
-        sql += " ORDER BY id DESC LIMIT 1"
-        return _dict(self.conn.execute(sql, params).fetchone())
-
-    def find_running_attempt(
-        self, node: str, attempt: int | None = None, *, campaign: str | None = None
-    ) -> dict[str, Any] | None:
-        sql = "SELECT * FROM attempts WHERE node=? AND status='running'"
-        params: list[Any] = [node]
-        if attempt is not None:
-            sql += " AND attempt=?"
-            params.append(int(attempt))
-        if campaign is not None:
-            sql += " AND campaign=?"
-            params.append(campaign)
-        sql += " ORDER BY id DESC LIMIT 1"
-        return _dict(self.conn.execute(sql, params).fetchone())
+    def check_counts(self, *, campaign: str | None = None) -> dict[str, int]:
+        if campaign is None:
+            rows = self.conn.execute(
+                "SELECT status, COUNT(*) AS c FROM checks GROUP BY status"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT status, COUNT(*) AS c FROM checks WHERE campaign=? GROUP BY status",
+                (campaign,),
+            ).fetchall()
+        return {str(r["status"]): int(r["c"]) for r in rows}
 
     # ---- review decisions (per-commit approvals) ----------------------
     def add_review_decision(
@@ -884,125 +636,10 @@ class Store:
             [now(), *ids],
         )
 
-    # ---- comments -----------------------------------------------------
-    def add_comment(
-        self,
-        *,
-        branch_key: str,
-        body: str,
-        commit_hash: str | None = None,
-        file: str | None = None,
-        side: str | None = None,
-        line: int | None = None,
-        line_end: int | None = None,
-        node: str | None = None,
-    ) -> dict[str, Any]:
-        with self.tx() as c:
-            c.execute(
-                "INSERT INTO comments(branch_key, commit_hash, file, side, line,"
-                " line_end, body, node, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    branch_key,
-                    commit_hash,
-                    file,
-                    side,
-                    line,
-                    line_end if line_end is not None else line,
-                    body,
-                    node,
-                    "open",
-                    now(),
-                ),
-            )
-            return _dict(
-                c.execute("SELECT * FROM comments WHERE id=last_insert_rowid()").fetchone()
-            )  # type: ignore[return-value]
-
-    def add_reply(
-        self,
-        *,
-        branch_key: str,
-        parent_comment_id: int,
-        body: str,
-        node: str | None = None,
-        addressing_commit: str | None = None,
-    ) -> dict[str, Any]:
-        """Insert one reply row.  A reply is ``addressed`` when recorded."""
-        with self.tx() as c:
-            c.execute(
-                "INSERT INTO comments(branch_key, parent_comment_id, body, node,"
-                " addressing_commit, status, created_at) VALUES(?,?,?,?,?,?,?)",
-                (
-                    branch_key,
-                    int(parent_comment_id),
-                    body,
-                    node,
-                    addressing_commit,
-                    "addressed",
-                    now(),
-                ),
-            )
-            return _dict(
-                c.execute("SELECT * FROM comments WHERE id=last_insert_rowid()").fetchone()
-            )  # type: ignore[return-value]
-
-    def get_comment(self, comment_id: str | int) -> dict[str, Any] | None:
-        return _dict(
-            self.conn.execute(
-                "SELECT * FROM comments WHERE id=?", (int(comment_id),)
-            ).fetchone()
-        )
-
-    def list_comments(
-        self,
-        *,
-        branch_key: str | None = None,
-        statuses: Sequence[str] | None = None,
-        roots_only: bool = False,
-    ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM comments"
-        clauses: list[str] = []
-        params: list[Any] = []
-        if branch_key:
-            clauses.append("branch_key=?")
-            params.append(branch_key)
-        if statuses:
-            placeholders = ",".join("?" for _ in statuses)
-            clauses.append(f"status IN ({placeholders})")
-            params.extend(statuses)
-        if roots_only:
-            clauses.append("parent_comment_id IS NULL")
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY id ASC"
-        return _dicts(self.conn.execute(sql, params).fetchall())
-
-    def set_comment_status(
-        self,
-        comment_id: int,
-        status: str,
-        *,
-        addressed_at: float | None = None,
-        addressing_commit: str | None = None,
-    ) -> dict[str, Any] | None:
-        fields = ["status=?"]
-        params: list[Any] = [status]
-        if addressed_at is not None:
-            fields.append("addressed_at=?")
-            params.append(addressed_at)
-        if addressing_commit is not None:
-            fields.append("addressing_commit=?")
-            params.append(addressing_commit)
-        params.append(int(comment_id))
-        self.conn.execute(
-            f"UPDATE comments SET {', '.join(fields)} WHERE id=?", params
-        )
-        return self.get_comment(comment_id)
-
     def prune_reviews(
         self, *, keep_branch_keys: set[str], keep_after: float
     ) -> dict[str, int]:
-        """Delete review rows older than *keep_after* for unkept branches."""
+        """Delete review decisions older than *keep_after* for unkept branches."""
         clause = ""
         params: list[Any] = [keep_after]
         if keep_branch_keys:
@@ -1013,7 +650,4 @@ class Store:
             decisions = c.execute(
                 "DELETE FROM review_decisions WHERE created_at < ?" + clause, params
             ).rowcount
-            comments = c.execute(
-                "DELETE FROM comments WHERE created_at < ?" + clause, params
-            ).rowcount
-        return {"decisions": int(decisions), "comments": int(comments)}
+        return {"decisions": int(decisions)}

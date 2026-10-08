@@ -6,7 +6,6 @@ action surface and the end-to-end flow.
 
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -270,56 +269,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(Path(report["path"]).name, "feat--x.report.md")
             self.assertIn("landed", report["content"])
 
-    def test_cli_exec_submit_batch_and_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
-            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
-            (root / "a.txt").write_text("hi\n")
-            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
-            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-
-            def rev(ref):
-                return subprocess.run(
-                    ["git", "rev-parse", ref], cwd=tmp, capture_output=True, text=True, check=True
-                ).stdout.strip()
-
-            parent = rev("HEAD")
-            (root / "b.txt").write_text("b\n")
-            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
-            subprocess.run(["git", "commit", "-qm", "second"], cwd=tmp, check=True)
-            head = rev("HEAD")
-            run_cli(["--json", "start", "--no-unit", "--check", "ok=true"], root)
-
-            # One submit takes a batch of commits; one drain verifies them all.
-            out = run_cli(
-                [
-                    "--json", "exec", "--submit", "--source", "wave:0",
-                    "--commits", parent, "--commits", head, "--command", "true",
-                ],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(len(json.loads(out.stdout)["jobs"]), 2)
-
-            out = run_cli(["--json", "exec", "--run"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(json.loads(out.stdout)["executed"], 2)
-
-            # `--only` keeps just the named command, so a re-verify runs one check.
-            out = run_cli(
-                [
-                    "--json", "exec", "--submit", "--source", "node:w1",
-                    "--commit", head, "--command", "true", "--command", "false",
-                    "--only", "false",
-                ],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            job = json.loads(out.stdout)["job"]
-            self.assertEqual(json.loads(job["commands"]), ["false"])
-
     def test_cli_wave_record_only_node(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -407,7 +356,7 @@ class CliTests(unittest.TestCase):
             on_disk = campaign.load_dag(root, "feat/x")
             self.assertEqual([n["id"] for n in on_disk["nodes"]], ["a"])
 
-    def test_cli_resume_sessions_and_attempt(self):
+    def test_cli_resume_and_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
@@ -458,60 +407,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(entries[0]["feature_branch"], "feat/x")
             self.assertEqual(entries[0]["session_file"], "/tmp/s1.jsonl")
 
-            out = run_cli(["--json", "attempt", "--begin", "--node", "w1"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(json.loads(out.stdout)["status"], "running")
-            out = run_cli(
-                [
-                    "--json",
-                    "attempt",
-                    "--end",
-                    "--node",
-                    "w1",
-                    "--attempt",
-                    "1",
-                    "--status",
-                    "ok",
-                    "--turns",
-                    "3",
-                ],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(json.loads(out.stdout)["turns"], 3)
-
-            run_cli(["--json", "attempt", "--begin", "--node", "w2"], root)
-            out = run_cli(
-                [
-                    "--json",
-                    "attempt",
-                    "--end",
-                    "--node",
-                    "w2",
-                    "--status",
-                    "ok",
-                    "--tool-seconds",
-                    "12.5",
-                    "--tool-durations",
-                    json.dumps({"bash": 10.0, "read": 2.5}),
-                    "--slowest-commands",
-                    json.dumps(
-                        [{"command": "cargo", "tool": "bash", "seconds": 10.0, "calls": 1}]
-                    ),
-                ],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            ended = json.loads(out.stdout)
-            self.assertEqual(ended["tool_seconds"], 12.5)
-            self.assertIn("bash", ended["tool_durations"])
-
-            out = run_cli(["--json", "progress"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            progress = json.loads(out.stdout)
-            self.assertIn("totals", progress)
-            self.assertIn("tools", progress)
-            self.assertIn("verification", progress)
 
     def test_cli_runs_two_campaigns_by_flag(self):
         """`--campaign` scopes a call; a bare `status` reports the plane."""
@@ -741,15 +636,6 @@ class CliTests(unittest.TestCase):
         expected = {a.name for a in surface.ACTIONS}
         expected |= {alias for a in surface.ACTIONS for alias in a.aliases}
         self.assertEqual(set(sub.choices), expected)
-
-    def test_cli_and_agent_surfaces_share_actions(self):
-        """The pi extension's action list must match surface.ACTIONS."""
-        ext = REPO_ROOT / "integrations" / "pi" / "unit.ts"
-        text = ext.read_text(encoding="utf-8")
-        match = re.search(r"SLICEME_ACTIONS\s*=\s*\[(.*?)\]\s*as const", text, re.DOTALL)
-        self.assertIsNotNone(match, "SLICEME_ACTIONS not found in pi extension")
-        names = re.findall(r'"([a-z_]+)"', match.group(1))
-        self.assertEqual(names, [a.name for a in surface.ACTIONS])
 
 
 if __name__ == "__main__":

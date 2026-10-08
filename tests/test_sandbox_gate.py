@@ -61,7 +61,7 @@ class SandboxGateCase(unittest.TestCase):
         run("git", "commit", "-qm", "initial", cwd=self.root)
         Service.init_plane(self.root, checks=self.checks)
         self.svc = Service(self.root)
-        self.executor = self.svc.executor()
+        self.runner = self.svc.checks()
 
     def tearDown(self):
         self.svc.close()
@@ -80,7 +80,7 @@ class SandboxGateCase(unittest.TestCase):
         cfg = json.loads(config_path(self.root).read_text())
         cfg["policy"] = {**cfg.get("policy", {}), **policy}
         config_path(self.root).write_text(json.dumps(cfg))
-        self.executor = self.svc.executor()
+        self.runner = self.svc.checks()
         return cfg
 
     def manifest(self, **overrides):
@@ -88,8 +88,8 @@ class SandboxGateCase(unittest.TestCase):
         data.update(overrides)
         return data
 
-    def submit(self, commands, **kwargs):
-        return self.executor.submit(
+    def run_checks(self, commands, **kwargs):
+        return self.runner.run(
             source=kwargs.pop("source", "node:w1"),
             commit=kwargs.pop("commit", "HEAD"),
             commands=commands,
@@ -155,7 +155,7 @@ class GateTests(SandboxGateCase):
         self.assertFalse(info["ok"])
         self.assertIn("sandbox not configured", info["error"])
         with self.assertRaises(SlicemeError):
-            self.submit(["true"])
+            self.run_checks(["true"])
 
     def test_gate_passes_when_a_manifest_exists(self):
         self.write_manifest(self.manifest())
@@ -173,47 +173,44 @@ class GateTests(SandboxGateCase):
 
     def test_gpu_job_requires_a_runner(self):
         self.write_manifest(self.manifest())
-        with mock.patch.object(sandbox_mod, "default_gpu_broker", return_value=None):
+        with mock.patch.object(sandbox_mod, "default_gpu_runner", return_value=None):
             with self.assertRaises(SlicemeError) as ctx:
-                self.executor.require_sandbox(gpu_required=True)
+                self.runner.require_sandbox(gpu_required=True)
         self.assertIn("GPU", str(ctx.exception))
 
     def test_gpu_command_in_manifest_satisfies_the_gate(self):
         self.write_manifest(
             self.manifest(gpu={"command": ["sh", "tools/sandbox.sh", "--tier", "{tier}"]})
         )
-        with mock.patch.object(sandbox_mod, "default_gpu_broker", return_value=None):
-            profile = self.executor.require_sandbox(gpu_required=True)
+        with mock.patch.object(sandbox_mod, "default_gpu_runner", return_value=None):
+            profile = self.runner.require_sandbox(gpu_required=True)
         self.assertEqual(profile.gpu_command[0], "sh")
 
 
 class ExecutionTests(SandboxGateCase):
     def test_setup_runs_once_before_acceptance(self):
         self.write_manifest(self.manifest(setup=["touch setup-marker"]))
-        result = self.submit(["test -f setup-marker"])
-        done = self.executor.drain()
-        self.assertEqual(done[0]["status"], "passed", done[0]["output"])
-        names = [line for line in done[0]["output"].splitlines() if line.startswith("[")]
-        self.assertTrue(any("setup[0]" in line for line in names), done[0]["output"])
+        row = self.run_checks(["test -f setup-marker"])
+        self.assertEqual(row["status"], "passed", row["output"])
+        names = [line for line in row["output"].splitlines() if line.startswith("[")]
+        self.assertTrue(any("setup[0]" in line for line in names), row["output"])
 
     def test_manifest_change_invalidates_the_cached_fingerprint(self):
         self.write_manifest(self.manifest(setup=["true"]))
-        first = self.submit(["true"])
-        self.executor.drain()
-        self.assertTrue(self.submit(["true"])["cached"])
+        first = self.run_checks(["true"])
+        self.assertTrue(self.run_checks(["true"])["cached"])
 
         # Tightening the manifest (different setup) must not reuse the verdict.
         self.write_manifest(self.manifest(setup=["true", "true"]))
-        changed = self.submit(["true"])
+        changed = self.run_checks(["true"])
         self.assertFalse(changed["cached"])
-        self.assertNotEqual(first["job"]["fingerprint"], changed["job"]["fingerprint"])
+        self.assertNotEqual(first["fingerprint"], changed["fingerprint"])
 
     def test_failing_setup_blocks_acceptance(self):
         self.write_manifest(self.manifest(setup=["false"]))
-        self.submit(["true"])
-        done = self.executor.drain()
-        self.assertEqual(done[0]["status"], "failed")
-        self.assertIn("setup[0]", done[0]["output"])
+        row = self.run_checks(["true"])
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("setup[0]", row["output"])
 
 
 class WrappingTests(unittest.TestCase):
@@ -224,7 +221,7 @@ class WrappingTests(unittest.TestCase):
             "sh tools/run.sh /bin/sh -lc 'pytest -q'",
         )
 
-    def test_gpu_broker_wraps_outside_the_sandbox(self):
+    def test_gpu_runner_wraps_outside_the_sandbox(self):
         sandbox = Sandbox(
             command=("sh", "s.sh"),
             gpu_command=("mygpu", "--tier", "{tier}", "--"),
@@ -239,19 +236,19 @@ class WrappingTests(unittest.TestCase):
 
 
 class CliGateTests(SandboxGateCase):
-    def test_exec_validate_passes_and_reports_digest(self):
+    def test_status_reports_the_sandbox_gate(self):
         self.write_manifest(self.manifest())
-        out = run_cli(["--json", "exec", "--validate"], self.root)
+        out = run_cli(["--json", "status"], self.root)
         self.assertEqual(out.returncode, 0, out.stderr)
-        payload = json.loads(out.stdout)
+        payload = json.loads(out.stdout)["sandbox"]
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["manifest"], "sliceme.sandbox.json")
         self.assertTrue(payload["digest"])
 
-    def test_exec_validate_fails_closed_when_required(self):
+    def test_status_reports_a_failing_gate_when_required(self):
         self.set_policy(require_sandbox=True)
-        out = run_cli(["--json", "exec", "--validate"], self.root)
-        self.assertEqual(out.returncode, 2)
+        out = run_cli(["--json", "status"], self.root)
+        self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("sandbox not configured", out.stdout + out.stderr)
 
 

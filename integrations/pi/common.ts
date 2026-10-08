@@ -1,33 +1,25 @@
 /**
- * Shared helpers for the Sliceme pi extensions.
+ * Shared helpers for the Sliceme pi extension.
  *
- * `coordinator.ts` is the `sliceme` coordinator tool and `unit.ts` is the
- * `sliceme-unit` tool; both are thin adapters over the bundled `sliceme` CLI. The CLI is the
- * engine surface, so the tools stay harness-agnostic and need no `PATH`
- * install. `runSubagent` also applies each agent's `tools:` allowlist, scoping
- * workers to the unit tool and the coordinator to the campaign tool.
+ * `coordinator.ts` is the `sliceme` extension: it registers the `sliceme` engine
+ * tool, the Sliceme agent definitions, and the `sliceme.campaign` workflow
+ * resource, and it writes the suspend/resume descriptor. These helpers keep the
+ * engine invocation, the campaign file paths, and the pi-subagents loader in
+ * one place so the extension stays a thin adapter over the bundled `sliceme`
+ * CLI.
  */
 
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface SlicemeResult {
 	text: string;
 	json: any;
-}
-
-export interface SubagentResult {
-	exitCode: number;
-	output: string;
-	stderr: string;
-	/** True when the child was killed by a signal rather than exiting on its own. */
-	interrupted?: boolean;
-	signal?: NodeJS.Signals | null;
 }
 
 export interface SlicemeInvocation {
@@ -55,11 +47,20 @@ export function packageDir(): string {
 	return path.resolve(HERE, "..", "..");
 }
 
+/** The pi agent directory that holds installed pi packages and agents. */
+export function agentDir(): string {
+	return (
+		process.env.PI_CODING_AGENT_DIR ||
+		process.env.PI_AGENT_DIR ||
+		path.join(os.homedir(), ".pi", "agent")
+	);
+}
+
 /**
  * Resolve how to run the bundled CLI. `SLICEME_BIN` overrides for local
-development; otherwise the CLI shipped inside the pi package is used, so no
-`PATH` install is needed. Running the bundled script through `python3` keeps it
-portable.
+ * development; otherwise the CLI shipped inside the pi package is used, so no
+ * `PATH` install is needed. Running the bundled script through `python3` keeps
+ * it portable.
  */
 export function resolveSlicemeInvocation(): SlicemeInvocation {
 	if (process.env.SLICEME_BIN) {
@@ -75,53 +76,6 @@ export function parseJson(text: string): any {
 	} catch {
 		return undefined;
 	}
-}
-
-/** One entry of the ``sliceme-campaigns`` plan in a design document. */
-export interface CampaignPlanEntry {
-	name: string;
-	target: string;
-	base: string | null;
-	dirs: string[];
-}
-
-const CAMPAIGN_PLAN_FENCE =
-	/^[ \t]*```+[^\n]*\bsliceme-campaigns\b[^\n]*\r?\n([\s\S]*?)^[ \t]*```+[ \t]*$/m;
-
-/**
- * Parse the `sliceme-campaigns` fenced block from a design document.
- *
- * Returns an empty list when the document declares no plan. The engine's
- * `sliceme plan` action is the canonical reader and joins the registry state;
- * this mirror lets the coordinator resolve the target branch before the plane
- * exists. Entries without a name or a target are dropped.
- */
-export function parseCampaignPlan(text: string): CampaignPlanEntry[] {
-	const match = CAMPAIGN_PLAN_FENCE.exec(text ?? "");
-	if (!match) return [];
-	const raw = match[1].trim();
-	if (!raw) return [];
-	let data: unknown;
-	try {
-		data = JSON.parse(raw);
-	} catch {
-		return [];
-	}
-	if (!Array.isArray(data)) return [];
-	const plan: CampaignPlanEntry[] = [];
-	for (const entry of data) {
-		if (!entry || typeof entry !== "object") continue;
-		const record = entry as Record<string, unknown>;
-		const name = String(record.name ?? "").trim();
-		const target = String(record.target ?? "").trim();
-		if (!name || !target) continue;
-		const dirs = Array.isArray(record.dirs)
-			? record.dirs.map((item) => String(item).trim()).filter(Boolean)
-			: [];
-		const base = record.base ? String(record.base).trim() : null;
-		plan.push({ name, target, base, dirs });
-	}
-	return plan;
 }
 
 /** Run the Sliceme CLI with `--json` from the session's cwd. */
@@ -145,109 +99,16 @@ export async function runSliceme(
 	return { text: text || "ok", json: parseJson(result.stdout) };
 }
 
-export interface ReviewServerHandle {
-	child: import("node:child_process").ChildProcess;
-	url: string;
-}
-
-/**
- * Start the review server as a background child and wait for its URL file.
- *
- * The server binds loopback and writes the URL to a private file with mode
- * `0600`. The child is not detached, so a coordinator crash stops the server.
- * The child also holds a pipe on standard input, so a crashed coordinator
- * closes the pipe and the server stops itself. The caller stops the child in
- * `session_shutdown`. The server opens the default browser by itself; the
- * returned URL feeds the coordinator widget.
- */
-export async function spawnReviewServer(options: {
-	cwd: string;
-	urlFile: string;
-	logFile: string;
-	campaign?: string;
-	waitMs?: number;
-}): Promise<ReviewServerHandle> {
-	const invocation = resolveSlicemeInvocation();
-	fs.mkdirSync(path.dirname(options.logFile), { recursive: true });
-	// Remove URL files from earlier sessions that are no longer running.
-	cleanStaleReviewUrls(path.dirname(options.urlFile));
-	// A leftover URL file from an earlier run must not be read as the new URL.
-	fs.rmSync(options.urlFile, { force: true });
-	// Capture stderr only. The server prints the URL, which holds the write
-	// token, on stdout, so the token never enters the log. Mode 0600 keeps the
-	// log private when the operating system creates it.
-	const err = fs.openSync(options.logFile, "a", 0o600);
-	const reviewArgs = ["review", "--serve", "--url-file", options.urlFile];
-	if (options.campaign) reviewArgs.push("--campaign", options.campaign);
-	const child = spawn(invocation.command, [...invocation.prefix, ...reviewArgs], {
-		cwd: options.cwd,
-		shell: false,
-		detached: false,
-		stdio: ["pipe", "ignore", err],
-	});
-	fs.closeSync(err);
-	const deadline = Date.now() + (options.waitMs ?? 5000);
-	try {
-		while (Date.now() < deadline) {
-			if (child.exitCode !== null) {
-				throw new Error("the review server exited before it wrote a URL");
-			}
-			try {
-				const url = fs.readFileSync(options.urlFile, "utf8").trim();
-				if (url) return { child, url };
-			} catch {
-				/* the server has not written the file yet */
-			}
-			await new Promise((resolve) => setTimeout(resolve, 100));
-		}
-		throw new Error("the review server did not write a URL in time");
-	} catch (error) {
-		child.kill("SIGTERM");
-		throw error;
-	}
-}
-
 // ---------------------------------------------------------------------------
-// Campaign state paths (`docs/reference.md` §3)
+// Campaign paths (`docs/reference.md` §3, `docs/sessions.md` §4)
 // ---------------------------------------------------------------------------
 
 export function branchKey(branch: string): string {
 	return (branch || "main").trim().replace(/\//g, "--") || "main";
 }
 
-/**
- * The stable session id of one campaign's dedicated addressing subagent.
- *
- * The id is derived from the branch key, so every comment and every turn of
- * one campaign reopens the same pi session (`pi --session-id <id>`) and the
- * addressing subagent keeps the thread context.  Session ids must start and
- * end with a letter or digit and accept only letters, digits, `.`, `_`, and
- * `-`, so the branch key is sanitized before it is embedded.
- */
-export function addressingSessionId(branch: string): string {
-	const key = branchKey(branch).replace(/[^A-Za-z0-9._-]/g, "-");
-	const trimmed = key.replace(/^[^A-Za-z0-9]+/, "").replace(/[^A-Za-z0-9]+$/, "");
-	return `sliceme-addressing-${trimmed || "campaign"}`;
-}
-
 export function stateDir(cwd: string): string {
 	return path.join(cwd, ".sliceme");
-}
-
-export function dagPath(cwd: string, branch: string): string {
-	return path.join(stateDir(cwd), `${branchKey(branch)}.dag.json`);
-}
-
-export function statePath(cwd: string, branch: string): string {
-	return path.join(stateDir(cwd), `${branchKey(branch)}.state.json`);
-}
-
-export function logPath(cwd: string, branch: string, node: string): string {
-	return path.join(stateDir(cwd), `${branchKey(branch)}.worker_${node}.log`);
-}
-
-export function eventsPath(cwd: string, branch: string): string {
-	return path.join(stateDir(cwd), `${branchKey(branch)}.events.jsonl`);
 }
 
 /** The adapter-written suspend/resume descriptor (`docs/sessions.md`). */
@@ -260,26 +121,12 @@ export function controlPath(cwd: string, branch: string): string {
 	return path.join(stateDir(cwd), `${branchKey(branch)}.control.json`);
 }
 
-/** The per-node progress heartbeat written while a subagent runs. */
-export function heartbeatPath(cwd: string, branch: string, node: string): string {
-	return path.join(stateDir(cwd), `${branchKey(branch)}.progress_${node}.json`);
-}
-
-/**
- * The private file that holds the running review server URL (mode 0600).  The
- * name carries the coordinator process id, so two sessions in one checkout do
- * not overwrite each other's URL.
- */
-export function reviewUrlPath(cwd: string, pid: number = process.pid): string {
-	return path.join(stateDir(cwd), `review.${pid}.url`);
-}
-
 /**
  * The private per-process pointer to the session's active campaign branch.
  *
  * The pi session owns a campaign, and a session can outlive one process, so the
- * pointer is best-effort.  The engine's `config.json` mirror is the fallback
- * for a resumed session or a pointer written by an earlier process.
+ * pointer is best-effort. The engine rebuilds campaign state from git and
+ * SQLite, so a missing pointer never blocks a resume.
  */
 export function activeCampaignPath(cwd: string, pid: number = process.pid): string {
 	return path.join(stateDir(cwd), `active.${pid}.campaign`);
@@ -317,43 +164,6 @@ export function clearActiveCampaign(cwd: string, pid: number = process.pid): voi
 	}
 }
 
-/** Whether a process with this id exists. */
-function processAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
-}
-
-/** Remove review URL files whose owning coordinator is gone. */
-export function cleanStaleReviewUrls(cwd: string): void {
-	const dir = stateDir(cwd);
-	let names: string[];
-	try {
-		names = fs.readdirSync(dir);
-	} catch {
-		return;
-	}
-	for (const name of names) {
-		const match = /^review\.(\d+)\.url$/.exec(name);
-		if (!match) continue;
-		const pid = Number(match[1]);
-		if (pid === process.pid || processAlive(pid)) continue;
-		try {
-			fs.rmSync(path.join(dir, name), { force: true });
-		} catch {
-			/* a concurrent cleanup may win the race */
-		}
-	}
-}
-
-/** The review server's standard output log. */
-export function reviewLogPath(cwd: string): string {
-	return path.join(stateDir(cwd), "review.server.log");
-}
-
 export function readJson<T>(file: string, fallback: T): T {
 	try {
 		return JSON.parse(fs.readFileSync(file, "utf8")) as T;
@@ -370,919 +180,114 @@ export function writeJson(file: string, data: unknown): void {
 	fs.renameSync(tmp, file);
 }
 
+// ---------------------------------------------------------------------------
+// Engine reply handling (`docs/sessions.md`)
+// ---------------------------------------------------------------------------
+
 /**
- * The single in-process owner of one campaign's `state.json`.
+ * Resolve the campaign branch from an engine reply.
  *
- * The coordinator is the only writer, so the store keeps the state in memory
- * and hands every caller the same object. Mutating that one object and calling
- * `save()` therefore never drops a parallel `spawn` completion, and the atomic
- * write never leaves a partial file.
+ * ``status`` and ``start`` return ``feature_branch`` (with the deprecated
+ * ``main_branch`` mirror); ``deliver`` returns ``target_branch``.  Delivery
+ * marks the descriptor, so it must resolve the branch from the deliver reply
+ * shape too.
  */
-export class CampaignStateStore {
-	private readonly file: string;
-	private cache: any;
+export function replyBranch(json: any): string | undefined {
+	const branch = json?.feature_branch ?? json?.target_branch ?? json?.main_branch;
+	return typeof branch === "string" && branch ? branch : undefined;
+}
 
-	constructor(file: string) {
-		this.file = file;
-	}
+/** Whether a ``deliver`` reply reports a landed delivery (`docs/sessions.md` §6). */
+export function delivered(json: any): boolean {
+	const results = json?.results;
+	return (
+		Array.isArray(results) &&
+		results.length > 0 &&
+		results.every((result: any) => result?.status === "landed")
+	);
+}
 
-	/** The shared state object, loaded from disk on first use. */
-	read<T = any>(): T {
-		if (this.cache === undefined) this.cache = readJson<any>(this.file, { nodes: {} });
-		return this.cache as T;
-	}
-
-	/** Read the file again, for a resume rebuild. */
-	reload<T = any>(): T {
-		this.cache = undefined;
-		return this.read<T>();
-	}
-
-	/** Replace the shared state, for a new campaign. */
-	replace(state: any): void {
-		this.cache = state;
-	}
-
-	/** Flush the shared state. `write` is false when the engine removed the file. */
-	save(write = true): void {
-		if (write) writeJson(this.file, this.read());
+/**
+ * Mark the session descriptor ``completed`` after a successful delivery.
+ *
+ * Shutdown and resume read the descriptor status, so the marker must land
+ * before the process ends.  This merges the status into the existing
+ * descriptor and keeps its other fields.
+ */
+export function markDescriptorCompleted(cwd: string, branch: string): void {
+	try {
+		const file = sessionPath(cwd, branch);
+		const existing = readJson<any>(file, {});
+		writeJson(file, {
+			...existing,
+			feature_branch: branch,
+			status: "completed",
+			completed_at: Date.now() / 1000,
+		});
+	} catch {
+		/* Best-effort marker; the engine store still records `delivered`. */
 	}
 }
 
 /**
- * Append one audit line to the campaign event log. The DAG can be hand-edited,
- * so plan evolution is recorded here next to commits and fingerprints.
+ * Apply one engine reply to the adapter files.
+ *
+ * The active-campaign pointer follows the reply's branch.  A successful
+ * ``deliver`` marks the descriptor ``completed`` regardless of the pointer
+ * guard, because the deliver reply carries ``target_branch`` and may arrive
+ * before any pointer exists.
  */
-export function logEvent(cwd: string, branch: string, kind: string, data: unknown): void {
-	const file = eventsPath(cwd, branch);
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.appendFileSync(file, JSON.stringify({ kind, data }) + "\n", "utf8");
+export function applyEngineReply(cwd: string, action: string, json: any): string | undefined {
+	const branch = replyBranch(json);
+	if (branch) writeActiveCampaign(cwd, branch);
+	if (action === "deliver" && delivered(json)) {
+		const target = branch ?? readActiveCampaign(cwd);
+		if (target) markDescriptorCompleted(cwd, target);
+	}
+	return branch;
 }
 
 // ---------------------------------------------------------------------------
-// Subagents
+// pi-subagents
 // ---------------------------------------------------------------------------
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
-	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] };
-	}
-	const execName = path.basename(process.execPath).toLowerCase();
-	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
-		return { command: process.execPath, args };
-	}
-	return { command: "pi", args };
-}
-
-function agentDir(): string {
-	return process.env.PI_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
-}
-
-/** Locate an agent definition: packaged first, then the user's campaign-agents. */
-export function findAgentFile(name: string): string | undefined {
-	for (const file of [
-		path.join(packageDir(), "integrations", "pi", "agents", `${name}.md`),
-		path.join(agentDir(), "campaign-agents", `${name}.md`),
-	]) {
-		if (fs.existsSync(file)) return file;
-	}
-	return undefined;
-}
-
-/** Read a scalar `key: value` from an agent file's YAML frontmatter. */
-function agentFrontmatterValue(raw: string, key: string): string | undefined {
-	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-	if (!match) return undefined;
-	for (const line of match[1].split(/\r?\n/)) {
-		const idx = line.indexOf(":");
-		if (idx === -1) continue;
-		if (line.slice(0, idx).trim() === key) return line.slice(idx + 1).trim();
-	}
-	return undefined;
-}
-
 /**
- * Spawn a one-shot `pi` subagent, tee its raw output to `log`, return the final
- * assistant text. The child is a direct child of the coordinator and is not
- * detached, so a coordinator crash kills it.
+ * Candidate install roots of the `pi-subagents` pi package.
  *
- * When `heartbeat` is set, a small progress snapshot is written atomically at
- * most once per second (and once more on close) so a resumed campaign can
- * describe what the paused worker was doing.
+ * A pi package installed next to Sliceme is not automatically a Node
+ * dependency of this package, so the loader discovers it instead of relying on
+ * a bare import. `SLICEME_PI_SUBAGENTS` overrides the search for local
+ * development.
  */
-/** One grouped shell command: its tool, total seconds, and call count. */
-export interface CommandMetric {
-	tool: string;
-	seconds: number;
-	calls: number;
-}
-
-export interface SubagentProgress {
-	node?: string;
-	unit?: string;
-	attempt?: number;
-	agent?: string;
-	turns: number;
-	toolCalls: number;
-	tools: Record<string, number>;
-	toolSeconds: number;
-	toolDurations: Record<string, number>;
-	commands: Record<string, CommandMetric>;
-	toolStartedAt?: number;
-	lastTool?: string;
-	lastToolArgs?: string;
-	lastText?: string;
-	tokensIn: number;
-	tokensOut: number;
-	cost: number;
-	startedAt: number;
-	updatedAt: number;
+export function piSubagentsRoots(): string[] {
+	const roots: string[] = [];
+	if (process.env.SLICEME_PI_SUBAGENTS) roots.push(path.resolve(process.env.SLICEME_PI_SUBAGENTS));
+	roots.push(path.join(packageDir(), "node_modules", "pi-subagents"));
+	roots.push(path.join(agentDir(), "npm", "node_modules", "pi-subagents"));
+	return roots;
 }
 
 /**
- * The program name of a shell command: the first token, after a leading
- * `cd <dir> &&` and any `NAME=value` assignments.
+ * Import one subpath of the installed `pi-subagents` package, or `undefined`
+ * when it is not installed. The resource loader imports the
+ * `workflow-resources` subpath; the import is dynamic because TypeScript must
+ * not require the package at build time and the runtime must not fail to load
+ * the extension without it.
  */
-export function programName(raw: string | undefined): string | undefined {
-	if (!raw) return undefined;
-	let text = raw.split("\n")[0].trim().replace(/\s+/g, " ");
-	if (!text) return undefined;
-	text = text.replace(/^cd\s+\S+\s*&&\s*/, "");
-	const parts = text.split(" ").filter(Boolean);
-	let index = 0;
-	while (index < parts.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(parts[index])) index += 1;
-	return parts[index] || undefined;
-}
-
-/**
- * The commands with the largest total time. The result is a bounded list for
- * the heartbeat file and the `attempt --end` call.
- */
-export function topCommands(
-	commands: Record<string, CommandMetric>,
-	limit = 20,
-): Array<{ command: string; tool: string; seconds: number; calls: number }> {
-	return Object.entries(commands)
-		.map(([command, metric]) => ({
-			command,
-			tool: metric.tool,
-			seconds: Number((metric.seconds ?? 0).toFixed(3)),
-			calls: metric.calls ?? 0,
-		}))
-		.sort((a, b) => b.seconds - a.seconds)
-		.slice(0, limit);
-}
-
-/** Keep the command map small: merge the least costly keys into `(other)`. */
-function boundCommands(commands: Record<string, CommandMetric>, limit = 200): void {
-	const keys = Object.keys(commands);
-	if (keys.length <= limit) return;
-	keys.sort((a, b) => commands[a].seconds - commands[b].seconds);
-	const other = commands["(other)"] ?? { tool: "various", seconds: 0, calls: 0 };
-	for (const key of keys.slice(0, keys.length - limit)) {
-		other.seconds += commands[key].seconds;
-		other.calls += commands[key].calls;
-		delete commands[key];
-	}
-	commands["(other)"] = other;
-}
-
-/** One tool call that started and has not ended yet. */
-export interface ActiveTool {
-	name: string;
-	command?: string;
-	start: number;
-}
-
-/** A short, display-safe form of one tool's arguments. */
-export function summariseArgs(args: unknown): string | undefined {
-	if (args && typeof args === "object") {
-		const record = args as Record<string, unknown>;
-		if (typeof record.command === "string") return record.command;
-		if (typeof record.path === "string") return record.path;
-		if (typeof record.file === "string") return record.file;
+export async function loadPiSubagents(subpath: string): Promise<any | undefined> {
+	for (const root of piSubagentsRoots()) {
+		if (!existsSync(path.join(root, "package.json"))) continue;
+		try {
+			const require = createRequire(path.join(root, "package.json"));
+			const resolved = require.resolve(`pi-subagents/${subpath}`);
+			return await import(pathToFileURL(resolved).href);
+		} catch {
+			/* try the next install root */
+		}
 	}
 	try {
-		const text = JSON.stringify(args);
-		return text && text !== "{}" ? text.slice(0, 120) : undefined;
+		return await import(`pi-subagents/${subpath}`);
 	} catch {
 		return undefined;
 	}
-}
-
-/** Fold one `tool_execution_start` into the progress and the active map. */
-export function reduceToolStart(
-	progress: SubagentProgress,
-	activeTools: Map<string, ActiveTool>,
-	event: { toolName?: unknown; toolCallId?: unknown; args?: unknown },
-	now: number,
-): void {
-	progress.toolCalls += 1;
-	const name = String(event.toolName ?? "");
-	progress.lastTool = name;
-	progress.lastToolArgs = summariseArgs(event.args);
-	progress.tools[name] = (progress.tools[name] ?? 0) + 1;
-	const id = String(event.toolCallId ?? "");
-	const args = event.args;
-	const command =
-		args && typeof args === "object" && typeof (args as Record<string, unknown>).command === "string"
-			? String((args as Record<string, unknown>).command)
-			: undefined;
-	if (id) {
-		activeTools.set(id, { name, command, start: now });
-		progress.toolStartedAt = now;
-	}
-}
-
-/** Fold one `tool_execution_end` into the progress and the active map. */
-export function reduceToolEnd(
-	progress: SubagentProgress,
-	activeTools: Map<string, ActiveTool>,
-	event: { toolName?: unknown; toolCallId?: unknown },
-	now: number,
-): void {
-	const id = String(event.toolCallId ?? "");
-	const active = id ? activeTools.get(id) : undefined;
-	const name = active?.name ?? String(event.toolName ?? "");
-	const seconds = Math.max(0, now - (active?.start ?? now));
-	if (id) activeTools.delete(id);
-	progress.toolSeconds += seconds;
-	if (name) {
-		progress.lastTool = name;
-		progress.toolDurations[name] = (progress.toolDurations[name] ?? 0) + seconds;
-	}
-	if (active?.command) {
-		const key = programName(active.command) ?? "(unknown)";
-		const entry = progress.commands[key] ?? { tool: name, seconds: 0, calls: 0 };
-		entry.seconds += seconds;
-		entry.calls += 1;
-		progress.commands[key] = entry;
-		boundCommands(progress.commands);
-	}
-	if (activeTools.size === 0) progress.toolStartedAt = undefined;
-}
-
-/** One root comment queued for the dedicated addressing subagent. */
-export interface AddressingComment {
-	id: number;
-	body?: string;
-	file?: string | null;
-	line?: number | null;
-}
-
-/** The engine's `review --resolve` answer for one comment (contract C). */
-export interface AddressingResolve {
-	comment: number;
-	node: string | null;
-	reason: "explicit" | "owns" | "general" | "outside_owns";
-}
-
-/** One addressing pass: the resolved node (or null) plus its comments. */
-export interface AddressingBatch {
-	node: string | null;
-	comments: AddressingComment[];
-}
-
-/**
- * Group resolved comments into addressing batches.
- *
- * Comments that resolve to the same node form one batch, so the coordinator
- * records a single commit that answers all of them.  A comment with no resolved
- * node is its own batch (and its own conversation turn), because the addressing
- * subagent may only record a reply row for it.  The first-seen order is kept.
- */
-export function addressingBatches(
-	comments: AddressingComment[],
-	resolves: AddressingResolve[],
-): AddressingBatch[] {
-	const resolvedOf = new Map<number, AddressingResolve>();
-	for (const resolve of resolves) resolvedOf.set(Number(resolve.comment), resolve);
-	const batches: AddressingBatch[] = [];
-	const byKey = new Map<string, AddressingBatch>();
-	for (const comment of comments) {
-		const node = resolvedOf.get(Number(comment.id))?.node ?? null;
-		const key = node ? `node:${node}` : `comment:${comment.id}`;
-		let batch = byKey.get(key);
-		if (!batch) {
-			batch = { node, comments: [] };
-			byKey.set(key, batch);
-			batches.push(batch);
-		}
-		batch.comments.push(comment);
-	}
-	return batches;
-}
-
-export async function runSubagent(options: {
-	agent: string;
-	task: string;
-	cwd: string;
-	log?: string;
-	signal?: AbortSignal;
-	node?: string;
-	unit?: string;
-	attempt?: number;
-	heartbeat?: string;
-	/**
-	 * Reopen this project session id instead of `--no-session`.  The dedicated
-	 * addressing subagent uses one stable id per campaign, so its conversation
-	 * history survives across comments and turns.
-	 */
-	sessionId?: string;
-	onProgress?: (progress: SubagentProgress) => void;
-}): Promise<SubagentResult> {
-	const agentFile = findAgentFile(options.agent);
-	const args = ["--mode", "json", "-p"];
-	if (options.sessionId) args.push("--session-id", options.sessionId);
-	else args.push("--no-session");
-	let promptPath: string | undefined;
-	if (agentFile) {
-		const raw = fs.readFileSync(agentFile, "utf8");
-		// Scope the subagent to its frontmatter `tools:`. `--tools` replaces the
-		// default selection, so the list must name every tool the agent needs;
-		// this is what gives workers the `sliceme` unit tool but never `campaign`.
-		const tools = agentFrontmatterValue(raw, "tools");
-		if (tools) args.push("--tools", tools);
-		// Strip the YAML frontmatter before appending the system prompt.
-		const stripped = raw.replace(/^---\n[\s\S]*?\n---\n/, "");
-		promptPath = path.join(
-			os.tmpdir(),
-			`sliceme-campaign-${options.agent}-${process.pid}-${Date.now()}.md`,
-		);
-		fs.writeFileSync(promptPath, stripped, "utf8");
-		args.push("--append-system-prompt", promptPath);
-	}
-	args.push(options.task);
-
-	const cleanup = () => {
-		if (!promptPath) return;
-		try {
-			fs.unlinkSync(promptPath);
-		} catch {
-			/* ignore */
-		}
-	};
-
-	const invocation = getPiInvocation(args);
-	return new Promise<SubagentResult>((resolve) => {
-		const proc = spawn(invocation.command, invocation.args, {
-			cwd: options.cwd,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		let buffer = "";
-		let output = "";
-		let stderr = "";
-		let stream: fs.WriteStream | undefined;
-		if (options.log) {
-			fs.mkdirSync(path.dirname(options.log), { recursive: true });
-			stream = fs.createWriteStream(options.log, { flags: "a" });
-		}
-
-		const nowSeconds = () => Date.now() / 1000;
-		const progress: SubagentProgress = {
-			node: options.node,
-			unit: options.unit,
-			attempt: options.attempt ?? 1,
-			agent: options.agent,
-			turns: 0,
-			toolCalls: 0,
-			tools: {},
-			toolSeconds: 0,
-			toolDurations: {},
-			commands: {},
-			tokensIn: 0,
-			tokensOut: 0,
-			cost: 0,
-			startedAt: nowSeconds(),
-			updatedAt: nowSeconds(),
-		};
-		// Parallel tool calls from one assistant message interleave, so pair the
-		// start and the end by `toolCallId`, never by tool name.
-		const activeTools = new Map<string, ActiveTool>();
-		let pendingUsage: any;
-		let lastHeartbeatWrite = 0;
-		const cloneProgress = (updatedAt = nowSeconds()): SubagentProgress => ({
-			...progress,
-			tools: { ...progress.tools },
-			toolDurations: { ...progress.toolDurations },
-			commands: Object.fromEntries(
-				Object.entries(progress.commands).map(([key, value]) => [key, { ...value }]),
-			),
-			updatedAt,
-		});
-		const flushHeartbeat = (force = false) => {
-			if (!options.heartbeat) return;
-			const now = nowSeconds();
-			if (!force && now - lastHeartbeatWrite < 1) return;
-			lastHeartbeatWrite = now;
-			const snapshot = cloneProgress(now);
-			// On disk the heartbeat uses the `.sliceme/` snake_case convention so the
-			// engine projection and the continuation prompt can read it.
-			const record = {
-				node: snapshot.node,
-				unit: snapshot.unit,
-				attempt: snapshot.attempt ?? 1,
-				agent: snapshot.agent,
-				pid: process.pid,
-				started_at: snapshot.startedAt,
-				updated_at: snapshot.updatedAt,
-				turns: snapshot.turns,
-				tool_calls: snapshot.toolCalls,
-				tools: snapshot.tools,
-				tool_seconds: snapshot.toolSeconds,
-				tool_durations: snapshot.toolDurations,
-				slowest_commands: topCommands(snapshot.commands),
-				last_tool: snapshot.lastTool ?? null,
-				last_tool_args: snapshot.lastToolArgs ?? null,
-				last_text: snapshot.lastText ?? null,
-				tokens_in: snapshot.tokensIn,
-				tokens_out: snapshot.tokensOut,
-				cost: snapshot.cost,
-			};
-			try {
-				writeJson(options.heartbeat, record);
-			} catch {
-				/* the heartbeat is best-effort; never fail the run for it */
-			}
-		};
-		// The live view needs every event; only the heartbeat file is debounced.
-		const emitProgress = () => {
-			options.onProgress?.(cloneProgress());
-		};
-		const processLine = (line: string) => {
-			if (!line.trim()) return;
-			stream?.write(line + "\n");
-			let event: any;
-			try {
-				event = JSON.parse(line);
-			} catch {
-				return;
-			}
-			switch (event.type) {
-				case "turn_start":
-					progress.turns += 1;
-					break;
-				case "tool_execution_start": {
-					reduceToolStart(progress, activeTools, event, nowSeconds());
-					break;
-				}
-				case "tool_execution_end": {
-					reduceToolEnd(progress, activeTools, event, nowSeconds());
-					break;
-				}
-				case "message_update":
-					if (event.usage) pendingUsage = event.usage;
-					break;
-				case "message_end":
-					if (event.message?.role === "assistant") {
-						for (const part of event.message.content ?? []) {
-							if (part.type === "text") output = part.text;
-						}
-						const usage = event.message?.usage ?? pendingUsage;
-						if (usage) {
-							progress.tokensIn += usage.input ?? 0;
-							progress.tokensOut += usage.output ?? 0;
-							progress.cost += usage.cost?.total ?? 0;
-						}
-						pendingUsage = undefined;
-						const text = output.trim();
-						if (text) progress.lastText = text.slice(-280);
-					}
-					break;
-				default:
-					return;
-			}
-			flushHeartbeat();
-			emitProgress();
-		};
-
-		proc.stdout.on("data", (data) => {
-			buffer += data.toString();
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-			for (const line of lines) processLine(line);
-		});
-		proc.stderr.on("data", (data) => {
-			stderr += data.toString();
-			stream?.write(data.toString());
-		});
-		proc.on("close", (code, signal) => {
-			if (buffer.trim()) processLine(buffer);
-			stream?.end();
-			flushHeartbeat(true);
-			emitProgress();
-			cleanup();
-			resolve({
-				exitCode: code ?? (signal ? 128 : 0),
-				output,
-				stderr,
-				interrupted: signal != null,
-				signal,
-			});
-		});
-		proc.on("error", (err) => {
-			stream?.end();
-			flushHeartbeat(true);
-			emitProgress();
-			cleanup();
-			resolve({ exitCode: 1, output, stderr: String(err) });
-		});
-
-		if (options.signal) {
-			const kill = () => {
-				try {
-					proc.kill("SIGTERM");
-				} catch {
-					/* already gone */
-				}
-				// `proc.killed` turns true as soon as SIGTERM is sent, so it cannot
-				// tell us whether the child actually exited.  Escalate on the real
-				// exit state instead, or a worker that ignores SIGTERM hangs forever.
-				const escalate = setTimeout(() => {
-					if (proc.exitCode === null && proc.signalCode === null) {
-						try {
-							proc.kill("SIGKILL");
-						} catch {
-							/* already gone */
-						}
-					}
-				}, 3000);
-				escalate.unref();
-			};
-			if (options.signal.aborted) kill();
-			else options.signal.addEventListener("abort", kill, { once: true });
-		}
-	});
-}
-
-// ---------------------------------------------------------------------------
-// Live progress view (`docs/observability.md` §5, §7)
-//
-// `renderProgress` is pure: it reads one snapshot and returns terminal lines.
-// The coordinator owns the registry and the render timer; this module owns the
-// formatting, so a unit test can drive it with fixed timestamps and widths.
-// ---------------------------------------------------------------------------
-
-/** One running or finished subagent in the live view. */
-export interface ProgressAgent {
-	key: string;
-	node: string;
-	agent: string;
-	unit?: string;
-	attempt: number;
-	status: "running" | "done" | "failed" | "interrupted";
-	progress: SubagentProgress;
-	finishedAt?: number;
-}
-
-/** One campaign node in the live view. */
-export interface ProgressNode {
-	id: string;
-	status: string;
-}
-
-/** One wave in the live view. */
-export interface ProgressWave {
-	index: number;
-	status: string;
-	members: string[];
-}
-
-/** Everything `renderProgress` needs. The engine never enters this path. */
-export interface ProgressSnapshot {
-	campaign?: string;
-	currentWave?: number;
-	waves?: ProgressWave[];
-	nodes?: ProgressNode[];
-	agents: ProgressAgent[];
-	now: number;
-}
-
-export interface RenderProgressOptions {
-	/** Truncate every line to this many terminal columns. */
-	width?: number;
-	/** Style one line; `ctx.ui.theme.fg` fits. Default: no color. */
-	color?: (name: string, text: string) => string;
-	/** Maximum agent rows to show (default 8). */
-	maxAgents?: number;
-	/**
-	 * Maximum total widget lines. Pi truncates a widget to the first ten lines
-	 * (`MAX_WIDGET_LINES`), so the default ten keeps the whole view visible.
-	 */
-	maxLines?: number;
-	/** Maximum wave rows in the window around the current wave (default 4). */
-	maxWaves?: number;
-	/** A running row is stale after this many seconds (default 5). */
-	stalledAfterSeconds?: number;
-	/** Show the metrics line: elapsed, tool and thinking percentages, slowest tool. */
-	showMetrics?: boolean;
-	/** Override the clock for `renderAgentLine`. */
-	now?: number;
-}
-
-const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
-
-/** Terminal columns of one code point. Wide East-Asian and emoji count as two. */
-function codePointWidth(code: number): number {
-	if (code === 0) return 0;
-	if (
-		(code >= 0x1100 && code <= 0x115f) ||
-		code === 0x2329 ||
-		code === 0x232a ||
-		(code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
-		(code >= 0xac00 && code <= 0xd7a3) ||
-		(code >= 0xf900 && code <= 0xfaff) ||
-		(code >= 0xfe30 && code <= 0xfe6f) ||
-		(code >= 0xff00 && code <= 0xff60) ||
-		(code >= 0xffe0 && code <= 0xffe6) ||
-		(code >= 0x1f300 && code <= 0x1f64f) ||
-		(code >= 0x1f900 && code <= 0x1f9ff) ||
-		(code >= 0x20000 && code <= 0x3fffd)
-	) {
-		return 2;
-	}
-	return 1;
-}
-
-/** Visible terminal width of a string, ignoring ANSI escapes. */
-export function visibleWidth(text: string): number {
-	const plain = text.replace(ANSI_PATTERN, "");
-	let width = 0;
-	for (const char of plain) width += codePointWidth(char.codePointAt(0) ?? 0);
-	return width;
-}
-
-/**
- * Truncate to a visible width and mark the cut with an ellipsis. Truncate the
- * plain text before you add color, so no escape sequence is cut in half.
- */
-export function truncateToWidth(text: string, width: number): string {
-	if (!Number.isFinite(width) || width <= 0) return "";
-	if (visibleWidth(text) <= width) return text;
-	let out = "";
-	let used = 0;
-	for (const char of text) {
-		const size = codePointWidth(char.codePointAt(0) ?? 0);
-		if (used + size > width - 1) break;
-		out += char;
-		used += size;
-	}
-	return `${out}…`;
-}
-
-/** Short human duration: `45s`, `3m12s`, `1h04m`. */
-export function formatDuration(seconds: number): string {
-	const total = Math.max(0, Math.floor(seconds));
-	if (total < 60) return `${total}s`;
-	const minutes = Math.floor(total / 60);
-	if (minutes < 60) return `${minutes}m${String(total % 60).padStart(2, "0")}s`;
-	return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
-}
-
-/** One display marker per node or agent status. */
-export function statusMarker(status: string): string {
-	switch (status) {
-		case "running":
-			return "●";
-		case "done":
-			return "✓";
-		case "failed":
-			return "✗";
-		case "interrupted":
-		case "paused":
-			return "⏸";
-		case "recorded":
-			return "◆";
-		default:
-			return "·";
-	}
-}
-
-function fit(text: string, options: RenderProgressOptions): string {
-	if (!options.width || options.width <= 0) return text;
-	return truncateToWidth(text, options.width);
-}
-
-function lastToolText(progress: SubagentProgress): string | undefined {
-	if (!progress.lastTool) return undefined;
-	const args = progress.lastToolArgs ? ` ${progress.lastToolArgs}` : "";
-	const text = `${progress.lastTool}${args}`;
-	return text.length > 60 ? `${text.slice(0, 59)}…` : text;
-}
-
-/** One agent row: state, node, elapsed, counters, current tool or stall. */
-export function renderAgentLine(
-	agent: ProgressAgent,
-	options: RenderProgressOptions = {},
-): string {
-	const color = options.color ?? ((_name: string, text: string) => text);
-	const progress = agent.progress;
-	const now = options.now ?? Date.now() / 1000;
-	const end = agent.status === "running" ? now : (agent.finishedAt ?? progress.updatedAt);
-	const elapsed = Math.max(0, end - progress.startedAt);
-	const bits = [formatDuration(elapsed)];
-	if (progress.turns) bits.push(`${progress.turns} turns`);
-	if (progress.toolCalls) bits.push(`${progress.toolCalls} tools`);
-	if (progress.toolCalls && typeof progress.toolSeconds === "number") {
-		const tool = Math.max(0, progress.toolSeconds);
-		const thinking = Math.max(0, elapsed - tool);
-		bits.push(`tool ${formatDuration(tool)} / thinking ${formatDuration(thinking)}`);
-	}
-	let name = "muted";
-	if (agent.status === "running") {
-		const age = Math.max(0, now - progress.updatedAt);
-		if (age > (options.stalledAfterSeconds ?? 5)) {
-			bits.push(`⚠ stalled ${formatDuration(age)}`);
-			name = "warning";
-		} else {
-			name = "accent";
-			const tool = lastToolText(progress);
-			if (tool) {
-				let label = tool;
-				if (typeof progress.toolStartedAt === "number") {
-					const toolAge = Math.max(0, now - progress.toolStartedAt);
-					if (toolAge >= 1) label = `${tool} (${formatDuration(toolAge)})`;
-				}
-				bits.push(label);
-			}
-		}
-	} else if (agent.status === "done") {
-		name = "success";
-	} else if (agent.status === "failed") {
-		name = "error";
-	} else {
-		name = "warning";
-	}
-	const text = `${statusMarker(agent.status)} ${agent.node} ${agent.agent}  ${bits.join(" · ")}`;
-	return color(name, fit(text, options));
-}
-
-/**
- * A wave's display status. Derive it from the live node statuses, because the
- * cached `wave.status` in `state.json` is only refreshed on a replan and lags
- * a worker that just started.
- */
-function waveStatus(wave: ProgressWave, nodes: ProgressNode[]): string {
-	const byId = new Map(nodes.map((node) => [node.id, node.status]));
-	const statuses = wave.members.map((id) => byId.get(id) ?? "pending");
-	if (!statuses.length) return wave.status || "pending";
-	if (statuses.every((status) => status === "done")) return "done";
-	if (statuses.some((status) => status === "failed")) return "failed";
-	const active = statuses.some(
-		(status) =>
-			status === "running" ||
-			status === "recorded" ||
-			status === "paused" ||
-			status === "interrupted",
-	);
-	return active ? "running" : "pending";
-}
-
-/** The window of waves around the current one, so the busy wave stays visible. */
-function waveWindow(
-	waves: ProgressWave[],
-	current: number,
-	maxWaves: number,
-): ProgressWave[] {
-	if (maxWaves <= 0) return [];
-	if (waves.length <= maxWaves) return waves;
-	const position = waves.findIndex((wave) => wave.index === current);
-	const currentPosition = position >= 0 ? position : 0;
-	const start = Math.max(0, Math.min(currentPosition, waves.length - maxWaves));
-	return waves.slice(start, start + maxWaves);
-}
-
-/**
- * The campaign-level metrics line: elapsed, the tool and thinking split, and
- * the slowest tool by total time. Returns undefined when there is no data.
- */
-function buildMetricsLine(
-	agents: ProgressAgent[],
-	elapsed: number,
-	now: number,
-	options: RenderProgressOptions,
-): string | undefined {
-	let wall = 0;
-	let tool = 0;
-	const toolTotals: Record<string, number> = {};
-	for (const agent of agents) {
-		const progress = agent.progress;
-		const end = agent.status === "running" ? now : (agent.finishedAt ?? progress.updatedAt);
-		wall += Math.max(0, end - progress.startedAt);
-		tool += Math.max(0, progress.toolSeconds ?? 0);
-		for (const [name, seconds] of Object.entries(progress.toolDurations ?? {})) {
-			toolTotals[name] = (toolTotals[name] ?? 0) + seconds;
-		}
-	}
-	const bits: string[] = [];
-	if (elapsed >= 1) bits.push(formatDuration(elapsed));
-	if (wall > 0 && tool > 0) {
-		const percent = Math.min(100, Math.max(0, Math.round((tool / wall) * 100)));
-		bits.push(`tools ${percent}%`);
-		bits.push(`thinking ${100 - percent}%`);
-	}
-	const slowest = Object.entries(toolTotals).sort((a, b) => b[1] - a[1])[0];
-	if (slowest && slowest[1] >= 1) {
-		bits.push(`slowest ${slowest[0]} ${formatDuration(slowest[1])}`);
-	}
-	if (!bits.length) return undefined;
-	return `⏱ ${bits.join(" · ")}`;
-}
-
-/**
- * Render the whole live view: a header, one aggregate line, an optional metrics
- * line, one row per subagent, then a window of the wave projection. Pure and
- * allocation-light.
- *
- * The result never exceeds `maxLines` (default 10, pi's widget limit), so the
- * view is never truncated and the current wave is always one of the rows.
- */
-export function renderProgress(
-	snapshot: ProgressSnapshot,
-	options: RenderProgressOptions = {},
-): string[] {
-	const color = options.color ?? ((_name: string, text: string) => text);
-	const agents = snapshot.agents ?? [];
-	const nodes = snapshot.nodes ?? [];
-	const waves = snapshot.waves ?? [];
-	if (!agents.length && !nodes.length && !waves.length) {
-		return [color("dim", "sliceme: no plan")];
-	}
-	const now = snapshot.now;
-	const maxLines = Math.max(3, options.maxLines ?? 10);
-	const showMetrics = options.showMetrics ?? true;
-	const running = agents.filter((agent) => agent.status === "running");
-	const finished = agents
-		.filter((agent) => agent.status !== "running")
-		.sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
-	const candidates = [...running, ...finished];
-
-	const total = nodes.length || agents.length;
-	const counted: Array<{ status: string }> = nodes.length ? nodes : agents;
-	const done = counted.filter((item) => item.status === "done").length;
-	const failed = counted.filter((item) => item.status === "failed").length;
-
-	const start = agents.reduce(
-		(min, agent) => Math.min(min, agent.progress.startedAt || now),
-		Number.POSITIVE_INFINITY,
-	);
-	const elapsed = Number.isFinite(start) ? now - start : 0;
-	const metricsLine = showMetrics ? buildMetricsLine(agents, elapsed, now, options) : undefined;
-	const metricsRows = metricsLine ? 1 : 0;
-
-	// Reserve wave rows first: late in a long campaign the current wave is the
-	// most useful line, and pi would otherwise cut it off after the first ten.
-	const statuses = waves.map((wave) => waveStatus(wave, nodes));
-	const activeIndex = statuses.findIndex((status) => status !== "done");
-	const current =
-		snapshot.currentWave ?? (activeIndex >= 0 ? waves[activeIndex].index : waves.length);
-	const waveCap = Math.max(0, Math.min(options.maxWaves ?? 4, maxLines - 2 - metricsRows));
-	const waveRows = waveWindow(waves, current, waveCap);
-	const agentSlots = Math.max(
-		0,
-		Math.min(options.maxAgents ?? 8, maxLines - 2 - metricsRows - waveRows.length),
-	);
-	const shown = candidates.slice(0, agentSlots);
-
-	const lines: string[] = [];
-	const header = `sliceme${snapshot.campaign ? ` · ${snapshot.campaign}` : ""}`;
-	lines.push(color("accent", fit(header, options)));
-
-	const summary: string[] = [];
-	if (waves.length) {
-		summary.push(`wave ${Math.min(current + 1, waves.length)}/${waves.length}`);
-	}
-	summary.push(`${done}/${total} done`);
-	if (running.length) summary.push(`${running.length} running`);
-	if (failed) summary.push(`${failed} failed`);
-	if (!showMetrics && elapsed >= 1) summary.push(formatDuration(elapsed));
-	lines.push(color("muted", fit(summary.join(" · "), options)));
-	if (metricsLine) lines.push(color("muted", fit(metricsLine, options)));
-
-	const rowWidth = options.width && options.width > 2 ? options.width - 2 : options.width;
-	const rows = shown.map(
-		(agent) => `  ${renderAgentLine(agent, { ...options, width: rowWidth, now })}`,
-	);
-	const hiddenAgents = candidates.length - shown.length;
-	// Replace a finished row with the marker; never hide a running worker, which
-	// always sorts first.
-	if (hiddenAgents > 0 && rows.length > running.length) {
-		rows[rows.length - 1] = color("dim", fit(`  … ${hiddenAgents + 1} more`, options));
-	}
-	lines.push(...rows);
-
-	const byId = new Map(nodes.map((node) => [node.id, node.status]));
-	for (const wave of waveRows) {
-		const members = wave.members
-			.map((id) => `${statusMarker(byId.get(id) ?? "pending")} ${id}`)
-			.join("  ");
-		// Display waves one-based, the same as the aggregate line.
-		lines.push(
-			color("dim", fit(`─ wave ${wave.index + 1} [${waveStatus(wave, nodes)}]  ${members}`, options)),
-		);
-	}
-	return lines;
 }

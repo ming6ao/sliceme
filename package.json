@@ -37,7 +37,7 @@
     "docs/",
     "integrations/pi/agents/",
     "integrations/pi/common.ts",
-    "integrations/pi/unit.ts",
+    "integrations/pi/campaign-resource.ts",
     "integrations/pi/coordinator.ts",
     "!sliceme/__pycache__",
     "!sliceme/**/*.pyc",
@@ -45,7 +45,6 @@
   ],
   "pi": {
     "extensions": [
-      "./integrations/pi/unit.ts",
       "./integrations/pi/coordinator.ts"
     ],
     "skills": []
@@ -55,7 +54,13 @@
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
+    "pi-subagents": "*",
     "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "pi-subagents": {
+      "optional": true
+    }
   },
   "publishConfig": {
     "access": "public"

@@ -4,10 +4,9 @@ These pin the contract of ``docs/multi-campaign.md``:
 
 * one plane holds several campaigns, each with its own target branch, worktree,
   DAG, and review queue;
-* candidates, jobs, attempts, and review rows stay scoped to one campaign;
+* candidates, checks, and review rows stay scoped to one campaign;
 * a delivery marks only its own campaign landed;
-* the campaign registry migrates an old one-campaign plane;
-* the review server can serve either campaign.
+* the campaign registry migrates an old one-campaign plane.
 """
 
 import os
@@ -249,8 +248,6 @@ class CleanupTests(MultiCampaignCase):
         write_json(campaign.state_path(self.root, branch), {"nodes": {}})
         write_json(campaign.session_path(self.root, branch), {"status": "suspended"})
         write_json(campaign.control_path(self.root, branch), {"pause": True})
-        campaign.events_path(self.root, branch).write_text('{"kind":"x"}\n')
-        campaign.heartbeat_path(self.root, branch, "w1").write_text("{}\n")
         campaign.worker_log_path(self.root, branch, "w1").write_text("log\n")
         campaign.report_path(self.root, branch).write_text("# report\n")
         return [
@@ -258,8 +255,6 @@ class CleanupTests(MultiCampaignCase):
             campaign.state_path(self.root, branch),
             campaign.session_path(self.root, branch),
             campaign.control_path(self.root, branch),
-            campaign.events_path(self.root, branch),
-            campaign.heartbeat_path(self.root, branch, "w1"),
             campaign.worker_log_path(self.root, branch, "w1"),
         ]
 
@@ -353,15 +348,14 @@ class CleanupTests(MultiCampaignCase):
     def test_prune_keeps_every_registered_campaign(self):
         svc = self.service()
         try:
-            svc.store.add_comment(branch_key="feat--x", body="keep x")
-            svc.store.add_comment(branch_key="feat--y", body="keep y")
-            svc.store.add_comment(branch_key="feat--gone", body="drop me")
+            for key in ("feat--x", "feat--y", "feat--gone"):
+                svc.store.add_review_decision(branch_key=key, action="approve")
             svc.store.conn.commit()
             # Force every row past the retention window.
-            svc.store.conn.execute("UPDATE comments SET created_at=0")
+            svc.store.conn.execute("UPDATE review_decisions SET created_at=0")
             svc.store.conn.commit()
             svc._prune_reviews()
-            kept = {c["branch_key"] for c in svc.store.list_comments()}
+            kept = {d["branch_key"] for d in svc.store.list_review_decisions()}
             self.assertIn("feat--x", kept)
             self.assertIn("feat--y", kept)
             self.assertNotIn("feat--gone", kept)
@@ -404,40 +398,6 @@ class MigrationTests(MultiCampaignCase):
             self.assertEqual(len(svc.store.list_campaigns()), 2)
         finally:
             svc.close()
-
-
-class ReviewServerTests(MultiCampaignCase):
-    def test_server_lists_and_serves_both_campaigns(self):
-        self.record("feat/x", "feat/x")
-        self.record("feat/y", "feat/y", content_a="a = 3\n")
-        from sliceme.review import api
-        from sliceme.review.server import build_server
-
-        server = build_server([self.root])
-        try:
-            key = next(iter(server.plane_keys))
-            keys = {c["key"] for c in server.campaign_list(key)}
-            self.assertEqual(keys, {"feat--x", "feat--y"})
-            for campaign_key in ("feat--x", "feat--y"):
-                service = server.service_for(key, campaign_key)
-                snapshot = api.state(service, {})
-                self.assertEqual(snapshot["branch_key"], campaign_key)
-                self.assertTrue(snapshot["commits"])
-        finally:
-            server.server_close()
-
-    def test_server_can_pin_one_campaign(self):
-        self.record("feat/x", "feat/x")
-        self.record("feat/y", "feat/y", content_a="a = 3\n")
-        from sliceme.review.server import build_server
-
-        server = build_server([self.root], campaign="feat--y")
-        try:
-            key = next(iter(server.plane_keys))
-            self.assertEqual(server.pinned_campaign, "feat--y")
-            self.assertEqual(server.campaign_list(key)[0]["key"], "feat--x")
-        finally:
-            server.server_close()
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import campaign, gitutil, pullrequest
-from .ownership import DEFAULT_WAVE_SIZE, plan_dag_waves
+from .ownership import DEFAULT_WAVE_SIZE, plan_dag_waves, strongest_gpu_tier
 from .store import Store
 from .util import SlicemeError, scratch_dir
 from .verifier import CheckResult, checks_from_config, run_checks
@@ -170,23 +170,40 @@ def _conflict_detail(outcome: gitutil.MergeOutcome) -> str:
     return "merge conflict: " + last
 
 
-def _check_results(job: dict[str, Any]) -> list[CheckResult]:
-    """Rebuild the per-check evidence the executor persisted on *job*."""
-    raw = job.get("results")
+def _check_results(row: dict[str, Any]) -> list[CheckResult]:
+    """Rebuild the per-check evidence the runner persisted on *row*."""
+    raw = row.get("results")
     if not raw:
         return []
     return [CheckResult(**item) for item in json.loads(raw)]
 
 
-def _delivery_executor(
+def _delivery_checks(
     store: Store, root: Path, config: dict[str, Any], campaign_key: str | None
 ):
-    """The single executor, for the plane's trusted checks before a push."""
-    from .executor import Executor
+    """The single check runner, for the plane's trusted checks before a push."""
+    from .checks import CheckRunner
 
     branch = config.get("main_branch")
     dag = campaign.load_dag(root, branch) if branch else None
-    return Executor(root, store, config, dag=dag, campaign=campaign_key)
+    return CheckRunner(root, store, config, dag=dag, campaign=campaign_key)
+
+
+def _delivery_gpu(
+    store: Store, root: Path, config: dict[str, Any], campaign_key: str | None
+) -> str:
+    """The strongest GPU tier among the campaign's prepared nodes."""
+    branch = config.get("main_branch")
+    dag = campaign.load_dag(root, branch) if branch else None
+    by_id = {str(node["id"]): node for node in (dag or {}).get("nodes") or []}
+    member_nodes = [
+        by_id[str(candidate["node"])]
+        for candidate in store.list_candidates(
+            statuses=["prepared"], campaign=campaign_key
+        )
+        if candidate.get("node") and str(candidate["node"]) in by_id
+    ]
+    return strongest_gpu_tier(member_nodes)
 
 
 def deliver_pull_request(
@@ -238,25 +255,22 @@ def deliver_pull_request(
             )
         ]
 
-    # The trusted checks run through the single executor, not beside it: a
-    # submit whose fingerprint already reached a terminal verdict is honored
-    # as cached (DEC-3), and the single drain serializes the run.
+    # The trusted checks run through the single check runner: a fingerprint
+    # that already reached a terminal verdict is honored as cached, so a
+    # resumed campaign re-verifies from the cache instead of re-running.
     checks: list[CheckResult] = []
     if run_checks_flag:
         specs = checks_from_config(config)
         if specs:
-            executor = _delivery_executor(store, root, config, campaign)
-            submitted = executor.submit(
+            runner = _delivery_checks(store, root, config, campaign)
+            row = runner.run(
                 source="deliver",
                 commit=source_head,
                 checks=specs,
-                priority=1,
+                gpu=_delivery_gpu(store, root, config, campaign),
             )
-            if not submitted["cached"]:
-                executor.drain()
-            job = executor.wait(submitted["job"]["id"], timeout=3600.0)
-            checks = _check_results(job)
-            if job["status"] != "passed":
+            checks = _check_results(row)
+            if row["status"] != "passed":
                 return [
                     LandResult(
                         status="failed",

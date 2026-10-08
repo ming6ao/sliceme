@@ -319,5 +319,29 @@ class ConfigMigrationTests(CampaignCase):
         self.assertEqual(cfg["default_branch"], "main")
 
 
+class CurrentWaveAdvanceTests(CampaignCase):
+    def test_ready_advances_past_a_recorded_wave(self):
+        # Nothing writes state.json, so the current wave is derived from the
+        # recorded candidates in SQLite.  Before the fix this stayed on wave 0.
+        self.campaign_plane()
+        self.dag(
+            [
+                {"id": "w1", "owns": ["dir:src"], "depends_on": []},
+                {"id": "w2", "owns": ["dir:docs"], "depends_on": ["w1"]},
+            ]
+        )
+        before = self.svc.ready()
+        self.assertEqual(before["wave"], 0)
+        self.assertEqual(before["ready"], ["w1"])
+        self.assertEqual(self.svc.current_wave_index(), 0)
+
+        self.record(0, {"src/a.py": "a = 2\n"})
+
+        after = self.svc.ready()
+        self.assertEqual(after["wave"], 1)
+        self.assertEqual(after["ready"], ["w2"])
+        self.assertEqual(self.svc.current_wave_index(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

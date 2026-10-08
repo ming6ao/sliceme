@@ -12,7 +12,9 @@ only authored schedule; a wave is a maximal set of nodes that may run
 concurrently (each in its own worktree) and do not conflict on any owned
 directory. A node is never placed earlier than ``max(wave(dep) + 1)``, so every
 dependency is integrated before its dependents start. The per-wave size is
-capped by ``concurrency`` (default 3).
+capped by ``concurrency`` (default 3). A node that needs a GPU runner
+(``gpu`` other than ``none``) conflicts with every other node, so it lands in a
+wave of its own and exactly one GPU node runs at a time.
 
 Canonical ownership form:
 
@@ -146,12 +148,37 @@ def node_owns(node: dict[str, Any]) -> list[str]:
     return parse_owns(node.get("owns") or [])
 
 
+#: The one GPU tier that does not need a runner. Any other value means the
+#: node needs a GPU, so the scheduler serializes it into a wave of its own.
+_NO_GPU = "none"
+
+
+def _gpu_tier(node: dict[str, Any]) -> str:
+    """The node's GPU tier; an unset or empty field means ``none``."""
+    return str(node.get("gpu") or _NO_GPU)
+
+
+def strongest_gpu_tier(nodes: list[dict[str, Any]]) -> str:
+    """The strongest ``gpu`` tier among *nodes* (``none`` < ``T1`` < ``T2``)."""
+    tiers = [_gpu_tier(node) for node in nodes]
+    return max(tiers, key=lambda tier: _GPU_RANK.get(tier, 0)) if tiers else _NO_GPU
+
+
 def _conflict_reason(a: dict[str, Any], b: dict[str, Any]) -> str | None:
     """Return a human reason when nodes *a* and *b* must not share a wave.
 
     When *a* is compared against *b*, *b* is already placed and *a* is the
     candidate moving later, so the message names the blocker (*b*).
+
+    A GPU node conflicts with every other node, so it lands in a wave of its
+    own and exactly one GPU node runs at a time. Directory ownership adds the
+    strict subtree conflict on top.
     """
+    if _gpu_tier(a) != _NO_GPU or _gpu_tier(b) != _NO_GPU:
+        return (
+            f"GPU isolation: '{_node_id(a)}' and '{_node_id(b)}' cannot share a "
+            "wave (a GPU node runs alone)"
+        )
     owns_a = node_owns(a)
     if not owns_a:
         return None
@@ -228,6 +255,8 @@ def plan_dag_waves(
     * is at least ``max(wave(dep) + 1)`` for every dependency,
     * has room under ``wave_size``, and
     * contains no node whose owned directories overlap (strict subtree rule).
+
+    A GPU node conflicts with every node, so it only ever lands in a wave alone.
     """
     if wave_size < 1:
         raise SlicemeError("wave_size (concurrency) must be >= 1")
@@ -439,5 +468,6 @@ __all__ = [
     "path_within_owns",
     "plan_dag_waves",
     "readiness",
+    "strongest_gpu_tier",
     "validate_dag",
 ]

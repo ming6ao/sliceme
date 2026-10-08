@@ -1,133 +1,57 @@
 # Sliceme observability
 
-Status: implemented. This document describes the live view and the durable time
-and tool metrics for one campaign.
+Status: implemented. This document describes what the engine reports about a
+campaign, and where child-run state lives.
 
 ## 1. Purpose
 
 While a campaign runs, the coordinator and a second terminal answer these
-questions:
+questions from the engine:
 
 1. How many waves and nodes exist, and which wave is current?
-2. Which work units run, wait, finish, or fail?
-3. What does each subagent do now, and for how long?
-4. Where does the time go, by agent role, by tool, and by command?
-5. Which tools and which commands take the longest?
-6. What is the verification cost?
+2. Which nodes are ready, running, done, or failed?
+3. Is the campaign paused?
+4. How many checks passed, failed, or stopped with an error?
+5. What does the final report say?
 
-The live view is a pi widget. The durable view is the `progress` action.
+The engine answers questions 1 to 4 through the `status` and `ready` verbs. The
+report answers question 5. Child execution detail belongs to pi-subagents.
 
 ## 2. The data
 
-Two durable stores and one live signal feed the view.
+The engine keeps one durable store and two files.
 
-- **`attempts` table.** One row per subagent run. It holds the wall clock, the
-  tool seconds, the tool and command durations, the turns, the tool calls, the
-  tokens, the cost, and the exit code.
-- **Heartbeat file.** `runSubagent` writes
-  `.sliceme/<branch-key>.progress_<node>.json` at most once per second while a
-  subagent runs. It holds the same counters plus the last tool and the last
-  text.
-- **`jobs` table.** The executor check time and the queue wait.
-- **Live reducer.** `runSubagent` folds the `pi --mode json` stream into one
-  `SubagentProgress` snapshot and emits it for every event.
+- **`checks` table.** One terminal row per check run: the fingerprint, the
+  source, the commit, the status, the duration, the exit code, and the output.
+  The row serves `check --current`, the review evidence, and the delivery path.
+- **`state.json`.** An optional, read-only legacy override that holds per-node
+  status, the current wave, and the wave list. The engine never writes it; the
+  engine reads it only when a legacy file is present. Git plus `state.db` are
+  authoritative.
+- **The report.** `.sliceme/<branch-key>.report.md`, written by
+  `review --report`.
 
-The heartbeat file uses snake_case. The in-memory snapshot uses camelCase.
+The engine keeps no per-child progress file, no `events.jsonl`, and no
+heartbeat. pi-subagents owns the live child status, the events, and the control
+surface.
 
-### 2.1 Time split
+### 2.1 Check counts
 
-- **Wall clock:** `finished_at - started_at`.
-- **Tool time:** the sum of every tool call duration.
-- **Thinking time:** the wall clock minus the tool time. It includes the
-  provider connection and the response streaming.
+`status` returns a `checks` block from `Store.check_counts(campaign=key)`: the
+number of terminal rows per status. The block is the cache health of one
+campaign, not a queue. A `cached` result on a `check --current` reply means the
+fingerprint already had a terminal row.
 
-`runSubagent` pairs `tool_execution_start` and `tool_execution_end` by
-`toolCallId`. Pi can run tool calls from one message at the same time, so the
-id is the only correct key.
+## 3. The status projections
 
-### 2.2 Commands
+### 3.1 The dense summary
 
-A command groups by program name only: the first token, after a leading
-`cd <dir> &&` and any `NAME=value` assignments. For example,
-`tools/nanochat build //src:tokenizer` groups as `tools/nanochat`.
-
-The reducer caps the command map at 200 keys per run. The least costly keys
-merge into `(other)`.
-
-### 2.3 Verifier and executor accounting
-
-A verifier tool call is a real tool call. It folds into the tool rollup and is
-tagged with the `agent` role. The executor check time stays in the
-`verification` block, because the executor is not a pi subagent.
-
-## 3. The live view
-
-One registry and one render timer per coordinator process compose the widget.
-`renderProgress` is pure. The timer runs at 4 hertz, so elapsed time advances
-between events.
-
-Pi limits the widget to ten lines. It shows:
-
-- a header;
-- an aggregate line (wave, done, running, failed);
-- a metrics line: elapsed, tools percent, thinking percent, slowest tool;
-- one row per running subagent: elapsed, turns, tools, the tool and thinking
-  split, and the active tool with its age;
-- a window of waves around the current wave.
-
-A silent running row shows `⚠ stalled` after five seconds. The `spawn` tool
-also streams its own row through `onUpdate`.
-
-## 4. The durable view
-
-```bash
-sliceme progress [--node ID] [--campaign REF]
-```
-
-The action joins the DAG waves, `state.json`, `attempts`, `jobs`, and the
-heartbeat files. It prints one stable JSON document, or a human summary. The
-`--node` flag narrows the view to one node.
-
-Abridged output:
-
-```json
-{
-  "totals": {
-    "nodes": 8, "done": 4, "running": 1, "pending": 3,
-    "elapsed": 6531.2, "wall_seconds": 5162.0,
-    "tool_seconds": 700.0, "thinking_seconds": 4462.0,
-    "turns": 120, "tool_calls": 340,
-    "tokens_in": 800000, "tokens_out": 200000, "cost": 3.1,
-    "queue_wait_seconds": 1.6
-  },
-  "by_agent": {
-    "worker":   {"tool_seconds": 600.0, "thinking_seconds": 4000.0},
-    "verifier": {"tool_seconds": 100.0, "thinking_seconds": 462.0}
-  },
-  "tools": [
-    {"tool": "bash", "seconds": 540.0, "calls": 200, "avg": 2.7,
-     "by_agent": {"worker": 480.0, "verifier": 60.0}}
-  ],
-  "commands": [
-    {"command": "tools/nanochat", "tool": "bash", "seconds": 190.0, "calls": 3}
-  ],
-  "verification": {"executor_seconds": 220.0, "pass_rate": 0.8},
-  "nodes": [
-    {"id": "w1", "wave": 0, "status": "running", "tool_seconds": 260.0,
-     "thinking_seconds": 210.0, "turns": 34, "tool_calls": 44,
-     "heartbeat_age": 1.2, "stalled": false}
-  ],
-  "executor": {"queued": 0, "running": 1, "passed": 4}
-}
-```
-
-### 4.1 The dense status summary
-
-The default human `sliceme status` output is the **dense summary**, mirroring the
-pi coordinator's `summarise`: a header, one line per node in DAG order, and one
-line per wave. Its node and wave lines derive from `dag.json` and `state.json`
-(the same plan the scheduler uses); the header's `target`/`worktree` come from
-the plane config, so a second terminal sees the same plan.
+The default human `sliceme status` output is the **dense summary**: a header,
+one line per node in DAG order, and one line per wave. Its node and wave lines
+come from `dag.json`, git, and the recorded candidates in `state.db`. The
+engine uses `state.json` only as an optional, read-only legacy override. The
+header's `target`/`worktree` come from the campaign config, so a second terminal
+sees the same plan.
 
 ```text
 campaign: dense
@@ -140,39 +64,69 @@ wave 0 [done]: w1
 wave 1 [pending]: w2
 ```
 
-`--dense` asks for it explicitly; `--verbose` prints the full nested dump.
-With `--json` the default is the nested dump, while `--dense --json` emits the
-summary as JSON (the `lines` array is the same text). A plane with no single
+`--dense` asks for it explicitly; `--verbose` prints the full nested dump. With
+`--json` the default is the nested dump, while `--dense --json` emits the
+summary as JSON (the `lines` array holds the same text). A plane with no single
 campaign falls back to a compact per-campaign plane list.
 
-## 5. Stalled detection
+### 3.2 The nested dump
 
-Sliceme marks a running node stalled when its heartbeat is older than five
-seconds. A finished node is never stalled. Stalled is a display state. It does
-not change `state.json` and does not fail a node.
+`status --verbose` or `status --json` returns the nested view:
+
+- `dag_waves` (the scheduler's wave plan) and `dag_waves_error`;
+- `ready` (the ready node ids) and `paused`;
+- `checks` (the terminal-check counts);
+- `units` and `candidates` with their `node`, `log`, `candidate`, and
+  `verification` columns;
+- `sandbox` (the resolved gate);
+- `dag_merge` (the same-ownership contraction).
+
+### 3.3 The loop read
+
+`ready` returns the small object the workflow resource polls: `campaign`,
+`ready`, `wave`, and `paused`. The engine computes `paused` from the
+`<branch-key>.control.json` pause flag, so the sandbox needs no file access.
+
+## 4. The simulation
+
+`sliceme status --simulate` groups prepared candidates into DAG waves,
+materializes each wave's combined tree, and runs the configured checks once over
+the combined result. `--no-checks` plans only. The simulation is a dry run: it
+changes no candidate, no branch, and no target.
+
+## 5. Where child state lives
+
+The `sliceme.campaign` workflow resource launches each child through
+pi-subagents. pi-subagents owns the child status, the event stream, the tool
+scoping, and the run control. The engine receives only JSON from `runs.host`,
+so it never reads a child's live state.
+
+A wave with a stalled or failed child shows up as a node that never reaches
+`recorded`. The coordinator reads `ready` again after the wave children settle,
+and the next `record` attributes the changes that exist.
 
 ## 6. Constraints
 
-- **No daemon.** Poll `sliceme progress`. Do not add `--follow`.
-- **Bounded cost.** Debounce the heartbeat writes, use one render timer, and
-  bound the command map.
-- **Approximate cost.** The token and cost figures are rollups of the provider
-  usage.
-- **Private metrics.** The token and cost data stay under the git-excluded
+- **No daemon.** Poll `sliceme status` or `ready`. Do not add `--follow`.
+- **One synchronous runner.** The check runner writes one terminal row per run,
+  so the count stays exact.
+- **Rebuildable.** `state.json` is an optional, read-only legacy override that
+  the engine never writes. Git and `state.db` win on conflict, so a stale
+  `status` read self-corrects on the next call.
+- **Private.** The check output and the report stay under the git-excluded
   `.sliceme/`.
 
 ## 7. Tests
 
-- `tests/render_progress_test.mjs` drives the renderer with fixed snapshots.
-- `tests/metrics_test.mjs` drives the reducer helpers with a fixed event list.
-- `tests/test_progress.py` drives the `progress` projection.
 - `tests/test_status_summary.py` drives the dense `status` summary.
-- `tests/test_sessions.py` covers the `attempts` columns and the migration.
-- `tests/test_cli.py` drives `attempt --end` and `progress`.
-- `tests/test_pi_package.py` checks the wiring and the action lockstep.
+- `tests/test_checks.py` drives the check cache and `status` check counts.
+- `tests/test_sessions.py` covers the `checks` columns and the migration.
+- `tests/test_cli.py` drives the `status` modes.
+- `tests/test_pi_package.py` checks the wiring and the resource grants.
 
 ## 8. Related work
 
-- `docs/sessions.md` uses the `attempts` table for suspend and resume.
+- `docs/sessions.md` describes suspend and resume.
 - `docs/database.md` documents the schema.
-- `docs/reference.md` documents the `attempt` and `progress` actions.
+- `docs/reference.md` documents the `status`, `ready`, `check`, and `review`
+  actions.

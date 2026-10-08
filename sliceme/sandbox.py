@@ -19,9 +19,9 @@ plane ``policy.sandbox`` > discovered project manifest > ``none``.  ``none`` is
 unsandboxed; a campaign that sets ``policy.require_sandbox`` or
 ``dag.json.sandbox_required`` fails closed when no profile exists.
 
-The GPU broker is **sliceme's**, not the target project's.  For a GPU job the
-executor composes ``broker -> sandbox -> acceptance``: the project may override
-the broker through ``gpu.command`` in its manifest.
+The GPU runner is **sliceme's**, not the target project's.  For a GPU check the
+runner composes ``gpu runner -> sandbox -> acceptance``: the project may
+override the runner through ``gpu.command`` in its manifest.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ _BACKENDS = {"bwrap": "bwrap", "unshare": "unshare"}
 
 @dataclass(frozen=True)
 class Sandbox:
-    """How a check command is isolated by the executor."""
+    """How a check command is isolated by the synchronous check runner."""
 
     mode: str = "none"
     network: bool = True
@@ -253,12 +253,16 @@ def is_required(dag: dict[str, Any] | None, config: dict[str, Any] | None) -> bo
     return bool(policy.get("require_sandbox")) or bool((dag or {}).get("sandbox_required"))
 
 
-def default_gpu_broker() -> str | None:
-    """The bundled sliceme GPU broker, resolved by package path (never cwd-relative)."""
+def default_gpu_runner() -> str | None:
+    """The bundled sliceme GPU runner, resolved by package path (never cwd-relative)."""
     candidate = Path(__file__).resolve().parent.parent / "tools" / "gpu.sh"
     if candidate.is_file():
         return str(candidate)
     return shutil.which("sliceme-gpu")
+
+
+# Deprecated alias kept for compatibility; read default_gpu_runner first.
+default_gpu_broker = default_gpu_runner
 
 
 def _validate_executable(token: str, root: Path | str | None, what: str) -> None:
@@ -287,10 +291,10 @@ def validate_sandbox(
     """
     if sandbox.command:
         _validate_executable(sandbox.command[0], root, "sandbox command")
-    if gpu_required and not sandbox.gpu_command and not default_gpu_broker():
+    if gpu_required and not sandbox.gpu_command and not default_gpu_runner():
         raise SlicemeError(
             "a GPU job was requested but no GPU runner is configured; add "
-            "gpu.command to the sandbox manifest or install the sliceme broker"
+            "gpu.command to the sandbox manifest or install the sliceme GPU runner"
         )
 
 
@@ -330,7 +334,7 @@ def wrap_command(
     worktree: str | None = None,
     tier: str = "none",
 ) -> str:
-    """Wrap a shell *command* in the sandbox (and GPU broker) prefix.
+    """Wrap a shell *command* in the sandbox (and GPU runner) prefix.
 
     ``none`` returns the command unchanged.  A requested backend that is not
     installed is a hard error (fail closed), never a silent downgrade.
@@ -358,17 +362,17 @@ def _wrap_isolation(command: str, sandbox: Sandbox, worktree: str | None) -> str
 
 
 def _wrap_gpu(inner: str, sandbox: Sandbox, tier: str) -> str:
-    # The broker runs *outside* the sandbox: it needs the host lock and
+    # The GPU runner runs *outside* the sandbox: it needs the host lock and
     # nvidia-smi, then hands the sandbox-wrapped command to the device.
     prefix = list(sandbox.gpu_command)
     if not prefix:
-        broker = default_gpu_broker()
-        if not broker:
+        runner = default_gpu_runner()
+        if not runner:
             raise SlicemeError(
                 "GPU job requested but no GPU runner is configured; add "
                 "gpu.command to the sandbox manifest"
             )
-        prefix = [broker, "--tier", "{tier}", "--"]
+        prefix = [runner, "--tier", "{tier}", "--"]
     prefix = [part.replace("{tier}", tier) for part in prefix]
     parts = [*prefix, "/bin/sh", "-lc", inner]
     return " ".join(shlex.quote(part) for part in parts)
@@ -414,6 +418,7 @@ __all__ = [
     "backend_available",
     "coerce_sandbox",
     "default_gpu_broker",
+    "default_gpu_runner",
     "discover_sandbox",
     "find_manifest",
     "is_required",

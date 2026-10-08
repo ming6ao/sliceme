@@ -5,12 +5,11 @@ branch and opens one pull request against the target feature branch.  The
 ``gh`` program is the only forge client.  The engine shells out to it, so the
 Python package keeps no network dependency of its own.
 
-The review server and the coordinator run as background children.  A process
-started from a desktop launcher or a service often has a small ``PATH`` that
-omits the user-local and Homebrew directories.  This module resolves ``gh`` in
-three steps.  It checks ``SLICEME_GH`` first, then ``PATH``, then the common
-install directories.  A missing ``PATH`` entry therefore does not mean that
-GitHub CLI is not installed.
+A process started from a desktop launcher or a service often has a small
+``PATH`` that omits the user-local and Homebrew directories.  This module
+resolves ``gh`` in three steps.  It checks ``SLICEME_GH`` first, then ``PATH``,
+then the common install directories.  A missing ``PATH`` entry therefore does
+not mean that GitHub CLI is not installed.
 """
 
 from __future__ import annotations

@@ -6,13 +6,12 @@ campaign-level approval covers the whole commit set; delivery proceeds only
 while the newest campaign decision is an unconsumed ``approve``.
 
 The report (``.sliceme/<branch-key>.report.md``) is git-ignored, so it is read
-from disk and included in the packet as a virtual file.  Comments can attach to
-it.  It is evidence for the reviewer, not a merge gate.
+from disk and included in the packet as a virtual file.  It is evidence for the
+reviewer, not a merge gate.
 """
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from .. import campaign, gitutil
@@ -27,8 +26,6 @@ __all__ = [
     "campaign_branch_key",
     "campaign_commits",
     "commit_hashes",
-    "file_content",
-    "file_lines",
     "report_info",
     "review_commits",
 ]
@@ -151,7 +148,6 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
         "all_approved": approved,
         "override": approval,
         "files": diff.file_index(service.root, base, head) if base and head else [],
-        "comments": service.store.list_comments(branch_key=branch_key),
         "evidence": _evidence_map(service, {row["hash"] for row in commits}),
         "report": report_info(service),
         "updated_at": now(),
@@ -165,73 +161,21 @@ def _evidence_map(service: "Service", hashes: set[str]) -> dict[str, dict[str, A
         head = str(candidate.get("head_commit") or "")
         if head not in hashes:
             continue
-        job = service.store.latest_job_for_commit(head)
-        if job is None:
+        check = service.store.latest_check_for_commit(head)
+        if check is None:
             continue
         found[head] = {
             "candidate": int(candidate["id"]),
             "node": candidate.get("node"),
-            "status": job.get("status"),
-            "duration": job.get("duration"),
-            "fingerprint": job.get("fingerprint"),
-            "source": job.get("source"),
-            "commands": job.get("commands"),
-            "output": job.get("output"),
-            "gpu": job.get("gpu"),
-            "created_at": job.get("finished_at") or job.get("requested_at"),
+            "status": check.get("status"),
+            "duration": check.get("duration"),
+            "fingerprint": check.get("fingerprint"),
+            "source": check.get("source"),
+            "commands": check.get("commands"),
+            "output": check.get("output"),
+            "gpu": check.get("gpu"),
+            "created_at": check.get("finished_at") or check.get("created_at"),
         }
     return found
 
 
-def file_lines(
-    service: "Service", commit: str | None, path: str
-) -> dict[str, Any]:
-    """The parsed lines for one file, loaded on demand by ``/api/diff``."""
-    source_tip = _rev(service, _worktree_branch(service))
-    target_tip = _rev(service, _target_branch(service))
-    base, head = target_tip, source_tip
-    if commit:
-        parent = _parent(service, commit)
-        if parent:
-            base = parent
-        head = commit
-    lines = diff.file_diff(service.root, base, head, path) if base and head else []
-    return {"commit": commit, "file": path, "lines": lines}
-
-
-def _safe_path(path: str) -> str:
-    """Reject a path that can escape the repository or confuse ``git show``."""
-    if not path or path.startswith("-") or "\x00" in path:
-        raise SlicemeError("invalid file path")
-    posix = PurePosixPath(path)
-    if posix.is_absolute() or ".." in posix.parts or ":" in path:
-        raise SlicemeError("invalid file path")
-    return path
-
-
-def file_content(
-    service: "Service", commit: str | None, path: str
-) -> dict[str, Any]:
-    """The full text of one file at one commit, for a Markdown preview.
-
-    The client reads the whole file, not the diff, so the preview shows the
-    committed Markdown.  The path is validated first, then read from git.  A
-    binary file is refused.
-    """
-    safe = _safe_path(path)
-    ref = (
-        commit
-        or _rev(service, _worktree_branch(service))
-        or _rev(service, _target_branch(service))
-    )
-    if not ref:
-        raise SlicemeError("no commit is available to read")
-    try:
-        res = gitutil.git(service.root, "show", f"{ref}:{safe}", check=False)
-    except UnicodeDecodeError:
-        raise SlicemeError(f"{safe} is not a text file") from None
-    if not res.ok:
-        raise SlicemeError(f"cannot read {safe} at {commit or ref}")
-    if "\x00" in res.stdout:
-        raise SlicemeError(f"{safe} is not a text file")
-    return {"commit": commit, "file": safe, "ref": ref, "content": res.stdout}

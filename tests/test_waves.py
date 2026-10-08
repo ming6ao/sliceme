@@ -23,6 +23,10 @@ def node(nid, owns=None, depends_on=None):
     return {"id": nid, "owns": owns or [], "depends_on": depends_on or []}
 
 
+def gpu_node(nid, gpu, owns=None, depends_on=None):
+    return {**node(nid, owns, depends_on), "gpu": gpu}
+
+
 class WavePlanTests(unittest.TestCase):
     def members(self, waves):
         return [w.members for w in waves]
@@ -172,6 +176,35 @@ class WavePlanTests(unittest.TestCase):
         validate_dag([node("w1", ["dir:src/api"]), node("w2", ["dir:docs"])])
         with self.assertRaises(SlicemeError):
             validate_dag([node("w1", ["symbol:src/a.py#A"])])
+
+
+class GpuIsolationTests(unittest.TestCase):
+    """A GPU node conflicts with every node, so it lands in a wave alone."""
+
+    def test_two_gpu_nodes_land_in_two_waves(self):
+        waves = plan_dag_waves(
+            [
+                gpu_node("g1", "T1"),
+                gpu_node("g2", "T2"),
+            ]
+        )
+        self.assertEqual([w.members for w in waves], [["g1"], ["g2"]])
+        self.assertIn("g2", waves[1].conflicts)
+        self.assertIn("GPU isolation", waves[1].conflicts["g2"])
+
+    def test_gpu_node_and_cpu_node_never_share_a_wave(self):
+        waves = plan_dag_waves([gpu_node("cpu", "none"), gpu_node("gpu", "T1")])
+        self.assertEqual([w.members for w in waves], [["cpu"], ["gpu"]])
+
+    def test_gpu_isolation_is_independent_of_owns(self):
+        # Two GPU nodes in disjoint directories still cannot share a wave.
+        waves = plan_dag_waves(
+            [
+                gpu_node("g1", "T1", owns=["dir:src/a"]),
+                gpu_node("g2", "T1", owns=["dir:src/b"]),
+            ]
+        )
+        self.assertEqual([w.members for w in waves], [["g1"], ["g2"]])
 
 
 class ReadinessTests(unittest.TestCase):
