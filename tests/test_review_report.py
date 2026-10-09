@@ -1,6 +1,6 @@
 """The deterministic campaign report after the review cut.
 
-``review --report`` writes ``.sliceme/<branch-key>.report.md``, and the review
+``report`` writes ``.sliceme/<branch-key>.report.md``, and the review
 packet includes that git-ignored file so a reviewer can read it.  The browser
 client is gone, so the report is the remaining review artifact.
 
@@ -24,8 +24,8 @@ def run(*args, cwd):
 
 class ReportCase(unittest.TestCase):
     nodes = [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
-        {"id": "w2", "owns": ["dir:src/b"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w2", "owns": ["src/b"], "depends_on": [], "acceptance": ["true"]},
     ]
 
     def setUp(self):
@@ -84,11 +84,38 @@ class ReportTests(ReportCase):
         self.record_wave0()
         result = surface.dispatch(
             self.svc,
-            "review",
-            {"report": True, "narrative": "landed", "design": "DESIGN.md"},
+            "report",
+            {"narrative": "delivered", "design": "DESIGN.md"},
         )
-        self.assertIn("landed", result["content"])
+        self.assertIn("delivered", result["content"])
         self.assertTrue(Path(result["path"]).is_file())
+
+    def test_an_empty_marker_is_not_shown_as_a_node_commit(self):
+        # w2 changes no file, so it records an empty marker whose stored head is
+        # w1's commit.  The report and the reviewed evidence must attribute that
+        # commit to w1, never to the empty marker.
+        unit = self.svc.create_campaign_workspace()
+        (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
+        self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        self.svc.check_wave()
+        committed = {
+            str(r["node"]): r["head_commit"]
+            for r in self.svc.store.list_records(campaign=self.svc.campaign_key())
+            if not r.get("empty")
+        }
+        skeleton = campaign.build_skeleton(
+            self.root,
+            self.svc.config,
+            self.svc.store,
+            branch="feat/x",
+            campaign=self.svc.campaign_key(),
+        )
+        by_node = {n["node"]: n for n in skeleton["nodes"]}
+        self.assertEqual(by_node["w1"]["commit"], committed["w1"])
+        self.assertIsNone(by_node["w2"]["commit"])
+        self.assertIsNone(by_node["w2"]["verification"])
+        evidence = self.svc.review_snapshot()["evidence"]
+        self.assertEqual(evidence[committed["w1"]]["node"], "w1")
 
 
 if __name__ == "__main__":

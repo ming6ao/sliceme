@@ -10,15 +10,16 @@ never author the same files.
 
 - **Plan-time ownership** — nodes own directories; overlapping subtrees go into
   different waves.
-- **Readiness is the spawn gate** — a node starts once every dependency reaches
-  `done`; the wave stays a display hint.
+- **The wave is the scheduling gate** — the engine packs nodes into waves (no
+  directory-subtree overlap, capped by `concurrency`) and spawns one wave at a
+  time; a recorded node satisfies its dependents' `depends_on`.
 - **One campaign worktree** — every wave commits onto the same git worktree
   branch. Sliceme never recreates or rebases the branch between waves, and
   files persist.
 - **One combined-tree check** — one synchronous runner checks the recorded wave
   tree and caches the verdict. A resumed node reads the cache.
 - **One human gate** — the user confirms the campaign one time. Sliceme then
-  pushes the campaign branch and opens one pull request against the default
+  pushes the work branch and opens one pull request against the default
   branch (`main`). Sliceme never pushes the default branch.
 - **Deterministic evidence** — the engine writes the campaign commits, checks,
   diffs, and worker logs to one evidence document. The document is the pull
@@ -44,15 +45,15 @@ with `subagent({ workflow: "sliceme.campaign", async: true })`. The resource
 drives the engine verbs:
 
 ```text
-sliceme start DESIGN.md           derive the campaign branch; planner -> dag.json + waves
-sliceme wave --open               fetch main; create the worktree from origin/main
-sliceme ready                     current-wave nodes whose dependencies are done
+sliceme start DESIGN.md           derive the work branch; planner -> dag.json + waves
+sliceme open                      fetch main; create the worktree from origin/main
+sliceme ready                     the current wave's ready node ids
 sliceme status                    waves, nodes, and paused
-sliceme wave --record --current   commit the finished nodes as per-node commits
-sliceme check --current           run the combined-tree checks for the wave
+sliceme record                    commit the finished nodes as per-node commits
+sliceme check                     run the combined-tree checks for the wave
 sliceme evidence                  write the deterministic evidence document
-sliceme review --decision approve record the one campaign approval
-sliceme deliver                   push the campaign branch and open a pull request against main
+sliceme approve                   record the one campaign approval
+sliceme deliver                   push the work branch and open a pull request against main
 ```
 
 ## Docs

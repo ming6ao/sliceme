@@ -49,7 +49,7 @@ class EvidenceCase(unittest.TestCase):
                     {
                         "id": "w1",
                         "goal": "change a",
-                        "owns": ["dir:src"],
+                        "owns": ["src"],
                         "depends_on": [],
                         "acceptance": ["true"],
                     }
@@ -67,10 +67,10 @@ class EvidenceCase(unittest.TestCase):
         return self.svc.record_wave(0, messages={"w1": "change a"})
 
     def head(self):
-        return self.svc.store.list_candidates()[0]["head_commit"]
+        return self.svc.store.list_records()[0]["head_commit"]
 
     def write_check(self, output):
-        return self.svc.store.create_check(
+        return self.svc.store.create_verdict(
             fingerprint="fp-evidence",
             source="wave:0",
             commit_ref=self.head(),
@@ -97,7 +97,7 @@ class EvidenceTests(EvidenceCase):
         commit = evidence["commits"][0]
         self.assertEqual(commit["node"], "w1")
         self.assertEqual(commit["goal"], "change a")
-        self.assertEqual(commit["owns"], ["dir:src"])
+        self.assertEqual(commit["owns"], ["src"])
         self.assertEqual(commit["check"]["status"], "passed")
         self.assertEqual(commit["check"]["commands"], ["true"])
         self.assertEqual(commit["check"]["fingerprint"], "fp-evidence")

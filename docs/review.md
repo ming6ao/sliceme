@@ -30,15 +30,14 @@ Out:
 - Per-commit approval.
 - Remote or shared review.
 - Uncommitted working-tree changes. The review unit is commits.
-- Promotion from the campaign branch to the default branch. That step stays a
+- Promotion from the work branch to the default branch. That step stays a
   human act on the forge.
 
 ## 2. Architecture
 
 ```mermaid
 flowchart LR
-  H["Human"] -->|"review --decision"| A["review/api.py"]
-  A -->|"in process"| S["Service"]
+  H["Human"] -->|"approve"| S["Service"]
   S --> D[("state.db")]
   S --> G[("git")]
   S --> R[("report.md")]
@@ -46,11 +45,10 @@ flowchart LR
   P -->|"diff + commits + report + evidence"| C["Coordinator"]
 ```
 
-The `sliceme/review/` package keeps three modules:
+The `sliceme/review/` package keeps two modules:
 
 | Module | Responsibility |
 |---|---|
-| `api.py` | Dispatch for the two review actions: `decision` and `report`. |
 | `packet.py` | The snapshot: accumulated commits, the report, the evidence, and `campaign_branch_key`. |
 | `diff.py` | Diff parsing and the file index. |
 
@@ -60,10 +58,10 @@ file, so the review surface adds no second store.
 ## 3. Review model
 
 - The review unit is the campaign worktree. Commits accumulate as waves land.
-- A review packet is the diff from the delivery base to the campaign head
+- A review packet is the diff from the base branch to the campaign head
   (`target_tip...source_tip`), the commit list, the report, and the check
-  evidence. The diff base is the delivery base, not the campaign branch: the
-  campaign branch is the head.
+  evidence. The diff base is the base branch, not the work branch: the
+  work branch is the head.
 - The packet reads the diff from git and the report from disk.
 - The reviewer approves or requests changes on the whole campaign commit set.
 - One approval is one row keyed by `(branch_key, commit_hash)` with a null
@@ -89,7 +87,7 @@ campaign.
 One table in `.sliceme/state.db` follows the existing `CREATE TABLE IF NOT
 EXISTS` pattern.
 
-**`review_decisions`** — `branch_key`, `commit_hash`, `action`, `actor`,
+**`approvals`** — `branch_key`, `commit_hash`, `action`, `actor`,
 `note`, `created_at`, `consumed_at`. Append-only. A campaign-level decision uses
 a null `commit_hash`; the newest unconsumed decision wins. The table also keeps
 the superseded rows, so the decision history stays auditable.
@@ -121,12 +119,12 @@ stays an explicit user command.
 ## 6. The report
 
 ```bash
-sliceme review --report [--narrative TEXT] [--design REF]
+sliceme report [--narrative TEXT] [--design REF]
 ```
 
-`review --report` writes `.sliceme/<branch-key>.report.md`. The skeleton is
-deterministic: the design reference, the campaign branch, the nodes, the
-candidates, and the newest check per candidate. `--narrative` appends the
+`report` writes `.sliceme/<branch-key>.report.md`. The skeleton is
+deterministic: the design reference, the work branch, the nodes, the
+records, and the newest check per record. `--narrative` appends the
 coordinator's summary. The evidence document is the body of the delivery pull
 request; the report stays reviewable next to it.
 
@@ -137,18 +135,18 @@ the campaign. The design orders delivery to avoid a race with the campaign loop:
 
 1. **Quiesce.** The resource records and checks one wave at a time, so no worker
    commits mid-delivery.
-2. **Lock.** Take the plane delivery lock at `.sliceme/review.lock`.
+2. **Lock.** Take the one workspace lock at `.sliceme/workspace.lock`.
 3. **Re-check the gate** under the lock and immediately before the push.
-4. Push the campaign branch, open the pull request, mark the candidates landed,
-   and consume the decision.
+4. Push the work branch, open the pull request, mark the records delivered,
+   and consume the approval.
 
 Preconditions, enforced in `Service`:
 
 - every wave reaches done, or an `override` decision records a note;
 - the campaign worktree has no uncommitted changes;
-- the delivery base worktree is clean;
+- the base branch worktree is clean;
 - a human approved the campaign, or an override records a note;
-- if `policy.require_verification`, no candidate is `failed` or `blocked`,
+- if `policy.require_verification`, no record is `failed` or `blocked`,
   unless an override records a note.
 
 Override is a human decision, not an agent action.
@@ -160,8 +158,8 @@ Override is a human decision, not an agent action.
 - **Lock order.** The plane delivery lock, then the campaign lock, then SQLite
   row locks.
 
-`review` joins `ACTIONS`. Recording a decision and writing the report are both
-agent-callable, but a human owns the approval decision.
+`approve` and `report` join `ACTIONS`. Recording an approval and writing the
+report are both agent-callable, but a human owns the approval decision.
 
 ## Related
 

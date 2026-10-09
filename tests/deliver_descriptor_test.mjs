@@ -36,7 +36,7 @@ writeDescriptor("feat/checkout");
 const deliver = {
 	feature_branch: "feat/checkout",
 	source: "sliceme/feat-checkout",
-	results: [{ status: "landed" }],
+	results: [{ status: "delivered" }],
 };
 const branch = applyEngineReply(dir, "deliver", deliver);
 assert.equal(branch, "feat/checkout");

@@ -3,7 +3,7 @@
 The runner replaces the executor queue: it runs one check set over a wave's
 combined tree, writes one terminal row to the ``checks`` table, and reuses that
 row by fingerprint.  These tests pin the cache (a resumed node reads it), the
-``only`` filter, the advisory policy, the wave ``--current`` verbs, and
+``only`` filter, the advisory policy, the ``record``/``check`` verbs, and
 delivery reading its checks as evidence.
 """
 
@@ -44,7 +44,7 @@ def run_cli(args, cwd):
 
 class ChecksCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
-    nodes = [{"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]}]
+    nodes = [{"id": "w1", "label": "change", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]}]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -97,7 +97,7 @@ class CheckCacheTests(ChecksCase):
         second = self.run_check([CheckSpec("ok", "true")])
         self.assertTrue(second["cached"])
         self.assertEqual(second["id"], first["id"])
-        self.assertEqual(len(self.svc.store.list_checks()), 1)
+        self.assertEqual(len(self.svc.store.list_verdicts()), 1)
 
     def test_a_terminal_failure_is_cached_not_rerun(self):
         specs = [CheckSpec("ok", "false")]
@@ -166,7 +166,7 @@ class WaveCheckTests(ChecksCase):
     def test_check_current_uses_the_recorded_wave_not_the_next(self):
         # Two waves: w1 owns src/a, w2 owns docs and depends on w1.  After wave
         # 0 is recorded the next wave is wave 1, but the worktree head is wave
-        # 0's commit, so check --current must run wave 0's acceptance.
+        # 0's commit, so check must run wave 0's acceptance.
         write_json(
             campaign.dag_path(self.root, "feat/x"),
             {
@@ -177,13 +177,13 @@ class WaveCheckTests(ChecksCase):
                 "nodes": [
                     {
                         "id": "w1",
-                        "owns": ["dir:src/a"],
+                        "owns": ["src/a"],
                         "depends_on": [],
                         "acceptance": ["echo wave-zero"],
                     },
                     {
                         "id": "w2",
-                        "owns": ["dir:docs"],
+                        "owns": ["docs"],
                         "depends_on": ["w1"],
                         "acceptance": ["echo wave-one"],
                     },
@@ -201,24 +201,17 @@ class WaveCheckTests(ChecksCase):
         self.assertIn("echo wave-zero", commands)
         self.assertNotIn("echo wave-one", commands)
 
-    def test_wave_record_current_uses_the_engine_wave_index(self):
+    def test_record_uses_the_engine_wave_index(self):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
-        result = surface.dispatch(
-            self.svc,
-            "wave",
-            {"record": True, "current": True, "messages": '{"w1": "change"}'},
-        )
+        result = surface.dispatch(self.svc, "record", {})
         self.assertEqual(result["wave"], 0)
-        self.assertEqual([c["node"] for c in result["candidates"]], ["w1"])
+        self.assertEqual([c["node"] for c in result["records"]], ["w1"])
 
-    def test_wave_record_without_wave_or_current_is_rejected(self):
-        with self.assertRaises(SlicemeError):
-            surface.dispatch(self.svc, "wave", {"record": True})
-
-    def test_check_current_requires_the_current_flag(self):
-        with self.assertRaises(SlicemeError):
-            surface.dispatch(self.svc, "check", {})
+    def test_check_reads_the_current_wave(self):
+        self.record_wave()
+        result = surface.dispatch(self.svc, "check", {})
+        self.assertEqual(result["wave"], 0)
 
     def test_a_resumed_check_reads_the_cache(self):
         """A second Service (a resumed run) reuses the stored verdict."""
@@ -242,8 +235,8 @@ class WaveCheckTests(ChecksCase):
 
 class WaveCheckVectorTests(ChecksCase):
     nodes = [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["echo node-a", "true"]},
-        {"id": "w2", "owns": ["dir:src/b"], "depends_on": [], "acceptance": ["echo node-b", "echo node-a"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["echo node-a", "true"]},
+        {"id": "w2", "owns": ["src/b"], "depends_on": [], "acceptance": ["echo node-b", "echo node-a"]},
     ]
 
     def test_check_wave_unions_plane_and_acceptance_checks(self):
@@ -256,7 +249,7 @@ class WaveCheckVectorTests(ChecksCase):
         self.assertEqual(commands, ["true", "echo node-a", "echo node-b"])
 
     def test_check_vector_uses_only_the_recorded_members(self):
-        # Wave 0 has two members.  Only w1 records a candidate, because w2
+        # Wave 0 has two members.  Only w1 records a record, because w2
         # changed nothing in its owned directory.  The wave-0 check vector must
         # include w1's acceptance and exclude w2's.
         worktree = self.workspace()
@@ -272,12 +265,30 @@ class WaveCheckVectorTests(ChecksCase):
         self.assertEqual(commands, ["true", "echo node-a"])
         self.assertNotIn("echo node-b", commands)
 
+    def test_check_vector_is_empty_when_the_whole_wave_is_empty(self):
+        # No member of wave 0 changes a file, so every record is an empty
+        # marker.  The wave check vector is the plane's checks only: an empty
+        # marker contributes no acceptance command.
+        self.workspace()
+        recorded = self.svc.record_wave(0, messages={"w1": "change", "w2": "change"})
+        self.assertEqual(sorted(recorded["empty"]), ["w1", "w2"])
+        with mock.patch(
+            "sliceme.checks.CheckRunner.run", return_value={"status": "passed"}
+        ) as run:
+            result = self.svc.check_wave()
+        self.assertEqual(result["wave"], 0)
+        self.assertEqual(result["members"], [])
+        commands = [spec.command for spec in run.call_args.kwargs["checks"]]
+        self.assertEqual(commands, ["true"])
+        self.assertNotIn("echo node-a", commands)
+        self.assertNotIn("echo node-b", commands)
+
 
 class GpuWaveTests(ChecksCase):
     nodes = [
         {
             "id": "w1",
-            "owns": ["dir:src/a"],
+            "owns": ["src/a"],
             "depends_on": [],
             "acceptance": ["true"],
             "gpu": "T2",
@@ -291,13 +302,26 @@ class GpuWaveTests(ChecksCase):
             self.svc.check_wave()
         self.assertEqual(run.call_args.kwargs["gpu"], "T2")
 
+    def test_check_wave_keeps_the_gpu_tier_when_the_node_records_empty(self):
+        # The GPU node changes nothing, so its only record is an empty marker.
+        # The acceptance vector is empty, but the wave keeps its GPU tier from
+        # the planned membership, so the GPU gate still runs.
+        self.workspace()
+        recorded = self.svc.record_wave(0, messages={"w1": "change"})
+        self.assertEqual(recorded["empty"], ["w1"])
+        with mock.patch(
+            "sliceme.checks.CheckRunner.run", return_value={"status": "passed"}
+        ) as run:
+            self.svc.check_wave()
+        self.assertEqual(run.call_args.kwargs["gpu"], "T2")
+
 
 class DeliveryCheckTests(ChecksCase):
     def test_delivery_runs_its_checks_and_reads_the_cache(self):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "change"})
-        self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        self.svc.record_approval(action="approve", all_commits=True, actor="test")
         created = {"url": "https://example.test/pull/1", "number": 1}
         with mock.patch.object(integrate.pullrequest, "require"), mock.patch.object(
             integrate.pullrequest, "find", return_value=None
@@ -312,10 +336,10 @@ class DeliveryCheckTests(ChecksCase):
                 self.svc.config,
                 campaign=self.svc.campaign_key(),
             )
-        self.assertEqual([result.status for result in results], ["landed"])
+        self.assertEqual([result.status for result in results], ["delivered"])
         self.assertEqual([check.status for check in results[0].checks], ["passed"])
 
-        rows = self.svc.store.list_checks(statuses=["passed"])
+        rows = self.svc.store.list_verdicts(statuses=["passed"])
         self.assertEqual([row["source"] for row in rows], ["deliver"])
         self.assertIn("[passed] ok: true", rows[0]["output"])
 
@@ -333,7 +357,7 @@ class DeliveryGpuTests(ChecksCase):
     nodes = [
         {
             "id": "w1",
-            "owns": ["dir:src/a"],
+            "owns": ["src/a"],
             "depends_on": [],
             "acceptance": ["true"],
             "gpu": "T1",
@@ -344,7 +368,7 @@ class DeliveryGpuTests(ChecksCase):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "change"})
-        self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        self.svc.record_approval(action="approve", all_commits=True, actor="test")
         with mock.patch(
             "sliceme.checks.CheckRunner.run",
             return_value={"status": "passed", "results": "[]"},
@@ -375,7 +399,7 @@ class FailingDeliveryCase(ChecksCase):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "change"})
-        self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        self.svc.record_approval(action="approve", all_commits=True, actor="test")
         with mock.patch.object(integrate.pullrequest, "require"):
             results = integrate.deliver_pull_request(
                 self.svc.store,
@@ -388,25 +412,21 @@ class FailingDeliveryCase(ChecksCase):
 
 
 class CliCheckTests(ChecksCase):
-    def test_cli_wave_record_current_and_check_current(self):
+    def test_cli_record_and_check(self):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
 
         recorded = run_cli(
             [
                 "--json",
-                "wave",
-                "--record",
-                "--current",
-                "--messages",
-                '{"w1": "change"}',
+                "record",
             ],
             self.root,
         )
         self.assertEqual(recorded.returncode, 0, recorded.stderr)
         self.assertEqual(json.loads(recorded.stdout)["wave"], 0)
 
-        checked = run_cli(["--json", "check", "--current"], self.root)
+        checked = run_cli(["--json", "check"], self.root)
         self.assertEqual(checked.returncode, 0, checked.stderr)
         payload = json.loads(checked.stdout)
         self.assertEqual(payload["wave"], 0)

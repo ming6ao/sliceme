@@ -69,19 +69,24 @@ class TargetBranchCase(unittest.TestCase):
     def test_a_second_design_cannot_reuse_the_campaign_branch(self):
         # Two design names can slugify to one campaign branch.  The engine
         # refuses the collision instead of silently sharing the campaign.
-        Service.init(self.root, design="web/DESIGN.md", checks=self.checks, no_unit=True)
+        Service.init(self.root, design="web/DESIGN.md", checks=self.checks)
         with self.assertRaises(SlicemeError) as ctx:
-            Service.init(self.root, design="api/design.md", checks=self.checks, no_unit=True)
+            Service.init(self.root, design="api/design.md", checks=self.checks)
         self.assertIn("already belongs to design", str(ctx.exception))
 
     def test_start_has_no_target_parameters(self):
         # `--target` and `--target-mode` are gone: the campaign branch derives
         # from the design name, and the delivery base is the default branch.
+        # The retired unit flags (`--name`, `--kind`, `--no-unit`) are gone too:
+        # the campaign owns the one worktree.
         from sliceme import surface
 
         names = {param.name for param in surface.ACTION_BY_NAME["start"].params}
         self.assertNotIn("target", names)
         self.assertNotIn("target_mode", names)
+        self.assertNotIn("name", names)
+        self.assertNotIn("kind", names)
+        self.assertNotIn("no_unit", names)
         self.assertIn("design", names)
         self.assertIn("feature_branch", names)
         self.assertNotIn("target", {p.name for p in surface.ACTION_BY_NAME["deliver"].params})
@@ -99,8 +104,8 @@ class TargetBranchCase(unittest.TestCase):
 
         first = json.loads(config_path(self.root).read_text())
         self.svc = Service(self.root)
-        self.assertEqual(first["target_branch"], self.svc.config["target_branch"])
-        self.assertEqual(first["worktree_branch"], self.svc.config["worktree_branch"])
+        self.assertEqual(first["work_branch"], self.svc.config["work_branch"])
+        self.assertEqual(first["work_branch"], self.svc.config["worktree_branch"])
 
 
 if __name__ == "__main__":

@@ -20,10 +20,10 @@ The database holds what git and the plane files cannot express quickly:
 - the campaign review decisions.
 
 It deliberately does **not** hold the plan. `dag.json` is a file under
-`.sliceme/`; the plan is authoritative there, and the engine reads it.
-`state.json` is an optional, read-only legacy override that the engine never
-writes; git plus this database win on conflict. The suspend/resume descriptor is
-a file too; the database keeps no projection of it.
+`.sliceme/`; the plan is authoritative there, and the engine reads it. Node
+statuses live in the adapter-written session descriptor; there is no
+`state.json`, and git plus this database win on conflict. The suspend/resume
+descriptor is a file too; the database keeps no projection of it.
 
 Child execution state belongs to pi-subagents. The database keeps no `jobs`,
 `attempts`, or `comments` table.
@@ -55,33 +55,31 @@ Structural changes go through `Store._migrate`, which calls `_ensure_columns`
 to add columns that predate the current schema:
 
 - `campaigns.pr_url`, `campaigns.pr_number`
-- `campaigns.delivery_base` (backfilled once from `found_default_branch`)
-- `candidates.node`
-- `units.campaign`
-- `candidates.campaign`
+- `campaigns.base_branch` (backfilled once from `found_default_branch`)
+- `campaigns.worktree` (backfilled once from the retired campaign unit)
+- `records.node`
+- `records.campaign`
 
-The pattern is additive only. New columns must have a default or be nullable,
-because existing rows are not rewritten. Destructive changes (renames, drops,
-type changes) are deliberately avoided so a running or older plane keeps
-working.
+The pattern is additive only for columns: new columns must have a default or be
+nullable, because existing rows are not rewritten. One destructive migration is
+allowed: `Store._drop_unit_schema` retires the `units` table and rebuilds
+`records` without the dropped `unit_id` foreign key (after backfilling
+`campaigns.worktree`).
 
 ## 4. Entity relationships
 
 ```text
-campaigns 1 ──── * units
-campaigns 1 ──── * candidates
+campaigns 1 ──── * records
 
-checks            (standalone; carries campaign)
-review_decisions  (standalone; keyed by branch_key)
+verdicts          (standalone; carries campaign)
+approvals  (standalone; keyed by branch_key)
 ```
 
-- A **campaign** is one campaign branch (the pull request head and the
-  worktree branch), one delivery base (the pull request base), one DAG, and one
-  confirmation gate. A plane holds one or more campaigns.
-- A **unit** is one writer: a git worktree plus a branch. A campaign unit
-  belongs to its campaign; `start` may create one more unit for a directory.
-- A **candidate** is a committed head a unit offers for delivery. The campaign
-  worktree accumulates commits, so a later wave adds rows.
+- A **campaign** is one work branch (the pull request head), one base branch
+  (the pull request base), one worktree, one DAG, and one confirmation gate.
+  A plane holds one or more campaigns.
+- A **record** is a committed head the campaign offers for delivery. The
+  campaign worktree accumulates commits, so a later wave adds rows.
 - A **check** is one terminal check result. It carries its own fingerprint and
   result; the review evidence reads the newest terminal check for a commit.
 - A **review decision** is one campaign-level approval, rejection, or override.
@@ -90,62 +88,35 @@ All `*_at` columns are `REAL` epoch seconds from `util.now()` (`time.time()`).
 
 ## 5. Table reference
 
-### 5.1 `units`
+### 5.1 `records`
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `name` | TEXT NOT NULL | `campaign`, or a `start` unit name |
 | `campaign` | TEXT | the owning campaign key (migration) |
-| `kind` | TEXT NOT NULL DEFAULT `'worker'` | `worker` or `campaign` |
-| `worktree` | TEXT NOT NULL | absolute path under `.sliceme/worktrees/` |
-| `branch` | TEXT NOT NULL | `sliceme/<name>` (or the campaign worktree branch) |
-| `base_commit` | TEXT | fork point |
-| `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, then `landed` |
-| `created_at` | REAL NOT NULL | |
-| `updated_at` | REAL NOT NULL | |
-| UNIQUE(name) | | |
-
-Created by `Service.create_workspace` and `Service.create_campaign_workspace`
-after `gitutil.add_worktree` succeeds; if the insert fails the worktree is
-cleaned up. Updated by `Store.set_unit_state` (through
-`integrate._mark_delivered`, which sets `landed`). Read by `list_units`,
-`get_unit`, `require_unit`, `Service.current_unit` (worktree containment, else
-branch match), `Service.status`, `campaign.build_skeleton`, and `Service.gc`.
-
-`gc` prunes worktrees and branches for units in state `landed` or `closed`.
-Only `landed` occurs today; Sliceme reserves `closed`.
-
-### 5.2 `candidates`
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `unit_id` | INTEGER NOT NULL → `units(id)` | |
-| `campaign` | TEXT | the owning campaign key (migration) |
-| `head_commit` | TEXT NOT NULL | the node commit on the campaign branch |
-| `status` | TEXT NOT NULL DEFAULT `'prepared'` | `prepared`, `pending`, `landed`, `failed`, `blocked` |
-| `summary` | TEXT | review text from `wave --record --summary` |
+| `head_commit` | TEXT NOT NULL | the node commit on the work branch |
+| `status` | TEXT NOT NULL DEFAULT `'recorded'` | `recorded`, `pending`, `delivered`, `failed`, `blocked` |
+| `summary` | TEXT | review text recorded with the node commit |
 | `node` | TEXT | DAG node id (migration) |
+| `empty` | INTEGER NOT NULL DEFAULT 0 | 1 for an explicit empty record (the member changed no file) |
 | `created_at` | REAL NOT NULL | |
 | `updated_at` | REAL NOT NULL | |
 
-Indexes: `idx_candidates_status`, `idx_candidates_campaign`.
+Indexes: `idx_records_status`, `idx_records_campaign`.
 
-Created by `Service._record_wave_commits`, one per changed node in a wave (with
-`node` set). The campaign worktree accumulates commits, so a later wave adds
-rows and never rewrites an earlier wave's row. The unit join provides the branch
-and the base commit, so the table does not duplicate them.
+Created by `Service._record_wave_commits`, one per wave member (`node` set): a
+commit record for each changed node and an empty marker for a member that
+changed no file. The campaign worktree accumulates commits, so a later wave adds
+rows and never rewrites an earlier wave's row. The campaign owns the branch and
+the worktree, so the table duplicates neither.
 
-Updated by `integrate._mark_delivered`, which sets `status='landed'` without
+Updated by `integrate._mark_delivered`, which sets `status='delivered'` without
 rewriting `head_commit` (the node commit is provenance).
 
-Read by `Store.list_candidates` and `Store.get_candidate` (both join `units` to
-add `unit_name`, `unit_branch`, `worktree`, and `unit_base_commit`),
-`integrate.plan_waves`, `Service.status`, `packet.build_packet`, and
-`campaign.build_skeleton`.
+Read by `Store.list_records` and `Store.get_record`, `integrate.plan_waves`,
+`Service.status`, `packet.build_packet`, and `campaign.build_skeleton`.
 
-### 5.3 `checks`
+### 5.2 `verdicts`
 
 | Column | Type | Notes |
 |---|---|---|
@@ -170,10 +141,10 @@ add `unit_name`, `unit_branch`, `worktree`, and `unit_base_commit`),
 | `created_at` | REAL NOT NULL | row write time |
 | `finished_at` | REAL | completion time |
 
-Indexes: `idx_checks_fingerprint`, `idx_checks_campaign`,
-`idx_checks_commit(commit_ref, id)`.
+Indexes: `idx_verdicts_fingerprint`, `idx_verdicts_campaign`,
+`idx_verdicts_commit(commit_ref, id)`.
 
-Created by `CheckRunner.run` through `Store.create_check` after it resolves the
+Created by `CheckRunner.run` through `Store.create_verdict` after it resolves the
 sandbox and computes the fingerprint. The cache lookup short-circuits a run
 whose fingerprint already reached a terminal verdict (`passed`, `failed`, or
 `error`), so no new row appears on a cache hit.
@@ -181,16 +152,16 @@ whose fingerprint already reached a terminal verdict (`passed`, `failed`, or
 The row is a **cache, not a queue**. It holds no lease and no runner state. The
 `cancelled` and `running` statuses do not exist: one run writes one terminal row.
 
-Read by `Store.find_check` (the cache lookup), `Store.get_check` (`check
---current`), `Store.latest_check_for_commit` (the review evidence),
-`packet._evidence_map`, and `Store.check_counts` (`status`).
+Read by `Store.find_verdict` (the cache lookup), `Store.get_verdict` (`check`),
+`Store.latest_verdict_for_commit` (the review evidence),
+`packet._evidence_map`, and `Store.verdict_counts` (`status`).
 
-### 5.4 `review_decisions`
+### 5.3 `approvals`
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `branch_key` | TEXT NOT NULL | campaign-branch key (`feat/x` → `feat--x`) |
+| `branch_key` | TEXT NOT NULL | work-branch key (`feat/x` → `feat--x`) |
 | `commit_hash` | TEXT | null for a campaign-level decision |
 | `action` | TEXT NOT NULL | `approve`, `request_changes`, `override` |
 | `actor` | TEXT | who recorded the decision |
@@ -198,26 +169,25 @@ Read by `Store.find_check` (the cache lookup), `Store.get_check` (`check
 | `created_at` | REAL NOT NULL | |
 | `consumed_at` | REAL | set by a successful delivery |
 
-Index: `idx_review_decisions_commit(branch_key, commit_hash, id)`.
+Index: `idx_approvals_commit(branch_key, commit_hash, id)`.
 
-Append-only. `Store.add_review_decision` inserts; the newest row for a campaign
-wins. `Store.latest_review_decision` reads the newest row, and
-`Store.consume_review_decisions` sets `consumed_at` after a successful delivery.
+Append-only. `Store.add_approval` inserts; the newest row for a campaign
+wins. `Store.latest_approval` reads the newest row, and
+`Store.consume_approvals` sets `consumed_at` after a successful delivery.
 One approval covers the whole campaign commit set, so a later commit does not
 re-open the gate. A failed check or forge call leaves the row unconsumed, so a
 retry needs no new review.
 
-### 5.5 `campaigns`
+### 5.4 `campaigns`
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `key` | TEXT NOT NULL UNIQUE | `branch_key(target_branch)` |
-| `target_branch` | TEXT NOT NULL UNIQUE | the campaign branch (the pull request head) |
-| `worktree_branch` | TEXT NOT NULL UNIQUE | equal to `target_branch` |
-| `delivery_base` | TEXT | the pull request base (the default branch; migration) |
-| `base` | TEXT | fork point |
-| `unit_name` | TEXT NOT NULL UNIQUE | the campaign worktree unit name |
+| `key` | TEXT NOT NULL UNIQUE | `branch_key(work_branch)` |
+| `work_branch` | TEXT NOT NULL UNIQUE | the work branch (the pull request head) |
+| `worktree` | TEXT | the campaign's one worktree path (backfilled from the retired campaign unit) |
+| `base_branch` | TEXT | the pull request base (the default branch; migration) |
+| `unit_name` | TEXT NOT NULL UNIQUE | the campaign worktree writer name |
 | `name` | TEXT | display name |
 | `design` | TEXT | design document reference |
 | `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, `delivered`, `closed` |
@@ -238,48 +208,47 @@ records `pr_url` / `pr_number`.
 
 1. **Plane bootstrap.** `start` writes `.sliceme/config.json` and opens
    `Store`, which creates the schema. Sliceme registers one campaign for the
-   recorded campaign branch and delivery base.
-2. **Unit.** `start` or `wave --open` creates a worktree and branch, then
-   inserts a `units` row with `state='working'`.
-3. **Wave record.** `wave --record --current` runs conformance-by-ownership on
-   the campaign worktree and inserts one `candidates` row per changed node with
-   `status='prepared'`.
-4. **Check.** `check --current` calls the one runner. The runner inserts a
-   `checks` row, or the cache serves a terminal fingerprint. `packet.build_packet`
+   recorded work branch and base branch.
+2. **Worktree.** `open` creates the campaign worktree and branch and
+   records the path on the campaign row (`campaigns.worktree`).
+3. **Wave record.** `record` runs conformance-by-ownership on
+   the campaign worktree and inserts one `records` row per changed node with
+   `status='recorded'`.
+4. **Check.** `check` calls the one runner. The runner inserts a
+   `verdicts` row, or the cache serves a terminal fingerprint. `packet.build_packet`
    reads the newest terminal check per commit as evidence.
 5. **Delivery.** After every wave completes and the user confirms, `deliver`
-   pushes the campaign branch and opens a pull request against the delivery
-   base, then `_mark_delivered` sets the candidates and their unit to `landed`.
+   pushes the work branch and opens a pull request against the delivery
+   base, then `_mark_delivered` sets the campaign's records to `delivered` and the
+   campaign state to `delivered`.
 6. **Review.** The human records one campaign decision through
-   `review --decision`. The delivery gate reads the newest unconsumed row.
-7. **Status and report.** `Service.status` reads units, candidates, waves, and
-   check counts. `campaign.build_skeleton` reads units, candidates, and the
-   newest check per candidate for the report.
-8. **Cleanup.** `Service.gc` reads `landed`/`closed` units and removes their
-   worktrees and branches, and prunes expired review rows. Rows are never
-   deleted otherwise; the tables remain the audit trail.
+   `approve`. The delivery gate reads the newest unconsumed row.
+7. **Status and report.** `Service.status` reads the campaign row, records,
+   waves, and check counts. `campaign.build_skeleton` reads the campaign row,
+   records, and the newest verdict per record for the report.
+8. **Cleanup.** `Service.gc` reads the campaign registry and removes the
+   worktree and branch of campaigns in `landed`/`delivered`/`closed`, and prunes
+   expired review rows. Rows are never deleted otherwise; the tables remain the
+   audit trail.
 
 ## 7. Access summary
 
 | Table | Writers | Readers |
 |---|---|---|
-| `campaigns` | `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`, `Store.create_campaign`, `Service.deliver` | `Service.campaign`, `Service.status`, `plan`, the report and evidence |
-| `units` | `Service.create_workspace`, `create_campaign_workspace`, `integrate._mark_delivered`, `gc` (branch prune) | `Service.status`, `current_unit`, `unit_detail`, `gc`, `campaign.build_skeleton` |
-| `candidates` | `Service._record_wave_commits`, `integrate._mark_delivered` | `Service.status`, `packet.build_packet`, `campaign.build_skeleton` |
-| `checks` | `CheckRunner.run` | `Store.find_check/get_check/latest_check_for_commit/check_counts`, `packet._evidence_map` |
-| `review_decisions` | `Service.review_decision`, `consume_approvals` | `Service.campaign_decision`, `packet.build_packet`, `require_all_approved` |
+| `campaigns` | `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`, `Store.create_campaign`, `Store.set_campaign_worktree`, `Service.deliver` | `Service.campaign`, `Service.status`, `plan`, the report and evidence, `gc` |
+| `records` | `Service._record_wave_commits`, `integrate._mark_delivered` | `Service.status`, `packet.build_packet`, `campaign.build_skeleton` |
+| `verdicts` | `CheckRunner.run` | `Store.find_verdict/get_verdict/latest_verdict_for_commit/verdict_counts`, `packet._evidence_map` |
+| `approvals` | `Service.record_approval`, `consume_approvals` | `Service.campaign_approval`, `packet.build_packet`, `require_all_approved` |
 
 ## 8. Status and value domains
 
 | Table | Column | Values |
 |---|---|---|
 | `campaigns` | `state` | `working` (default), `delivered`, `closed` |
-| `units` | `state` | `working` (default), `landed`; `closed` reserved |
-| `units` | `kind` | `worker` (default), `campaign` |
-| `candidates` | `status` | `prepared` (default), `pending`, `landed`, `failed`, `blocked` |
-| `checks` | `status` | `passed`, `failed`, `error` |
-| `checks` | `gpu` | `none`, `T1`, `T2` |
-| `review_decisions` | `action` | `approve`, `request_changes`, `override` |
+| `records` | `status` | `recorded` (default), `pending`, `delivered`, `failed`, `blocked` |
+| `verdicts` | `status` | `passed`, `failed`, `error` |
+| `verdicts` | `gpu` | `none`, `T1`, `T2` |
+| `approvals` | `action` | `approve`, `request_changes`, `override` |
 
 ## 9. Concurrency and integrity
 
@@ -290,15 +259,16 @@ records `pr_url` / `pr_number`.
   so referential integrity holds by construction rather than by cleanup.
 - WAL plus `busy_timeout` allows a coordinator, children, and a second terminal
   to read the same plane safely.
-- The unique constraints that matter for correctness are `units.name` and
-  `campaigns.key`, `campaigns.target_branch`, and `campaigns.worktree_branch`.
-- The `checks` index on `fingerprint` makes the cache lookup cheap.
+- The unique constraints that matter for correctness are `campaigns.key`,
+  `campaigns.work_branch`.
+- The `verdicts` index on `fingerprint` makes the cache lookup cheap.
 
 ## 10. What is not in the database
 
 - `dag.json` (the authored plan) is a file under `.sliceme/`. The human writes
-  it, and the engine reads it. `state.json` is an optional, read-only legacy
-  override that the engine never writes; git plus the database win on conflict.
+  it, and the engine reads it. Node statuses live in the adapter-written session
+  descriptor; there is no `state.json`, and git plus the database win on
+  conflict.
 - The suspend/resume descriptor `.sliceme/<branch-key>.session.json` is a file.
   `status --sessions` and `status --resume` read it directly; there is no
   `campaign_sessions` projection.
@@ -314,12 +284,12 @@ records `pr_url` / `pr_number`.
 The suspend/resume descriptor is the pi adapter's file. The engine reads it in
 `status --resume` and `status --sessions` and keeps no database copy, so the
 descriptor is the single source of truth. Resume reconciles from git plus
-`state.db`; the `checks` table serves the cached verification, so a resumed node
+`state.db`; the `verdicts` table serves the cached verification, so a resumed node
 does not re-run a full check.
 
 ## 12. Local review
 
-`review_decisions` is an append-only decision log: the newest row for a campaign
+`approvals` is an append-only decision log: the newest row for a campaign
 wins, and `consumed_at` marks a delivery that already used the decision. One
 approval covers the whole campaign commit set, so `Service.deliver` refuses
 until the user confirms the campaign. `gc` prunes rows for campaigns without a

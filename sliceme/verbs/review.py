@@ -25,7 +25,7 @@ class ReviewVerbs:
 
         return packet.build_packet(self, commit=commit)
 
-    def review_decision(
+    def record_approval(
         self,
         *,
         action: str,
@@ -53,7 +53,7 @@ class ReviewVerbs:
             raise SlicemeError("request_changes needs a note")
         if action == "override" and not (note or "").strip():
             raise SlicemeError("override needs a note")
-        decision = self.store.add_review_decision(
+        decision = self.store.add_approval(
             branch_key=branch_key,
             commit_hash=None,
             action=action,
@@ -67,7 +67,7 @@ class ReviewVerbs:
         self, branch_key: str, *, actor: str | None, note: str | None
     ) -> dict[str, Any]:
         """Record ONE campaign-level approve decision."""
-        decision = self.store.add_review_decision(
+        decision = self.store.add_approval(
             branch_key=branch_key,
             commit_hash=None,
             action="approve",
@@ -77,17 +77,17 @@ class ReviewVerbs:
         self.store.conn.commit()
         return decision
 
-    def campaign_decision(self) -> dict[str, Any] | None:
+    def campaign_approval(self) -> dict[str, Any] | None:
         """The latest campaign-level decision (``commit_hash`` is NULL)."""
         from ..review import packet
 
-        return self.store.latest_review_decision(
+        return self.store.latest_approval(
             packet.campaign_branch_key(self), None
         )
 
     def campaign_approved(self) -> bool:
         """Whether the newest campaign-level decision is an unconsumed approve."""
-        return self._is_approved(self.campaign_decision())
+        return self._is_approved(self.campaign_approval())
 
     def unapproved_commits(self) -> list[str]:
         """Campaign commits that still need approval.
@@ -121,7 +121,7 @@ class ReviewVerbs:
         commits = commits if commits is not None else packet.campaign_commits(self)
         if not commits:
             return None
-        decision = self.campaign_decision()
+        decision = self.campaign_approval()
         if self._is_approved(decision):
             return None
         if (
@@ -140,7 +140,7 @@ class ReviewVerbs:
 
     def consume_approvals(self, commits: list[str] | None = None) -> None:
         """Mark the latest campaign decision consumed after a landed delivery."""
-        decision = self.campaign_decision()
+        decision = self.campaign_approval()
         if decision is not None:
-            self.store.consume_review_decisions([int(decision["id"])])
+            self.store.consume_approvals([int(decision["id"])])
             self.store.conn.commit()

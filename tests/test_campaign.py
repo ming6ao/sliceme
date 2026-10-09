@@ -1,7 +1,7 @@
 """Campaign orchestration core: the DAG, the wave recorder, and the report.
 
 These pin the campaign contract:
-* ``start --no-unit`` leaves no phantom unit and records the default branch;
+* ``start`` records the campaign without creating a worktree;
 * ``record_wave`` commits each node's owned paths on the one campaign worktree;
 * ``report`` is a deterministic skeleton;
 * the DAG projects into waves with a concurrency cap.
@@ -88,14 +88,13 @@ class CampaignCase(unittest.TestCase):
         )
 
 
-class NoUnitBootstrapTests(CampaignCase):
-    def test_no_unit_leaves_no_phantom_unit_and_records_default(self):
-        result = Service.init(self.root, design="DESIGN.md", no_unit=True)
-        self.assertIsNone(result["unit"])
+class BootstrapTests(CampaignCase):
+    def test_start_records_the_campaign_without_a_worktree(self):
+        result = Service.init(self.root, design="DESIGN.md")
+        self.assertEqual(result["feature_branch"], "feat/design")
         self.assertIsNone(result["worktree"])
         service = Service(self.root)
         try:
-            self.assertEqual(service.list_units(), [])
             self.assertEqual(service.config["target_branch"], "feat/design")
             self.assertEqual(service.config["main_branch"], "feat/design")
             self.assertEqual(service.config["worktree_branch"], "feat/design")
@@ -105,7 +104,7 @@ class NoUnitBootstrapTests(CampaignCase):
             service.close()
 
     def test_init_uses_the_feature_branch_override(self):
-        Service.init(self.root, feature_branch="feat/adopt", no_unit=True)
+        Service.init(self.root, feature_branch="feat/adopt")
         service = Service(self.root)
         try:
             self.assertEqual(service.config["target_branch"], "feat/adopt")
@@ -115,15 +114,15 @@ class NoUnitBootstrapTests(CampaignCase):
 
     def test_init_needs_a_design_or_a_feature_branch(self):
         with self.assertRaises(SlicemeError):
-            Service.init(self.root, no_unit=True)
+            Service.init(self.root)
 
     def test_start_adds_a_campaign_for_a_second_feature_branch(self):
-        Service.init(self.root, feature_branch="feat/x", no_unit=True)
-        Service.init(self.root, feature_branch="feat/y", no_unit=True)
+        Service.init(self.root, feature_branch="feat/x")
+        Service.init(self.root, feature_branch="feat/y")
         service = Service(self.root)
         try:
             self.assertEqual(
-                {c["target_branch"] for c in service.store.list_campaigns()},
+                {c["work_branch"] for c in service.store.list_campaigns()},
                 {"feat/x", "feat/y"},
             )
         finally:
@@ -137,8 +136,8 @@ class RecordWaveTests(CampaignCase):
         # ownership.
         self.dag(
             [
-                {"id": "w1", "owns": ["dir:src"], "depends_on": []},
-                {"id": "w2", "owns": ["dir:docs"], "depends_on": []},
+                {"id": "w1", "owns": ["src"], "depends_on": []},
+                {"id": "w2", "owns": ["docs"], "depends_on": []},
             ]
         )
         unit = self.svc.create_campaign_workspace()
@@ -146,13 +145,13 @@ class RecordWaveTests(CampaignCase):
         (Path(unit["worktree"]) / "docs").mkdir(exist_ok=True)
         (Path(unit["worktree"]) / "docs" / "readme.md").write_text("docs\n")
         result = self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
-        self.assertEqual([c["node"] for c in result["candidates"]], ["w1", "w2"])
+        self.assertEqual([c["node"] for c in result["records"]], ["w1", "w2"])
         # The delivery base is untouched until the pull request merges.
         self.assertEqual(self.file_on("main", "src/a.py"), "a = 1\n")
 
     def test_record_rejects_a_path_outside_every_node(self):
         self.campaign_plane()
-        self.dag([{"id": "w1", "owns": ["dir:src"], "depends_on": []}])
+        self.dag([{"id": "w1", "owns": ["src"], "depends_on": []}])
         unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "README.md").write_text("# changed\n")
         with self.assertRaises(SlicemeError) as ctx:
@@ -168,8 +167,7 @@ class ReportTests(CampaignCase):
                 {
                     "id": "w1",
                     "label": "alpha",
-                    "phase": "P0",
-                    "owns": ["dir:src"],
+                    "owns": ["src"],
                     "depends_on": [],
                     "acceptance": ["true"],
                 }
@@ -186,12 +184,24 @@ class ReportTests(CampaignCase):
 
     def test_status_exposes_campaign_fields(self):
         self.campaign_plane()
-        self.dag([{"id": "w1", "owns": ["dir:src"], "depends_on": []}])
+        self.dag([{"id": "w1", "owns": ["src"], "depends_on": []}])
         self.record(0, {"src/a.py": "a = 2\n"})
         status = self.svc.status()
         self.assertEqual(status["feature_branch"], "feat/x")
         self.assertEqual(status["default_branch"], "main")
         self.assertTrue(status["dag_waves"])
+
+    def test_report_reads_the_campaign_state(self):
+        # The report's per-node unit state is the campaign state, not a unit's.
+        self.campaign_plane()
+        self.dag([{"id": "w1", "owns": ["src"], "depends_on": []}])
+        self.record(0, {"src/a.py": "a = 2\n"})
+        self.svc.store.set_campaign_state("feat--x", "delivered")
+        self.svc.store.conn.commit()
+        report = self.svc.report(narrative="done")
+        self.assertEqual(
+            [row["unit_state"] for row in report["skeleton"]["nodes"]], ["delivered"]
+        )
 
 
 class DagWaveStatusTests(CampaignCase):
@@ -199,10 +209,10 @@ class DagWaveStatusTests(CampaignCase):
         self.campaign_plane()
         self.dag(
             [
-                {"id": "w1", "owns": ["dir:a"], "depends_on": []},
-                {"id": "w2", "owns": ["dir:a"], "depends_on": []},
-                {"id": "w3", "owns": ["dir:c"], "depends_on": ["w1"]},
-                {"id": "w4", "owns": ["dir:d"], "depends_on": []},
+                {"id": "w1", "owns": ["a"], "depends_on": []},
+                {"id": "w2", "owns": ["a"], "depends_on": []},
+                {"id": "w3", "owns": ["c"], "depends_on": ["w1"]},
+                {"id": "w4", "owns": ["d"], "depends_on": []},
             ]
         )
         status = self.svc.status()
@@ -218,8 +228,8 @@ class DagWaveStatusTests(CampaignCase):
         self.campaign_plane()
         self.dag(
             [
-                {"id": "w1", "owns": ["dir:a"], "depends_on": ["w2"]},
-                {"id": "w2", "owns": ["dir:b"], "depends_on": ["w1"]},
+                {"id": "w1", "owns": ["a"], "depends_on": ["w2"]},
+                {"id": "w2", "owns": ["b"], "depends_on": ["w1"]},
             ]
         )
         status = self.svc.status()
@@ -228,50 +238,46 @@ class DagWaveStatusTests(CampaignCase):
 
 
 class ReadinessGateTests(CampaignCase):
-    def write_state(self, nodes, *, waves=None, current_wave=0):
-        write_json(
-            campaign.state_path(self.root, "feat/x"),
-            {
-                "campaign": "demo",
-                "feature_branch": "feat/x",
-                "waves": waves or [],
-                "current_wave": current_wave,
-                "nodes": nodes,
-            },
+    def record_node(self, node):
+        """Insert a record so the wave cursor treats *node* as finished."""
+        self.svc.store.create_record(
+            head_commit="0" * 40, summary=None, node=node, campaign="feat--x"
+        )
+        self.svc.store.conn.commit()
+
+    def write_descriptor(self, nodes, branch="feat/x"):
+        campaign.write_session(
+            self.root, branch, {"feature_branch": branch, "nodes": nodes}
         )
 
     def test_status_ready_gates_on_dependencies(self):
         self.campaign_plane()
         self.dag(
             [
-                {"id": "w1", "owns": ["dir:a"], "depends_on": []},
-                {"id": "w2", "owns": ["dir:b"], "depends_on": ["w1"]},
-                {"id": "w3", "owns": ["dir:c"], "depends_on": ["w1"]},
+                {"id": "w1", "owns": ["a"], "depends_on": []},
+                {"id": "w2", "owns": ["b"], "depends_on": ["w1"]},
+                {"id": "w3", "owns": ["c"], "depends_on": ["w1"]},
             ]
         )
-        # w1 is done, so its dependents are ready even though they share a wave
-        # index; the gate is readiness, not wave membership (DEC-2).
-        self.write_state({"w1": {"status": "done"}})
+        # w1 is recorded, so the cursor advances past wave 0 and its dependents
+        # are ready; the wave is the one scheduling gate.
+        self.record_node("w1")
         self.assertEqual(self.svc.ready_nodes(), ["w2", "w3"])
         self.assertEqual(self.svc.status()["ready"], ["w2", "w3"])
 
-    def test_status_ready_excludes_done_running_and_blocked_nodes(self):
+    def test_status_ready_excludes_recorded_and_running_nodes(self):
         self.campaign_plane()
         self.dag(
             [
-                {"id": "w1", "owns": ["dir:a"], "depends_on": []},
-                {"id": "w2", "owns": ["dir:b"], "depends_on": ["w1"]},
-                {"id": "w3", "owns": ["dir:c"], "depends_on": []},
+                {"id": "w1", "owns": ["a"], "depends_on": []},
+                {"id": "w2", "owns": ["b"], "depends_on": ["w1"]},
+                {"id": "w3", "owns": ["c"], "depends_on": []},
             ]
         )
-        self.write_state(
-            {
-                "w1": {"status": "running"},
-                "w2": {"status": "pending"},
-                "w3": {"status": "done"},
-            }
-        )
-        # w2 waits on w1; w1 is running and w3 is done, so nothing is ready.
+        # w1 is running and w3 is recorded, so nothing in wave 0 is ready; w2
+        # waits on w1 in the next wave.
+        self.record_node("w3")
+        self.write_descriptor({"w1": {"status": "running"}})
         self.assertEqual(self.svc.ready_nodes(), [])
 
     def test_status_ready_needs_a_dag(self):
@@ -295,7 +301,6 @@ class DagStateTests(unittest.TestCase):
     def test_paths_share_one_glob_per_campaign(self):
         dag = campaign.dag_path(self.root, "feat/x")
         self.assertEqual(dag.name, "feat--x.dag.json")
-        self.assertEqual(campaign.state_path(self.root, "feat/x").name, "feat--x.state.json")
         self.assertEqual(campaign.report_path(self.root, "feat/x").name, "feat--x.report.md")
         self.assertEqual(
             campaign.worker_log_path(self.root, "feat/x", "w1").name,
@@ -317,18 +322,29 @@ class ConfigMigrationTests(CampaignCase):
         Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
         cfg = json.loads(config_path(self.root).read_text())
         self.assertEqual(cfg["default_branch"], "main")
-        self.assertEqual(cfg["delivery_base"], "main")
+        self.assertEqual(cfg["base_branch"], "main")
+
+
+class CampaignWorktreeTests(CampaignCase):
+    def test_create_workspace_records_the_campaign_worktree(self):
+        # The campaign owns one worktree; the engine records its path on the
+        # campaign row so units never own it.
+        self.campaign_plane()
+        self.dag([{"id": "w1", "owns": ["src"], "depends_on": []}])
+        unit = self.svc.create_campaign_workspace()
+        row = self.svc.store.get_campaign("feat/x")
+        self.assertEqual(row["worktree"], unit["worktree"])
 
 
 class CurrentWaveAdvanceTests(CampaignCase):
     def test_ready_advances_past_a_recorded_wave(self):
         # Nothing writes state.json, so the current wave is derived from the
-        # recorded candidates in SQLite.  Before the fix this stayed on wave 0.
+        # recorded records in SQLite.  Before the fix this stayed on wave 0.
         self.campaign_plane()
         self.dag(
             [
-                {"id": "w1", "owns": ["dir:src"], "depends_on": []},
-                {"id": "w2", "owns": ["dir:docs"], "depends_on": ["w1"]},
+                {"id": "w1", "owns": ["src"], "depends_on": []},
+                {"id": "w2", "owns": ["docs"], "depends_on": ["w1"]},
             ]
         )
         before = self.svc.ready()

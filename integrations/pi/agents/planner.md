@@ -15,18 +15,19 @@ plan.
   and `depends_on`, with `concurrency` (default 3) as the per-wave cap. You do
   not write waves. You write the directories and edges; the coordinator
   computes the waves from them.
-- `ready(n) := every d in n.depends_on is done`. Readiness is the spawn gate; a
-  node starts once its dependencies are done, and the wave stays a display
-  hint. `done` means verified **and recorded** onto the campaign worktree.
-  Every wave works in the same worktree, so a later wave already sees the files
-  of the previous wave without a merge or a rebase.
+- `ready(n) := n is a member of the current wave, not recorded, not running`.
+  The wave is the one scheduling gate: every dependency lives in an earlier
+  wave, so a node starts once the engine reaches its wave and its own status is
+  neither recorded nor running.  Every wave works in the same worktree, so a
+  later wave already sees the files of the previous wave without a merge or a
+  rebase.
 - **`owns` is a list of directories, never files or symbols.** For every path a
   node will add, modify, or delete, declare the *deepest directory that contains
   it*. An empty or blank `owns` entry is an error. A node that changes no file
   may omit `owns`, and an empty `owns` list stays valid.
-  - A change to `src/api/routes.py` owns `dir:src/api`.
-  - A change to `src/top.py` owns `dir:src`.
-  - A repository-root file such as `Cargo.toml` owns `dir:.`. Ownership is a subtree: owning `dir:src` also serializes everything
+  - A change to `src/api/routes.py` owns `src/api`.
+  - A change to `src/top.py` owns `src`.
+  - A repository-root file such as `Cargo.toml` owns `.`. Ownership is a subtree: owning `src` also serializes everything
   under `src/`, so keep scopes as deep and narrow as the work allows.
 - Keep same-wave `owns` **disjoint**: any subtree overlap (equal, ancestor, or
   descendant) puts the later node in a later wave.
@@ -55,7 +56,7 @@ plan.
   ships no manifest, set `"sandbox_required": true`; the engine then refuses to
   record a wave until a human adds one. Never invent a sandbox command.
 - A barrier is an explicit node that every member of the prior group depends on,
-  or a `depends_on` edge; `phase` is a display label only.
+  or a `depends_on` edge.
 - **Campaign branch.** The coordinator fixes the campaign branch before you run.
   Write it as `feature_branch`; it is required. Set `base` to the delivery base:
   the default branch the pull request lands on (for example `main`). The
@@ -80,9 +81,8 @@ It must be valid JSON with this shape:
     {
       "id": "w1",
       "label": "human label",
-      "phase": "P0",                 // display only
       "goal": "prompt seed for the worker",
-      "owns": ["dir:backends/cpu", "dir:src"],
+      "owns": ["backends/cpu", "src"],
       "depends_on": [],
       "acceptance": ["bazel test //..."],
       "gpu": "none"
@@ -91,7 +91,8 @@ It must be valid JSON with this shape:
 }
 ```
 
-`owns` entries are always `dir:PATH` (or a bare path). A non-directory entry
-(`file:`, `symbol:`, ...) is a hard error and the campaign will not start.
+`owns` entries are always repository-relative directory paths (for example
+`src/api`). A kind prefix (`dir:`, `file:`, `symbol:`, ...) is a hard error and
+the campaign will not start.
 Do not create a plan unit and do not commit the DAG; it is plane state. After
 writing the file, reply with a short summary of the nodes and their edges.

@@ -14,7 +14,6 @@ from sliceme.util import SlicemeError
 from sliceme.ownership import (
     DEFAULT_WAVE_SIZE,
     plan_dag_waves,
-    readiness,
     validate_dag,
 )
 
@@ -34,20 +33,20 @@ class WavePlanTests(unittest.TestCase):
     def test_independent_non_conflicting_nodes_share_a_wave(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src/a"]),
-                node("w2", ["dir:src/b"]),
-                node("w3", ["dir:src/c"]),
+                node("w1", ["src/a"]),
+                node("w2", ["src/b"]),
+                node("w3", ["src/c"]),
             ]
         )
         self.assertEqual(self.members(waves), [["w1", "w2", "w3"]])
 
     def test_wave_size_caps_membership_and_opens_a_new_wave(self):
-        nodes = [node(f"w{i}", [f"dir:d{i}"]) for i in range(5)]
+        nodes = [node(f"w{i}", [f"d{i}"]) for i in range(5)]
         waves = plan_dag_waves(nodes, wave_size=3)
         self.assertEqual(self.members(waves), [["w0", "w1", "w2"], ["w3", "w4"]])
 
     def test_default_wave_size_is_three(self):
-        nodes = [node(f"w{i}", [f"dir:d{i}"]) for i in range(4)]
+        nodes = [node(f"w{i}", [f"d{i}"]) for i in range(4)]
         waves = plan_dag_waves(nodes)
         self.assertEqual(DEFAULT_WAVE_SIZE, 3)
         self.assertEqual([len(w.members) for w in waves], [3, 1])
@@ -55,8 +54,8 @@ class WavePlanTests(unittest.TestCase):
     def test_dependency_forces_a_later_wave(self):
         waves = plan_dag_waves(
             [
-                node("w2", ["dir:src/b"], depends_on=["w1"]),
-                node("w1", ["dir:src/a"]),
+                node("w2", ["src/b"], depends_on=["w1"]),
+                node("w1", ["src/a"]),
             ]
         )
         self.assertEqual(self.members(waves), [["w1"], ["w2"]])
@@ -64,9 +63,9 @@ class WavePlanTests(unittest.TestCase):
     def test_dependency_barrier_holds_even_when_wave_has_room(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src/a"]),
-                node("w2", ["dir:src/b"], depends_on=["w1"]),
-                node("w3", ["dir:src/c"]),
+                node("w1", ["src/a"]),
+                node("w2", ["src/b"], depends_on=["w1"]),
+                node("w3", ["src/c"]),
             ]
         )
         # w3 may share w1's wave, but w2 cannot.
@@ -75,8 +74,8 @@ class WavePlanTests(unittest.TestCase):
     def test_same_directory_conflicts(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src/api"]),
-                node("w2", ["dir:src/api"]),
+                node("w1", ["src/api"]),
+                node("w2", ["src/api"]),
             ]
         )
         self.assertEqual(self.members(waves), [["w1"], ["w2"]])
@@ -86,8 +85,8 @@ class WavePlanTests(unittest.TestCase):
     def test_ancestor_and_descendant_conflict(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src"]),
-                node("w2", ["dir:src/api"]),
+                node("w1", ["src"]),
+                node("w2", ["src/api"]),
             ]
         )
         self.assertEqual(self.members(waves), [["w1"], ["w2"]])
@@ -95,8 +94,8 @@ class WavePlanTests(unittest.TestCase):
     def test_root_owns_the_whole_tree(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:."]),
-                node("w2", ["dir:src/api"]),
+                node("w1", ["."]),
+                node("w2", ["src/api"]),
             ]
         )
         self.assertEqual(self.members(waves), [["w1"], ["w2"]])
@@ -104,7 +103,7 @@ class WavePlanTests(unittest.TestCase):
     def test_trailing_slash_and_prefix_normalize(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src/api/"]),
+                node("w1", ["src/api/"]),
                 node("w2", ["src/api"]),
             ]
         )
@@ -113,8 +112,8 @@ class WavePlanTests(unittest.TestCase):
     def test_sibling_directories_never_conflict(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src/models"]),
-                node("w2", ["dir:src/model"]),
+                node("w1", ["src/models"]),
+                node("w2", ["src/model"]),
             ]
         )
         # The old token-similarity tier is gone: only subtree overlap matters.
@@ -127,9 +126,9 @@ class WavePlanTests(unittest.TestCase):
     def test_dependency_is_min_wave_even_after_conflict(self):
         waves = plan_dag_waves(
             [
-                node("w1", ["dir:src/api"]),
-                node("w2", ["dir:src/api"]),
-                node("w3", ["dir:src/c"], depends_on=["w2"]),
+                node("w1", ["src/api"]),
+                node("w2", ["src/api"]),
+                node("w3", ["src/c"], depends_on=["w2"]),
             ]
         )
         # w2 conflicts with w1 -> wave 1; w3 must be strictly after w2.
@@ -137,10 +136,10 @@ class WavePlanTests(unittest.TestCase):
 
     def test_planning_is_deterministic(self):
         nodes = [
-            node("w2", ["dir:src/b"], depends_on=["w1"]),
-            node("w1", ["dir:src/a"]),
-            node("w3", ["dir:src/a"]),
-            node("w4", ["dir:src/d"]),
+            node("w2", ["src/b"], depends_on=["w1"]),
+            node("w1", ["src/a"]),
+            node("w3", ["src/a"]),
+            node("w4", ["src/d"]),
         ]
         first = self.members(plan_dag_waves(nodes))
         second = self.members(plan_dag_waves(nodes))
@@ -170,10 +169,10 @@ class WavePlanTests(unittest.TestCase):
     def test_non_directory_owns_is_rejected(self):
         with self.assertRaises(SlicemeError) as ctx:
             plan_dag_waves([node("w1", ["file:src/a.py"])])
-        self.assertIn("must be directories", str(ctx.exception))
+        self.assertIn("must be a repository-relative directory", str(ctx.exception))
 
     def test_validate_dag_accepts_and_rejects(self):
-        validate_dag([node("w1", ["dir:src/api"]), node("w2", ["dir:docs"])])
+        validate_dag([node("w1", ["src/api"]), node("w2", ["docs"])])
         with self.assertRaises(SlicemeError):
             validate_dag([node("w1", ["symbol:src/a.py#A"])])
 
@@ -200,46 +199,27 @@ class GpuIsolationTests(unittest.TestCase):
         # Two GPU nodes in disjoint directories still cannot share a wave.
         waves = plan_dag_waves(
             [
-                gpu_node("g1", "T1", owns=["dir:src/a"]),
-                gpu_node("g2", "T1", owns=["dir:src/b"]),
+                gpu_node("g1", "T1", owns=["src/a"]),
+                gpu_node("g2", "T1", owns=["src/b"]),
             ]
         )
         self.assertEqual([w.members for w in waves], [["g1"], ["g2"]])
 
 
 class ReadinessTests(unittest.TestCase):
-    """``readiness`` is the spawn gate: deps done, node not yet done/running."""
+    """The readiness filter is retired; the wave is the one scheduling gate.
 
-    def test_nodes_without_dependencies_are_ready(self):
-        nodes = [node("a"), node("b", ["dir:src/b"], depends_on=["a"])]
-        self.assertEqual(readiness(nodes, {"nodes": {}}), ["a"])
+    See ``tests/test_wave_cursor.py``: one cursor drives ``ready``, ``record``,
+    and ``check``, and a recorded node satisfies a dependency.
+    """
 
-    def test_dependent_is_ready_once_every_dependency_is_done(self):
+    def test_recorded_node_satisfies_a_dependency(self):
         nodes = [node("a"), node("b", depends_on=["a"])]
-        state = {"nodes": {"a": {"status": "done"}}}
-        self.assertEqual(readiness(nodes, state), ["b"])
-
-    def test_partial_dependencies_block_readiness(self):
-        nodes = [node("a"), node("b"), node("c", depends_on=["a", "b"])]
-        state = {"nodes": {"a": {"status": "done"}, "b": {"status": "pending"}}}
-        self.assertEqual(readiness(nodes, state), ["b"])
-        state["nodes"]["b"]["status"] = "done"
-        self.assertEqual(readiness(nodes, state), ["c"])
-
-    def test_done_and_running_nodes_are_not_ready(self):
-        nodes = [node("a"), node("b")]
-        state = {"nodes": {"a": {"status": "done"}, "b": {"status": "running"}}}
-        self.assertEqual(readiness(nodes, state), [])
-
-    def test_missing_state_treats_dependencies_as_pending(self):
-        nodes = [node("a"), node("b", depends_on=["a"])]
-        self.assertEqual(readiness(nodes, {}), ["a"])
-
-    def test_order_follows_declaration(self):
-        self.assertEqual(readiness([node("b"), node("a")], {"nodes": {}}), ["b", "a"])
-
-    def test_readiness_does_not_need_owns(self):
-        self.assertEqual(readiness([node("a")], {"nodes": {}}), ["a"])
+        # A dependency lives in an earlier wave, so recording ``a`` advances the
+        # wave cursor and makes ``b`` ready; there is no dependency filter.
+        waves = plan_dag_waves(nodes)
+        wave_of = {m: w.index for w in waves for m in w.members}
+        self.assertLess(wave_of["a"], wave_of["b"])
 
 
 if __name__ == "__main__":

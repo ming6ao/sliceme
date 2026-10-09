@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from .store import Store
+from . import integrate
+from .gitutil import workspace_lock  # noqa: F401
 from .util import (
     SlicemeError,
     branch_key,
@@ -26,9 +28,8 @@ from .verbs.delivery import DeliveryVerbs
 from .verbs.review import ReviewVerbs
 from .verbs.sessions import SessionVerbs
 from .verbs.status import StatusVerbs
-from .verbs.support import _default_worktree_branch, campaign_lock  # noqa: F401
 
-__all__ = ["Service", "campaign_lock"]
+__all__ = ["Service", "workspace_lock"]
 
 
 class Service(
@@ -109,22 +110,34 @@ class Service(
     def config(self) -> dict[str, Any]:
         """The effective config: plane fields plus the bound campaign fields.
 
-        Most call sites read ``target_branch`` / ``worktree_branch`` and keep
-        working.  Plane-only readers use :attr:`plane_config`.
+        The canonical keys are ``work_branch`` (the pull request head) and
+        ``base_branch`` (the pull request base).  ``default_branch`` stays the
+        separate protected branch.  The retired names (``target_branch``,
+        ``main_branch``, ``worktree_branch``, ``feature_branch``,
+        ``delivery_base``, ``base``) mirror the new ones for one release.
+        Plane-only readers use :attr:`plane_config`.
         """
         cfg = dict(self.plane_config)
         campaign = self.campaign
+        work_branch = (
+            campaign.get("work_branch") if campaign else None
+        ) or integrate.work_branch_of(cfg)
+        base_branch = (
+            campaign.get("base_branch") if campaign else None
+        ) or integrate.base_branch_of(cfg)
         if campaign is not None:
-            cfg["target_branch"] = campaign["target_branch"]
-            cfg["main_branch"] = campaign["target_branch"]
-            cfg["worktree_branch"] = campaign["worktree_branch"]
-            cfg["delivery_base"] = campaign.get("delivery_base") or cfg.get(
-                "delivery_base"
-            )
-            cfg["base"] = campaign.get("base") or cfg.get("base")
             cfg["campaign_name"] = campaign.get("name")
             cfg["campaign_design"] = campaign.get("design")
             cfg["campaign_key"] = campaign["key"]
+        cfg["work_branch"] = work_branch
+        cfg["base_branch"] = base_branch
+        # Read-time shim for one release: the retired names mirror the new ones.
+        cfg["target_branch"] = work_branch
+        cfg["main_branch"] = work_branch
+        cfg["worktree_branch"] = work_branch
+        cfg["feature_branch"] = work_branch
+        cfg["delivery_base"] = base_branch
+        cfg["base"] = base_branch
         return cfg
 
     campaign_config = config
@@ -134,25 +147,20 @@ class Service(
         if self.store.list_campaigns():
             return None
         cfg = read_json(config_path(self.root)) or {}
-        target = cfg.get("target_branch") or cfg.get("main_branch")
+        target = (
+            cfg.get("work_branch")
+            or cfg.get("worktree_branch")
+            or cfg.get("target_branch")
+            or cfg.get("main_branch")
+            or cfg.get("feature_branch")
+        )
         if not target:
             return None
-        worktree_branch = cfg.get("worktree_branch") or _default_worktree_branch(
-            self.root, str(target)
-        )
-        unit = self.store.get_unit("campaign")
+        work_branch = str(target)
         row = self.store.create_campaign(
-            key=branch_key(str(target)),
-            target_branch=str(target),
-            worktree_branch=str(worktree_branch),
-            delivery_base=cfg.get("delivery_base") or cfg.get("default_branch"),
-            base=cfg.get("base"),
+            key=branch_key(work_branch),
+            work_branch=work_branch,
+            base_branch=integrate.base_branch_of(cfg),
             unit_name="campaign",
         )
-        if unit is not None:
-            self.store.conn.execute(
-                "UPDATE units SET campaign=? WHERE id=? AND campaign IS NULL",
-                (row["key"], int(unit["id"])),
-            )
-            self.store.conn.commit()
         return row

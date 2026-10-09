@@ -18,6 +18,7 @@ FAKE_GH_BIN = Path(__file__).resolve().parent / "bin"
 
 sys.path.insert(0, str(REPO_ROOT))
 from sliceme import campaign, surface  # noqa: E402
+from sliceme.service import Service  # noqa: E402
 from sliceme.util import write_json  # noqa: E402
 
 
@@ -49,9 +50,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue((root / ".sliceme" / "config.json").is_file())
 
-            out = run_cli(["--json", "start", "--name", "alpha"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-
             out = run_cli(["status", "--json"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("units", json.loads(out.stdout))
@@ -66,36 +64,27 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
-            # First call from the main checkout initialises the plane and a unit.
+            # First call from the main checkout initialises the plane and
+            # records the campaign; the worktree is created later by `open`.
             out = run_cli(["--json", "start", "--design", "DESIGN.md"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             first = json.loads(out.stdout)
             self.assertTrue(first["initialized"])
-            self.assertTrue(first["created"])
+            self.assertEqual(first["feature_branch"], "feat/design")
+            self.assertIsNone(first["worktree"])
             self.assertTrue((root / ".sliceme" / "config.json").is_file())
-            worktree = Path(first["worktree"])
-            self.assertTrue(worktree.is_dir())
 
-            # Second call from inside the unit worktree is a no-op.
-            out = run_cli(["--json", "start"], worktree)
+            # A repeated call from the same checkout is idempotent.
+            out = run_cli(["--json", "start"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             again = json.loads(out.stdout)
             self.assertFalse(again["initialized"])
-            self.assertFalse(again["created"])
-            self.assertEqual(again["unit"], first["unit"])
-
-            # A fresh call from the main checkout gets a distinct unit name.
-            out = run_cli(["--json", "start"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            third = json.loads(out.stdout)
-            self.assertFalse(third["initialized"])
-            self.assertTrue(third["created"])
-            self.assertNotEqual(third["unit"], first["unit"])
+            self.assertEqual(again["campaign"], first["campaign"])
 
             # `init` remains a hidden alias for `start`.
-            out = run_cli(["--json", "init"], worktree)
+            out = run_cli(["--json", "init"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(json.loads(out.stdout)["unit"], first["unit"])
+            self.assertEqual(json.loads(out.stdout)["campaign"], first["campaign"])
 
     def test_status_health_and_simulate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,8 +96,6 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
             run_cli(["--json", "start", "--design", "DESIGN.md"], root)
-            run_cli(["--json", "start", "--name", "alpha"], root)
-            run_cli(["--json", "start", "--name", "beta"], root)
 
             out = run_cli(["--json", "status", "--health"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
@@ -130,7 +117,6 @@ class CliTests(unittest.TestCase):
 
             out = run_cli(["--json", "start", "--design", "DESIGN.md"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            worktree = Path(json.loads(out.stdout)["worktree"])
 
             # Nothing start created may show up as untracked/modified.
             status = subprocess.run(
@@ -148,16 +134,6 @@ class CliTests(unittest.TestCase):
                 )
                 self.assertEqual(ignored.returncode, 0, f".sliceme/{rel} not ignored")
 
-            # The unit worktree itself stays clean too.
-            wt_status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=str(worktree),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            self.assertEqual(wt_status.stdout.strip(), "")
-
     def test_cwd_native_start_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -167,13 +143,12 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x"], root)
-            out = run_cli(["--json", "start", "--name", "alpha", "--base", "main"], root)
-            worktree = Path(json.loads(out.stdout)["worktree"])
+            run_cli(["--json", "start", "--feature-branch", "feat/x"], root)
 
-            out = run_cli(["status", "--short"], worktree)
+            # `status --short` prints the bound campaign's key from any checkout.
+            out = run_cli(["status", "--short"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(out.stdout.strip(), "alpha")
+            self.assertEqual(out.stdout.strip(), "feat--x")
 
     def test_campaign_wave_record_approve_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,17 +168,17 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
             subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=tmp, check=True)
             out = run_cli(
-                ["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"],
+                ["--json", "start", "--feature-branch", "feat/x", "--check", "ok=true"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIsNone(json.loads(out.stdout)["unit"])
+            self.assertIsNone(json.loads(out.stdout)["worktree"])
 
-            # A plain `status` has no units and reports the feature branch.
+            # A plain `status` reports the feature branch and the one writer.
             out = run_cli(["status", "--json"], root)
             status = json.loads(out.stdout)
             self.assertEqual(status["feature_branch"], "feat/x")
-            self.assertEqual(status["units"], [])
+            self.assertEqual([u["branch"] for u in status["units"]], ["feat/x"])
 
             write_json(
                 campaign.dag_path(root, "feat/x"),
@@ -212,30 +187,30 @@ class CliTests(unittest.TestCase):
                     "feature_branch": "feat/x",
                     "base": "main",
                     "nodes": [
-                        {"id": "w1", "owns": ["dir:."], "depends_on": []}
+                        {"id": "w1", "label": "test", "owns": ["."], "depends_on": []}
                     ],
                 },
             )
-            out = run_cli(["--json", "wave", "--open"], root)
+            out = run_cli(["--json", "open"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             worktree = Path(json.loads(out.stdout)["unit"]["worktree"])
             (worktree / "a.txt").write_text("w1\n")
             out = run_cli(
-                ["--json", "wave", "--record", "--wave", "0", "--messages", '{"w1": "test"}'],
+                ["--json", "record"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
-            candidate = json.loads(out.stdout)["candidates"][0]
+            record = json.loads(out.stdout)["records"][0]
 
             out = run_cli(
-                ["--json", "review", "--decision", "approve", "--commit", candidate["head_commit"]],
+                ["--json", "approve", "--commit", record["head_commit"]],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
             out = run_cli(["--json", "deliver"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             delivered = json.loads(out.stdout)
-            self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+            self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
             pr = delivered["pull_request"]
             self.assertTrue(pr and pr["url"])
             # The campaign branch is pushed; the delivery base stays as it was
@@ -261,67 +236,11 @@ class CliTests(unittest.TestCase):
             rerun = json.loads(out.stdout)
             self.assertEqual(rerun["pull_request"]["url"], pr["url"])
 
-            out = run_cli(["--json", "review", "--report", "--narrative", "landed"], root)
+            out = run_cli(["--json", "report", "--narrative", "delivered"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             report = json.loads(out.stdout)
             self.assertEqual(Path(report["path"]).name, "feat--x.report.md")
-            self.assertIn("landed", report["content"])
-
-    def test_cli_wave_record_only_node(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
-            subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp, check=True)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, check=True)
-            (root / "src" / "a").mkdir(parents=True)
-            (root / "src" / "b").mkdir(parents=True)
-            (root / "src" / "a" / "x.py").write_text("a = 1\n")
-            (root / "src" / "b" / "y.py").write_text("b = 1\n")
-            subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
-            subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            write_json(
-                campaign.dag_path(root, "feat/x"),
-                {
-                    "campaign": "cli",
-                    "feature_branch": "feat/x",
-                    "base": "main",
-                    "nodes": [
-                        {"id": "w1", "owns": ["dir:src/a"], "depends_on": []},
-                        {"id": "w2", "owns": ["dir:src/b"], "depends_on": []},
-                    ],
-                },
-            )
-            out = run_cli(["--json", "wave", "--open"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            worktree = Path(json.loads(out.stdout)["unit"]["worktree"])
-            (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
-            (worktree / "src" / "b" / "y.py").write_text("b = 2\n")
-
-            # Each node records in its own scoped call: one stray path would fail
-            # only the node it is attributed to.
-            out = run_cli(
-                [
-                    "--json", "wave", "--record", "--wave", "0", "--only", "w1",
-                    "--messages", '{"w1": "change a"}',
-                ],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            first = json.loads(out.stdout)
-            self.assertEqual([c["node"] for c in first["candidates"]], ["w1"])
-            self.assertEqual(first["reason"], "ok")
-
-            out = run_cli(
-                [
-                    "--json", "wave", "--record", "--wave", "0", "--only", "w2",
-                    "--messages", '{"w2": "change b"}',
-                ],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual([c["node"] for c in json.loads(out.stdout)["candidates"]], ["w2"])
+            self.assertIn("delivered", report["content"])
 
     def test_cli_status_normalizes_same_ownership(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,12 +251,12 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
 
             nodes = [
-                {"id": "a", "owns": ["dir:src/x"], "depends_on": []},
-                {"id": "b", "owns": ["dir:src/x"], "depends_on": ["a"]},
+                {"id": "a", "owns": ["src/x"], "depends_on": []},
+                {"id": "b", "owns": ["src/x"], "depends_on": ["a"]},
             ]
             write_json(
                 campaign.dag_path(root, "feat/x"),
@@ -361,7 +280,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
+            run_cli(["--json", "start", "--feature-branch", "feat/x", "--check", "ok=true"], root)
 
             state_dir = root / ".sliceme"
             (state_dir / "feat--x.dag.json").write_text(
@@ -369,12 +288,9 @@ class CliTests(unittest.TestCase):
                     {
                         "campaign": "cli",
                         "feature_branch": "feat/x",
-                        "nodes": [{"id": "w1", "owns": ["dir:src"]}],
+                        "nodes": [{"id": "w1", "owns": ["src"]}],
                     }
                 )
-            )
-            (state_dir / "feat--x.state.json").write_text(
-                json.dumps({"nodes": {"w1": {"status": "running", "attempts": 1}}})
             )
             (state_dir / "feat--x.session.json").write_text(
                 json.dumps(
@@ -415,13 +331,13 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
 
             out = run_cli(
-                ["start", "--no-unit", "--feature-branch", "feat/x",
+                ["start", "--feature-branch", "feat/x",
                  "--check", "ok=true"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
             out = run_cli(
-                ["start", "--no-unit", "--feature-branch", "feat/y"],
+                ["start", "--feature-branch", "feat/y"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
@@ -452,7 +368,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             write_json(
                 campaign.dag_path(root, "feat/x"),
@@ -461,29 +377,25 @@ class CliTests(unittest.TestCase):
                     "feature_branch": "feat/x",
                     "base": "main",
                     "nodes": [
-                        {"id": "w1", "owns": ["dir:src/a"], "depends_on": []},
-                        {"id": "w2", "owns": ["dir:src/b"], "depends_on": ["w1"]},
+                        {"id": "w1", "owns": ["src/a"], "depends_on": []},
+                        {"id": "w2", "owns": ["src/b"], "depends_on": ["w1"]},
                     ],
                 },
             )
-            write_json(
-                campaign.state_path(root, "feat/x"),
-                {
-                    "wave_size": 1,
-                    "waves": [
-                        {"index": 0, "members": ["w1"], "status": "done"},
-                        {"index": 1, "members": ["w2"], "status": "pending"},
-                    ],
-                    "nodes": {"w1": {"status": "done"}},
-                },
+            # w1 has a record, so the DAG projection marks wave 0 done.
+            svc = Service(root)
+            svc.store.create_record(
+                head_commit="0" * 40, summary=None, node="w1", campaign="feat--x"
             )
+            svc.store.conn.commit()
+            svc.close()
 
             # The default human output is the dense summary, not the nested dump.
             out = run_cli(["status"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("campaign: cli", out.stdout)
-            self.assertIn("  w0 w1 [-] done", out.stdout)
-            self.assertIn("  w1 w2 [-] pending", out.stdout)
+            self.assertIn("  w0 w1 recorded", out.stdout)
+            self.assertIn("  w1 w2 pending", out.stdout)
             self.assertIn("wave 1 [pending]: w2", out.stdout)
             self.assertNotIn("campaign_key:", out.stdout)
 
@@ -491,7 +403,7 @@ class CliTests(unittest.TestCase):
             out = run_cli(["status", "--verbose"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("campaign_key:", out.stdout)
-            self.assertNotIn("  w0 w1 [-]", out.stdout)
+            self.assertNotIn("  w0 w1 recorded", out.stdout)
 
             # --json stays the nested dump and carries no lines key.
             out = run_cli(["status", "--json"], root)
@@ -509,23 +421,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             lines = json.loads(out.stdout)["lines"]
             self.assertEqual(lines[0], "campaign: cli")
-            self.assertIn("  w0 w1 [-] done", lines)
-            self.assertIn("  w1 w2 [-] pending", lines)
+            self.assertIn("  w0 w1 recorded", lines)
+            self.assertIn("  w1 w2 pending", lines)
             self.assertIn("wave 1 [pending]: w2", lines)
 
-            # --short still prints only the unit name, from inside its worktree;
-            # it also wins over --dense (both are explicit status views).
-            out = run_cli(
-                ["--json", "start", "--name", "alpha", "--base", "main"], root
-            )
+            # --short still prints only the campaign name; it also wins over
+            # --dense (both are explicit status views).
+            out = run_cli(["status", "--short"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            worktree = Path(json.loads(out.stdout)["worktree"])
-            out = run_cli(["status", "--short"], worktree)
+            self.assertEqual(out.stdout.strip(), "feat--x")
+            out = run_cli(["status", "--dense", "--short"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(out.stdout.strip(), "alpha")
-            out = run_cli(["status", "--dense", "--short"], worktree)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual(out.stdout.strip(), "alpha")
+            self.assertEqual(out.stdout.strip(), "feat--x")
 
     def test_status_plane_human_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -542,8 +449,7 @@ class CliTests(unittest.TestCase):
                     "start",
                     "--feature-branch",
                     "feat/x",
-                    "--no-unit",
-                    "--check",
+                                        "--check",
                     "ok=true",
                 ],
                 root,
@@ -555,8 +461,7 @@ class CliTests(unittest.TestCase):
                     "init",
                     "--feature-branch",
                     "feat/y",
-                    "--no-unit",
-                    "--base",
+                                        "--base",
                     "main",
                 ],
                 root,
@@ -582,7 +487,7 @@ class CliTests(unittest.TestCase):
             (root / "a.txt").write_text("hi\n")
             subprocess.run(["git", "add", "-A"], cwd=tmp, check=True)
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
-            out = run_cli(["--json", "start", "--no-unit", "--feature-branch", "feat/x", "--check", "ok=true"], root)
+            out = run_cli(["--json", "start", "--feature-branch", "feat/x", "--check", "ok=true"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             write_json(
                 campaign.dag_path(root, "feat/x"),
@@ -590,18 +495,18 @@ class CliTests(unittest.TestCase):
                     "campaign": "cli",
                     "feature_branch": "feat/x",
                     "base": "main",
-                    "nodes": [{"id": "w1", "owns": ["dir:src"], "depends_on": []}],
+                    "nodes": [{"id": "w1", "owns": ["src"], "depends_on": []}],
                 },
             )
             write_json(
-                campaign.state_path(root, "feat/x"),
-                {"nodes": {"w1": {"status": "running", "attempts": 1}}},
+                campaign.session_path(root, "feat/x"),
+                {"feature_branch": "feat/x", "nodes": {"w1": {"status": "running"}}},
             )
 
             cases = [
                 (["status", "--health"], "checks:"),
                 (["status", "--gc"], "removed_worktrees:"),
-                (["status", "--simulate", "--no-checks"], "candidate_count:"),
+                (["status", "--simulate", "--no-checks"], "record_count:"),
                 (["status", "--sessions"], "sessions:"),
                 (["status", "--resume", "--plan-only"], "resume_plan:"),
             ]

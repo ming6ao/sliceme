@@ -11,14 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .. import campaign, gitutil, integrate, sandbox
+from ..gitutil import workspace_lock
 from ..store import Store
 from ..util import (
     SlicemeError,
     now,
     state_dir,
-)
-from .support import (
-    _delivery_lock,
 )
 
 
@@ -42,23 +40,21 @@ class DeliveryVerbs:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
         from ..review import packet
 
-        feature_branch = (
-            self.config.get("target_branch") or self.config.get("main_branch") or ""
-        )
-        source_branch = source or self.config.get("worktree_branch") or ""
+        feature_branch = self.config.get("work_branch") or ""
+        source_branch = source or self.config.get("work_branch") or ""
         key = self.campaign_key()
         stored = self.store.get_campaign(key) if key else None
         if stored and stored.get("pr_url"):
             # Idempotent: the pull request is open, so the campaign is done.
             results = [
-                integrate.landed(
+                integrate.delivered_result(
                     f"pull request already open: {stored['pr_url']}",
                     {"url": stored["pr_url"], "number": stored.get("pr_number")},
                 )
             ]
         else:
             commits = packet.campaign_commits(self)
-            with _delivery_lock(self.root):
+            with workspace_lock(self.root):
                 override = self.require_all_approved(commits)
                 results = integrate.deliver_pull_request(
                     self.store,
@@ -68,10 +64,10 @@ class DeliveryVerbs:
                     source=source,
                     run_checks_flag=run_checks_flag,
                 )
-                if results and all(result.status == "landed" for result in results):
+                if results and all(result.status == "delivered" for result in results):
                     self.consume_approvals(commits)
                     if override:
-                        self.store.consume_review_decisions([int(override["id"])])
+                        self.store.consume_approvals([int(override["id"])])
                         self.store.conn.commit()
                     if key:
                         pull_request = results[0].pull_request or {}
@@ -91,8 +87,9 @@ class DeliveryVerbs:
         if cleanup == "all":
             artifacts_removed = self.remove_campaign_artifacts(keep_report=True)
         return {
+            "work_branch": feature_branch,
             "feature_branch": feature_branch,
-            # Deprecated mirror kept for one release; read feature_branch first.
+            # Deprecated mirror kept for one release; read work_branch first.
             "target_branch": feature_branch,
             "source": source_branch,
             "results": [r.to_dict() for r in results],
@@ -133,12 +130,11 @@ class DeliveryVerbs:
         self, *, branch: str | None = None, keep_report: bool = True
     ) -> list[str]:
         """Delete every per-campaign file.  Keep the report by default."""
-        branch = branch or self.config.get("main_branch") or "main"
+        branch = branch or self.config.get("work_branch") or "main"
         state = state_dir(self.root)
         key = campaign.branch_key(branch)
         paths = [
             campaign.dag_path(self.root, branch),
-            campaign.state_path(self.root, branch),
             campaign.session_path(self.root, branch),
             campaign.control_path(self.root, branch),
             *sorted(state.glob(f"{key}.worker_*.log")),
@@ -170,20 +166,26 @@ class DeliveryVerbs:
         """
         removed = []
         pruned_branches = []
-        for unit in self.store.list_units():
-            if unit["state"] not in {"landed", "closed"}:
+        # The campaign owns the worktree and the delivery state, so gc reads the
+        # campaign registry rather than the legacy per-unit state.
+        for row in self.store.list_campaigns():
+            state = str(row.get("state") or "")
+            if state not in {"landed", "delivered", "closed"}:
                 continue
-            path = Path(unit["worktree"])
-            branch = unit.get("branch")
+            recorded = row.get("worktree")
+            if not recorded:
+                continue
+            path = Path(recorded)
+            branch = row.get("work_branch")
             registered = bool(branch) and gitutil.worktree_for_branch(self.root, branch) is not None
             if path.exists() or registered:
-                removed.append(unit["name"])
+                removed.append(str(row["key"]))
             # Landed content is already on main as a squashed commit, so its
-            # `sliceme/<unit>` branch is disposable; otherwise one branch leaks per
-            # landed unit.  Closed units may hold unmerged work, so keep their
+            # branch is disposable; otherwise one branch leaks per delivered
+            # campaign.  Closed campaigns may hold unmerged work, so keep their
             # branches.  ``cleanup_worktree`` prunes stale metadata before
             # deleting the branch, so a hand-deleted worktree no longer blocks it.
-            drop_branch = unit["state"] == "landed" and branch
+            drop_branch = state in {"landed", "delivered"} and branch
             branch_existed = bool(drop_branch) and gitutil.branch_exists(self.root, branch)
             gitutil.cleanup_worktree(
                 self.root, path, branch=branch if drop_branch else None
@@ -196,13 +198,13 @@ class DeliveryVerbs:
         scratch = self.root / ".sliceme" / "scratch"
         rmtree(scratch)
         pruned_artifacts = self._prune_finished_artifacts() if artifacts else []
-        pruned_reviews = self._prune_reviews()
+        pruned_approvals = self._prune_approvals()
         self.store.conn.commit()
         return {
             "removed_worktrees": removed,
             "pruned_branches": pruned_branches,
             "pruned_artifacts": pruned_artifacts,
-            "pruned_reviews": pruned_reviews,
+            "pruned_approvals": pruned_approvals,
         }
 
     def _prune_finished_artifacts(self) -> list[str]:
@@ -213,7 +215,7 @@ class DeliveryVerbs:
         pass also reaches old campaigns that predate the campaign registry.
         """
         branches = {
-            str(row["target_branch"])
+            str(row["work_branch"])
             for row in self.store.list_campaigns()
             if str(row.get("state")) in {"landed", "delivered"}
         }
@@ -228,7 +230,7 @@ class DeliveryVerbs:
             for name in self.remove_campaign_artifacts(branch=branch)
         ]
 
-    def _prune_reviews(self) -> dict[str, int]:
+    def _prune_approvals(self) -> dict[str, int]:
         """Prune old review rows for campaigns that are gone and unregistered.
 
         Every key in the campaign registry, every descriptor file, and the
@@ -241,4 +243,4 @@ class DeliveryVerbs:
             for key, descriptor in campaign.list_sessions(self.root)
         }
         keep.update(row["key"] for row in self.store.list_campaigns())
-        return self.store.prune_reviews(keep_branch_keys=keep, keep_after=now() - days * 86400)
+        return self.store.prune_approvals(keep_branch_keys=keep, keep_after=now() - days * 86400)

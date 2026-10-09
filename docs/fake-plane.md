@@ -9,14 +9,14 @@ browser review client, so the fixture targets the reduced review surface.
 ## What the script builds
 
 The script creates a small git repository. It also creates a campaign worktree
-and three waves. Each wave records commits on the campaign branch.
+and three waves. Each wave records commits on the work branch.
 
 The plane contains:
 
 - five commits across three waves;
 - nine changed files;
 - check evidence for each commit;
-- campaign review decisions;
+- campaign approvals;
 - a campaign report;
 - worker logs;
 - two suspend/resume descriptors.
@@ -51,7 +51,7 @@ directory already holds a plane.
 python3 tools/fake_plane.py --dir /tmp/my-plane --keep
 ```
 
-The script prints a summary: the feature branch, the commit count, the changed
+The script prints a summary: the work branch, the commit count, the changed
 file count, and the campaign approval state. It also prints the engine commands
 that inspect the plane.
 
@@ -62,7 +62,7 @@ Use the engine verbs against the fake plane root.
 ```bash
 python3 -m sliceme --root /tmp/sliceme-fake-plane status
 python3 -m sliceme --root /tmp/sliceme-fake-plane status --verbose
-python3 -m sliceme --root /tmp/sliceme-fake-plane review --report --campaign feat/checkout
+python3 -m sliceme --root /tmp/sliceme-fake-plane report --campaign feat/checkout
 ```
 
 The report path from the summary holds the deterministic campaign report.

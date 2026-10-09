@@ -27,9 +27,9 @@ class WaveScopeCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
 
     nodes = [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
-        {"id": "w2", "owns": ["dir:src/b"], "depends_on": [], "acceptance": ["true"]},
-        {"id": "w3", "owns": ["dir:src/c"], "depends_on": ["w1"], "acceptance": ["true"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w2", "owns": ["src/b"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w3", "owns": ["src/c"], "depends_on": ["w1"], "acceptance": ["true"]},
     ]
 
     def setUp(self):
@@ -80,7 +80,7 @@ class WaveScopeCase(unittest.TestCase):
         return run("git", "show", f"{branch}:{rel}", cwd=self.root).stdout
 
     def approve(self):
-        return self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        return self.svc.record_approval(action="approve", all_commits=True, actor="test")
 
 
 class RecordTests(WaveScopeCase):
@@ -92,9 +92,9 @@ class RecordTests(WaveScopeCase):
         self.edit(worktree, "src/b/y.py", "b = 2\n")
 
         result = self.svc.record_wave(0, messages={"w1": "add a", "w2": "add b"})
-        nodes = [c["node"] for c in result["candidates"]]
+        nodes = [c["node"] for c in result["records"]]
         self.assertEqual(nodes, ["w1", "w2"])
-        self.assertTrue(all(c["unit_branch"] == unit["branch"] for c in result["candidates"]))
+        self.assertTrue(all(c["campaign"] == "feat--x" for c in result["records"]))
         # One commit per node on the shared campaign branch.  The subject is the
         # human description, never a wave prefix.
         log = run("git", "log", "--format=%s", f"main..{unit['branch']}", cwd=self.root)
@@ -129,105 +129,6 @@ class RecordTests(WaveScopeCase):
             self.svc.record_wave(0)
         self.assertIn("spans nodes", str(ctx.exception))
         self.assertEqual(ctx.exception.reason, "cross_node_rename")
-
-    def test_only_node_records_only_that_node(self):
-        unit = self.svc.create_wave_workspace(0)
-        self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
-        first = self.svc.record_wave(0, only="w1", messages={"w1": "add a"})
-        self.assertEqual(first["reason"], "ok")
-        self.assertEqual([c["node"] for c in first["candidates"]], ["w1"])
-        self.assertEqual(
-            first["results"],
-            [
-                {
-                    "node": "w1",
-                    "reason": "ok",
-                    "paths": ["src/a/x.py"],
-                    "candidate": first["candidates"][0]["id"],
-                }
-            ],
-        )
-        # w1's commit does not carry w2's path; w2 records on its own call.
-        subject = run("git", "log", "-1", "--format=%s", unit["branch"], cwd=self.root)
-        self.assertEqual(subject.stdout.strip(), "add a")
-        second = self.svc.record_wave(0, only="w2", messages={"w2": "add b"})
-        self.assertEqual([c["node"] for c in second["candidates"]], ["w2"])
-
-    def test_only_node_stray_file_fails_only_that_node(self):
-        unit = self.svc.create_wave_workspace(0)
-        self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
-        self.edit(unit["worktree"], "stray.txt", "stray\n")
-        head = run("git", "rev-parse", "HEAD", cwd=unit["worktree"]).stdout.strip()
-        with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0, only="w1", messages={"w1": "test"})
-        self.assertEqual(ctx.exception.reason, "stray_path")
-        # The failed node commits nothing.
-        self.assertEqual(
-            run("git", "rev-parse", "HEAD", cwd=unit["worktree"]).stdout.strip(), head
-        )
-        # The stray file fails only w1: w2's scoped record still commits its own
-        # change instead of every wave member failing on the one stray path.
-        result = self.svc.record_wave(0, only="w2", messages={"w2": "test"})
-        self.assertEqual([c["node"] for c in result["candidates"]], ["w2"])
-        self.assertEqual(result["reason"], "ok")
-
-    def test_only_node_ignores_a_path_owned_by_another_node(self):
-        unit = self.svc.create_wave_workspace(0)
-        self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        # w3 owns src/c and is in a later wave; a record scoped to w1 ignores it.
-        self.edit(unit["worktree"], "src/c/z.py", "c = 2\n")
-        result = self.svc.record_wave(0, only="w1", messages={"w1": "test"})
-        self.assertEqual([c["node"] for c in result["candidates"]], ["w1"])
-
-    def test_only_node_reports_an_ambiguous_path(self):
-        write_json(
-            campaign.dag_path(self.root, "feat/x"),
-            {
-                "campaign": "waves",
-                "feature_branch": "feat/x",
-                "base": "main",
-                "concurrency": 3,
-                "nodes": [
-                    {
-                        "id": "wide",
-                        "owns": ["dir:src"],
-                        "depends_on": [],
-                        "acceptance": ["true"],
-                    },
-                    {
-                        "id": "deep",
-                        "owns": ["dir:src/a"],
-                        "depends_on": [],
-                        "acceptance": ["true"],
-                    },
-                ],
-            },
-        )
-        unit = self.svc.create_wave_workspace(0)
-        # src/a/x.py is owned by both wide (src) and deep (src/a).
-        self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0, only="wide", messages={"wide": "test"})
-        self.assertEqual(ctx.exception.reason, "ambiguous_path")
-
-    def test_only_node_cross_node_rename_fails_the_source(self):
-        unit = self.svc.create_wave_workspace(0)
-        run("git", "mv", "src/a/x.py", "src/b/x.py", cwd=unit["worktree"])
-        with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0, only="w1", messages={"w1": "test"})
-        self.assertEqual(ctx.exception.reason, "cross_node_rename")
-        # The destination node is not the source, so it ignores the rename.
-        result = self.svc.record_wave(0, only="w2", messages={"w2": "test"})
-        self.assertEqual(result["reason"], "ok")
-
-    def test_only_node_requires_a_known_wave_node(self):
-        self.svc.create_wave_workspace(0)
-        with self.assertRaises(SlicemeError):
-            self.svc.record_wave(0, only="nope")
-        with self.assertRaises(SlicemeError):
-            self.svc.record_wave(0, only="w3")
 
     def test_missing_description_carries_the_reason_code(self):
         unit = self.svc.create_wave_workspace(0)
@@ -265,7 +166,7 @@ class WaveIntegrationTests(WaveScopeCase):
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
         self.approve()
         delivered = self.svc.deliver()
-        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+        self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
         self.assertTrue(delivered["pull_request"]["url"])
         # The campaign branch carries the work; the delivery base is unchanged
         # until a human merges the pull request.
@@ -389,25 +290,34 @@ class WaveCliTests(WaveScopeCase):
         )
 
     def test_cli_open_and_record(self):
-        opened = self.run_cli(["--json", "wave", "--open"])
+        opened = self.run_cli(["--json", "open"])
         self.assertEqual(opened.returncode, 0, opened.stderr)
         worktree = json.loads(opened.stdout)["unit"]["worktree"]
         self.edit(worktree, "src/a/x.py", "a = 3\n")
-
-        recorded = self.run_cli(
-            [
-                "--json",
-                "wave",
-                "--record",
-                "--wave",
-                "0",
-                "--messages",
-                '{"w1": "wire the loader"}',
-            ]
+        # The commit subject falls back to the DAG node label.
+        write_json(
+            campaign.dag_path(self.root, "feat/x"),
+            {
+                "campaign": "waves",
+                "feature_branch": "feat/x",
+                "base": "main",
+                "concurrency": 3,
+                "nodes": [
+                    {
+                        "id": "w1",
+                        "label": "wire the loader",
+                        "owns": ["src/a"],
+                        "depends_on": [],
+                        "acceptance": ["true"],
+                    }
+                ],
+            },
         )
+
+        recorded = self.run_cli(["--json", "record"])
         self.assertEqual(recorded.returncode, 0, recorded.stderr)
         payload = json.loads(recorded.stdout)
-        self.assertEqual([c["node"] for c in payload["candidates"]], ["w1"])
+        self.assertEqual([c["node"] for c in payload["records"]], ["w1"])
         branch = payload["branch"]
         log = run("git", "log", "--format=%s", f"main..{branch}", cwd=self.root)
         self.assertEqual(log.stdout.strip(), "wire the loader")

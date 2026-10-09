@@ -22,15 +22,14 @@ belongs to pi-subagents.
 
 The engine keeps one durable store and two files.
 
-- **`checks` table.** One terminal row per check run: the fingerprint, the
+- **`verdicts` table.** One terminal row per check run: the fingerprint, the
   source, the commit, the status, the duration, the exit code, and the output.
-  The row serves `check --current`, the review evidence, and the delivery path.
-- **`state.json`.** An optional, read-only legacy override that holds per-node
-  status, the current wave, and the wave list. The engine never writes it; the
-  engine reads it only when a legacy file is present. Git plus `state.db` are
-  authoritative.
+  The row serves `check`, the review evidence, and the delivery path.
+- **The session descriptor.** `.sliceme/<branch-key>.session.json` holds the
+  adapter's session binding and the per-node status map at suspend time. There
+  is no `state.json`; git plus `state.db` are authoritative.
 - **The report.** `.sliceme/<branch-key>.report.md`, written by
-  `review --report`.
+  `report`.
 - **The evidence document.** `.sliceme/<branch-key>.evidence.json` (the complete
   evidence) and `.sliceme/<branch-key>.evidence.md` (the bounded Markdown that
   becomes the pull request body), written by `evidence`.
@@ -41,9 +40,9 @@ surface.
 
 ### 2.1 Check counts
 
-`status` returns a `checks` block from `Store.check_counts(campaign=key)`: the
+`status` returns a `checks` block from `Store.verdict_counts(campaign=key)`: the
 number of terminal rows per status. The block is the cache health of one
-campaign, not a queue. A `cached` result on a `check --current` reply means the
+campaign, not a queue. A `cached` result on a `check` reply means the
 fingerprint already had a terminal row.
 
 ## 3. The status projections
@@ -52,8 +51,8 @@ fingerprint already had a terminal row.
 
 The default human `sliceme status` output is the **dense summary**: a header,
 one line per node in DAG order, and one line per wave. Its node and wave lines
-come from `dag.json`, git, and the recorded candidates in `state.db`. The
-engine uses `state.json` only as an optional, read-only legacy override. The
+come from `dag.json`, git, the recorded records in `state.db`, and the
+session descriptor. The
 header's `target`/`worktree` come from the campaign config, so a second terminal
 sees the same plan.
 
@@ -80,8 +79,8 @@ campaign falls back to a compact per-campaign plane list.
 - `dag_waves` (the scheduler's wave plan) and `dag_waves_error`;
 - `ready` (the ready node ids) and `paused`;
 - `checks` (the terminal-check counts);
-- `units` and `candidates` with their `node`, `log`, `candidate`, and
-  `verification` columns;
+- the campaign writer and `records` with their `node`, `log`, `record`,
+  and `verification` columns;
 - `sandbox` (the resolved gate);
 - `dag_merge` (the same-ownership contraction).
 
@@ -93,10 +92,10 @@ campaign falls back to a compact per-campaign plane list.
 
 ## 4. The simulation
 
-`sliceme status --simulate` groups prepared candidates into DAG waves,
+`sliceme status --simulate` groups recorded records into DAG waves,
 materializes each wave's combined tree, and runs the configured checks once over
 the combined result. `--no-checks` plans only. The simulation is a dry run: it
-changes no candidate, no branch, and no delivery base.
+changes no record, no branch, and no base branch.
 
 ## 5. Where child state lives
 
@@ -114,9 +113,9 @@ and the next `record` attributes the changes that exist.
 - **No daemon.** Poll `sliceme status` or `ready`. Do not add `--follow`.
 - **One synchronous runner.** The check runner writes one terminal row per run,
   so the count stays exact.
-- **Rebuildable.** `state.json` is an optional, read-only legacy override that
-  the engine never writes. Git and `state.db` win on conflict, so a stale
-  `status` read self-corrects on the next call.
+- **Rebuildable.** Node statuses derive from the recorded records in
+  `state.db` and the adapter's session descriptor. Git and `state.db` win on
+  conflict, so a stale `status` read self-corrects on the next call.
 - **Private.** The check output, the report, and the evidence document stay
   under the git-excluded `.sliceme/`.
 
@@ -124,7 +123,7 @@ and the next `record` attributes the changes that exist.
 
 - `tests/test_status_summary.py` drives the dense `status` summary.
 - `tests/test_checks.py` drives the check cache and `status` check counts.
-- `tests/test_sessions.py` covers the `checks` columns and the migration.
+- `tests/test_sessions.py` covers the `verdicts` columns and the migration.
 - `tests/test_evidence.py` drives the evidence document.
 - `tests/test_cli.py` drives the `status` modes.
 - `tests/test_pi_package.py` checks the wiring and the resource grants.
@@ -133,5 +132,5 @@ and the next `record` attributes the changes that exist.
 
 - `docs/sessions.md` describes suspend and resume.
 - `docs/database.md` documents the schema.
-- `docs/reference.md` documents the `status`, `ready`, `check`, `review`, and
+- `docs/reference.md` documents the `status`, `ready`, `check`, `report`, and
   `evidence` actions.

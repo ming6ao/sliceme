@@ -7,9 +7,9 @@ campaigns collide.  ``/`` in the branch name is replaced with ``--``::
     feat/nanochat-cpp  ->  feat--nanochat-cpp
 
 The orchestrator (the pi extension) owns writing ``dag.json``; Python reads
-it for ``sliceme report`` and resolves its path.  ``state.json`` is an
-optional, read-only legacy override that the engine never writes.  ``dag.json``
-is plane state, never committed to the repository.
+it for ``sliceme report`` and resolves its path.  ``dag.json`` is plane state,
+never committed to the repository.  The adapter-written session descriptor is
+the one place a suspended node's status lives; there is no ``state.json``.
 
 This module also renders the deterministic report skeleton
 (``.sliceme/<branch-key>.report.md``): design ref, feature branch, nodes,
@@ -41,10 +41,6 @@ def branch_key(branch: str) -> str:
 
 def dag_path(root: Path, branch: str) -> Path:
     return state_dir(root) / f"{branch_key(branch)}.dag.json"
-
-
-def state_path(root: Path, branch: str) -> Path:
-    return state_dir(root) / f"{branch_key(branch)}.state.json"
 
 
 def report_path(root: Path, branch: str) -> Path:
@@ -127,27 +123,30 @@ def load_dag(root: Path, branch: str) -> dict[str, Any] | None:
     return read_json(dag_path(root, branch))
 
 
-def load_state(root: Path, branch: str) -> dict[str, Any]:
-    data = read_json(state_path(root, branch)) or {}
-    if not isinstance(data.get("nodes"), dict):
-        data["nodes"] = {}
-    return data
+def descriptor_nodes(descriptor: dict[str, Any] | None) -> dict[str, Any]:
+    """The node-status map the adapter recorded in a session descriptor."""
+    nodes = (descriptor or {}).get("nodes")
+    return nodes if isinstance(nodes, dict) else {}
 
 
 def node_by_id(dag: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(n["id"]): n for n in dag.get("nodes", []) if n.get("id")}
 
 
-def node_status(state: dict[str, Any], node: str) -> str:
-    entry = (state.get("nodes") or {}).get(node) or {}
-    status = entry.get("status") if isinstance(entry, dict) else None
-    return str(status or "pending")
+def node_status(nodes: dict[str, Any], node: str) -> str:
+    """One node's status from a descriptor node map (string or object entry)."""
+    entry = nodes.get(node)
+    if isinstance(entry, dict):
+        return str(entry.get("status") or "pending")
+    if isinstance(entry, str) and entry:
+        return entry
+    return "pending"
 
 
 def config_branch(config: dict[str, Any]) -> str:
-    branch = config.get("main_branch")
+    branch = config.get("work_branch") or config.get("main_branch")
     if not branch:
-        raise SlicemeError("plane has no main_branch; run `sliceme start` first")
+        raise SlicemeError("plane has no work_branch; run `sliceme start` first")
     return str(branch)
 
 
@@ -157,6 +156,7 @@ __all__ = [
     "config_branch",
     "control_path",
     "dag_path",
+    "descriptor_nodes",
     "evidence_json_path",
     "evidence_md_path",
     "evidence_narrative",
@@ -164,14 +164,12 @@ __all__ = [
     "load_control",
     "load_dag",
     "load_session",
-    "load_state",
     "node_by_id",
     "node_status",
     "pull_request_content",
     "render",
     "report_path",
     "session_path",
-    "state_path",
     "worker_log_path",
     "write_control",
     "write_evidence",
@@ -300,7 +298,7 @@ def _commit_evidence(
     config: dict[str, Any],
     store: Store,
     nodes: dict[str, dict[str, Any]],
-    candidates: list[dict[str, Any]],
+    records: list[dict[str, Any]],
     branch: str,
 ) -> list[dict[str, Any]]:
     """One evidence row for each campaign commit, oldest first.
@@ -311,16 +309,16 @@ def _commit_evidence(
     """
     from .review import diff, packet  # lazy: packet imports this module
 
-    delivery_base = config.get("delivery_base") or config.get("default_branch") or "main"
-    source = config.get("worktree_branch") or branch
+    delivery_base = config.get("base_branch") or config.get("default_branch") or "main"
+    source = config.get("work_branch") or branch
     source_tip = _rev(root, source)
     target_tip = _rev(root, delivery_base)
     if not source_tip or not target_tip:
         return []
     node_of_commit: dict[str, str] = {}
-    for candidate in candidates:
-        head = str(candidate.get("head_commit") or "")
-        node_id = str(candidate.get("node") or "")
+    for record in records:
+        head = str(record.get("head_commit") or "")
+        node_id = str(record.get("node") or "")
         if head and node_id and head not in node_of_commit:
             node_of_commit[head] = node_id
     rows: list[dict[str, Any]] = []
@@ -340,7 +338,7 @@ def _commit_evidence(
                 "node": node_id,
                 "goal": (node or {}).get("goal"),
                 "owns": list((node or {}).get("owns") or []),
-                "check": _check_evidence(store.latest_check_for_commit(hash_)),
+                "check": _check_evidence(store.latest_verdict_for_commit(hash_)),
                 "diffstat": changes["diffstat"],
                 "files": changes["files"],
                 "log": _log_evidence(str(log_path) if log_path else None),
@@ -360,90 +358,64 @@ def build_skeleton(
 ) -> dict[str, Any]:
     branch = branch or config_branch(config)
     dag = load_dag(root, branch)
-    state = load_state(root, branch)
     nodes = node_by_id(dag) if dag else {}
+    # The descriptor is the one place a suspended node's status lives; the
+    # engine never writes a separate state file.
+    desc_nodes = descriptor_nodes(load_session(root, branch))
 
-    units = sorted(
-        store.list_units(campaign=campaign) if campaign else store.list_units(),
-        key=lambda u: int(u["id"]),
-    )
-    candidates = sorted(
-        store.list_candidates(campaign=campaign), key=lambda c: int(c["id"])
+    campaign_row = store.get_campaign(campaign) if campaign else None
+    records = sorted(
+        store.list_records(campaign=campaign), key=lambda c: int(c["id"])
     )
 
     per_node: list[dict[str, Any]] = []
-    node_candidates = [c for c in candidates if c.get("node")]
-    if node_candidates and nodes:
-        # Wave scope: candidates carry their node id and share a wave unit.
-        units_by_id = {int(unit["id"]): unit for unit in units}
-        for node_id, node in nodes.items():
-            rows = [c for c in node_candidates if c.get("node") == node_id]
-            latest = rows[-1] if rows else None
-            unit = units_by_id.get(int(latest["unit_id"])) if latest is not None else None
-            verification = (
-                store.latest_check_for_commit(str(latest["head_commit"]))
-                if latest is not None
-                else None
-            )
-            per_node.append(
-                {
-                    "node": node_id,
-                    "label": node.get("label"),
-                    "phase": node.get("phase"),
-                    "status": node_status(state, node_id) if dag else None,
-                    "unit_state": unit["state"] if unit else None,
-                    "branch": (unit or {}).get("branch"),
-                    "log": str(worker_log_path(root, branch, node_id)),
-                    "candidate": int(latest["id"]) if latest is not None else None,
-                    "candidate_status": latest["status"] if latest is not None else None,
-                    "commit": latest["head_commit"] if latest is not None else None,
-                    "verification": verification,
-                }
-            )
-    else:
-        for unit in units:
-            name = str(unit["name"])
-            node = nodes.get(name)
-            unit_candidates = [c for c in candidates if int(c["unit_id"]) == int(unit["id"])]
-            latest = unit_candidates[-1] if unit_candidates else None
-            verification = (
-                store.latest_check_for_commit(str(latest["head_commit"]))
-                if latest is not None
-                else None
-            )
-            per_node.append(
-                {
-                    "node": name,
-                    "label": (node or {}).get("label"),
-                    "phase": (node or {}).get("phase"),
-                    "status": node_status(state, name) if dag else unit["state"],
-                    "unit_state": unit["state"],
-                    "branch": unit["branch"],
-                    "log": str(worker_log_path(root, branch, name)),
-                    "candidate": int(latest["id"]) if latest is not None else None,
-                    "candidate_status": latest["status"] if latest is not None else None,
-                    "commit": latest["head_commit"] if latest is not None else None,
-                    "verification": verification,
-                }
-            )
+    # The campaign owns the worktree and the delivery state, so the report
+    # reads the campaign row rather than a retired unit row.
+    for node_id, node in nodes.items():
+        # An empty marker is not a commit: its stored head is another node's
+        # commit, so it must not be shown as this node's commit or check.
+        rows = [
+            c
+            for c in records
+            if c.get("node") == node_id and not c.get("empty")
+        ]
+        latest = rows[-1] if rows else None
+        verification = (
+            store.latest_verdict_for_commit(str(latest["head_commit"]))
+            if latest is not None
+            else None
+        )
+        per_node.append(
+            {
+                "node": node_id,
+                "label": node.get("label"),
+                "status": node_status(desc_nodes, node_id) if dag else None,
+                "unit_state": (campaign_row or {}).get("state"),
+                "branch": (campaign_row or {}).get("work_branch"),
+                "log": str(worker_log_path(root, branch, node_id)),
+                "record": int(latest["id"]) if latest is not None else None,
+                "record_status": latest["status"] if latest is not None else None,
+                "commit": latest["head_commit"] if latest is not None else None,
+                "verification": verification,
+            }
+        )
 
     return {
         "campaign": (dag or {}).get("campaign") or config.get("campaign", {}).get("name"),
         "design": design or (dag or {}).get("design") or config.get("campaign", {}).get("design"),
         "feature_branch": branch,
-        "base": (dag or {}).get("base") or config.get("base"),
-        "delivery_base": config.get("delivery_base") or config.get("default_branch") or "main",
+        "base": (dag or {}).get("base") or config.get("base_branch"),
+        "delivery_base": config.get("base_branch") or config.get("default_branch") or "main",
         "concurrency": (dag or {}).get("concurrency"),
         "artifact_paths": {
             "dag": str(dag_path(root, branch)),
-            "state": str(state_path(root, branch)),
             "report": str(report_path(root, branch)),
             "evidence_json": str(evidence_json_path(root, branch)),
             "evidence_md": str(evidence_md_path(root, branch)),
         },
         "report_path": str(report_path(root, branch)),
         "nodes": per_node,
-        "commits": _commit_evidence(root, config, store, nodes, candidates, branch),
+        "commits": _commit_evidence(root, config, store, nodes, records, branch),
     }
 
 
@@ -459,8 +431,8 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
     lines.append("")
     lines.append("## Nodes")
     lines.append("")
-    lines.append("| node | phase | status | unit | branch | candidate | commit | verification |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("| node | status | unit | branch | record | commit | verification |")
+    lines.append("|---|---|---|---|---|---|---|")
     for node in skeleton.get("nodes", []):
         verification = node.get("verification") or {}
         verification_text = (
@@ -470,13 +442,12 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
         )
         commit = node.get("commit") or "-"
         lines.append(
-            "| {node} | {phase} | {status} | {unit} | {branch} | {candidate} | {commit} | {verification} |".format(
+            "| {node} | {status} | {unit} | {branch} | {record} | {commit} | {verification} |".format(
                 node=node["node"],
-                phase=node.get("phase") or "-",
                 status=node.get("status"),
                 unit=node.get("unit_state"),
                 branch=node.get("branch"),
-                candidate=node.get("candidate") or "-",
+                record=node.get("record") or "-",
                 commit=commit[:12],
                 verification=verification_text,
             )
@@ -645,7 +616,7 @@ def pull_request_content(
     )
     title = f"sliceme: {name}"
     delivery_base = (
-        config.get("delivery_base") or config.get("default_branch") or "main"
+        config.get("base_branch") or config.get("default_branch") or "main"
     )
     footer = (
         "\n---\n\n"

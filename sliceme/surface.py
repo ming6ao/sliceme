@@ -11,7 +11,6 @@ agent-callable; there are no human-only actions.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,24 +51,21 @@ CAMPAIGN_HELP = (
 ACTIONS: tuple[Action, ...] = (
     Action(
         name="start",
-        summary="bootstrap the plane and a unit for this directory (idempotent)",
+        summary="bootstrap the plane and its campaign for this directory (idempotent)",
         aliases=("init",),
         params=(
-            Param("name", "string", "unit name (default: slug of the directory name)"),
             Param("path", "string", "directory to bootstrap (default: cwd)"),
-            Param("kind", "string", "unit kind", choices=("worker",)),
             Param("design", "string", "design document path; the campaign branch derives from its name"),
             Param("feature_branch", "string", "campaign branch (pull request head); default feat/<design-stem>"),
             Param("base", "string", "delivery base override (the pull request base; default the default branch)"),
             Param("checks", "list", "trusted check NAME=COMMAND (repeatable)", flag="check"),
             Param("force", "boolean", "overwrite an existing config"),
-            Param("no_unit", "boolean", "initialise the plane without creating a unit for cwd"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
     Action(
         name="status",
-        summary="show units, candidates, waves, and health",
+        summary="show units, records, waves, and health",
         params=(
             Param("unit", "string", "show one unit instead of the summary"),
             Param("short", "boolean", "print only the current unit name"),
@@ -111,37 +107,35 @@ ACTIONS: tuple[Action, ...] = (
     Action(
         name="check",
         summary="run the synchronous combined-tree checks for the current wave",
-        params=(
-            Param("current", "boolean", "run the checks for the current wave (the engine reads its own wave index)"),
-            Param("campaign", "string", CAMPAIGN_HELP),
-        ),
+        params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
-        name="wave",
-        summary="the campaign worktree: open it, or record a wave as per-node commits",
-        params=(
-            Param("open", "boolean", "create or reuse the single campaign worktree"),
-            Param("record", "boolean", "record a wave: conformance + per-node commits"),
-            Param("wave", "int", "wave index to record"),
-            Param("current", "boolean", "record: the current wave (the engine reads its own wave index)"),
-            Param("only", "list", "record: scope to these nodes, one commit each (repeatable)", flag="only"),
-            Param("messages", "string", "record: JSON object of node id to description"),
-            Param("summary", "string", "record: candidate summary"),
-            Param("campaign", "string", CAMPAIGN_HELP),
-        ),
+        name="open",
+        summary="create or reuse the single campaign worktree",
+        params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
-        name="review",
-        summary="local review: record one campaign decision, or write the campaign report",
+        name="record",
+        summary="record the current wave: conformance + per-node commits",
+        params=(Param("campaign", "string", CAMPAIGN_HELP),),
+    ),
+    Action(
+        name="approve",
+        summary="record one campaign approval",
         params=(
-            Param("decision", "string", "record a decision", choices=("approve", "request_changes", "override")),
-            Param("all", "boolean", "with --decision approve: approve the whole campaign commit set"),
-            Param("report", "boolean", "write the deterministic campaign report"),
-            Param("narrative", "string", "report: what-changed/risks text"),
-            Param("design", "string", "report: design document reference"),
+            Param("all", "boolean", "approve the whole campaign commit set"),
             Param("commit", "string", "commit to approve"),
-            Param("note", "string", "decision note"),
-            Param("actor", "string", "who recorded the decision"),
+            Param("note", "string", "approval note"),
+            Param("actor", "string", "who recorded the approval"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
+        name="report",
+        summary="write the deterministic campaign report",
+        params=(
+            Param("narrative", "string", "what-changed/risks text"),
+            Param("design", "string", "design document reference"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -196,14 +190,11 @@ def start(params: dict[str, Any], *, cwd: str | Path | None = None) -> dict[str,
     path = params.get("path") or cwd or os.getcwd()
     return Service.init(
         path,
-        name=params.get("name"),
         design=params.get("design"),
         feature_branch=params.get("feature_branch"),
         base=params.get("base"),
-        kind=params.get("kind") or "worker",
         checks=parse_checks(params.get("checks") or []),
         force=bool(params.get("force")),
-        no_unit=bool(params.get("no_unit")),
     )
 
 
@@ -245,7 +236,8 @@ def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
     if p.get("resume"):
         return service.resume(plan_only=bool(p.get("plan_only")))
     if p.get("short"):
-        return {"unit": service.current_unit()["name"]}
+        row = service.require_campaign()
+        return {"unit": row.get("name") or row["key"]}
     if p.get("unit"):
         return service.unit_detail(p["unit"])
     if p.get("verbose"):
@@ -277,53 +269,37 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
 
 
 def _dispatch_check(service: "Service", p: dict[str, Any]) -> Any:
-    if not p.get("current"):
-        raise SlicemeError("check requires --current")
     return service.check_wave()
 
 
-def _dispatch_wave(service: "Service", p: dict[str, Any]) -> Any:
-    if p.get("open"):
-        return {"unit": service.create_campaign_workspace()}
-    if p.get("record"):
-        if p.get("current"):
-            wave_index = service.current_wave_index()
-        elif p.get("wave") is not None:
-            wave_index = int(p["wave"])
-        else:
-            raise SlicemeError("wave --record requires --wave or --current")
-        messages = p.get("messages")
-        if isinstance(messages, str):
-            try:
-                messages = json.loads(messages) if messages.strip() else None
-            except json.JSONDecodeError as exc:
-                raise SlicemeError(
-                    f"wave --record --messages is not valid JSON: {exc}"
-                ) from None
-        if messages is not None and not isinstance(messages, dict):
-            raise SlicemeError("wave --record --messages must be a JSON object")
-        only = list(p.get("only") or []) or None
-        # Serialize git mutation with campaign creation and wave recording.
-        from .service import campaign_lock
-
-        with campaign_lock(service.root):
-            return service.record_wave(
-                wave_index,
-                only=only,
-                messages=messages,
-                summary=p.get("summary"),
-            )
-    raise SlicemeError("wave needs --open or --record")
+def _dispatch_open(service: "Service", p: dict[str, Any]) -> Any:
+    return {"unit": service.create_campaign_workspace()}
 
 
-def _dispatch_review(service: "Service", p: dict[str, Any]) -> Any:
-    from .review import api as review_api
+def _dispatch_record(service: "Service", p: dict[str, Any]) -> Any:
+    wave_index = service.current_wave_index()
+    # Serialize git mutation with campaign creation and delivery.
+    from .service import workspace_lock
 
-    if p.get("decision"):
-        return review_api.decision(service, p)
-    if p.get("report"):
-        return review_api.report(service, p)
-    raise SlicemeError("review needs --decision or --report")
+    with workspace_lock(service.root):
+        return service.record_wave(wave_index)
+
+
+def _dispatch_approve(service: "Service", p: dict[str, Any]) -> Any:
+    return service.record_approval(
+        action="approve",
+        commit=p.get("commit"),
+        all_commits=bool(p.get("all")),
+        actor=p.get("actor"),
+        note=p.get("note"),
+    )
+
+
+def _dispatch_report(service: "Service", p: dict[str, Any]) -> Any:
+    return service.report(
+        narrative=p.get("narrative"),
+        design=p.get("design"),
+    )
 
 
 def _dispatch_evidence(service: "Service", p: dict[str, Any]) -> Any:
@@ -336,8 +312,10 @@ _HANDLERS = {
     "plan": _dispatch_plan,
     "deliver": _dispatch_deliver,
     "check": _dispatch_check,
-    "wave": _dispatch_wave,
-    "review": _dispatch_review,
+    "open": _dispatch_open,
+    "record": _dispatch_record,
+    "approve": _dispatch_approve,
+    "report": _dispatch_report,
     "evidence": _dispatch_evidence,
 }
 

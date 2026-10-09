@@ -25,8 +25,7 @@ is the unit of isolation for state and locks.
 One plane holds these items:
 
 - one SQLite database at `.sliceme/state.db`;
-- one campaign lock at `.sliceme/campaigns.lock`;
-- one delivery lock at `.sliceme/review.lock`;
+- one workspace lock at `.sliceme/workspace.lock`;
 - the repository's default branch, trusted checks, and policy.
 
 Several pi sessions can share one plane. The plane does not belong to one
@@ -34,23 +33,22 @@ session.
 
 ### 1.2 Campaign
 
-A **campaign** is one piece of work with a campaign branch. A campaign owns:
+A **campaign** is one piece of work with a work branch. A campaign owns:
 
-- one campaign branch (`feat/<name>`), the pull request head and the worktree
-  branch;
-- one delivery base (the pull request base, `main`);
+- one work branch (`feat/<name>`), the pull request head;
+- one base branch (the pull request base, `main`);
 - one campaign worktree;
-- one DAG file and one state file;
+- one DAG file and one session descriptor;
 - one confirmation gate and one delivery.
 
-Two campaigns in one plane differ by campaign branch. Two campaigns cannot share
-a campaign branch.
+Two campaigns in one plane differ by work branch. Two campaigns cannot share
+a work branch.
 
 ## 2. Goal
 
 The engine must support several campaigns in one plane at the same time.
 
-Each campaign must have its own campaign branch, worktree, DAG, waves, and
+Each campaign must have its own work branch, worktree, DAG, waves, and
 delivery gate. The campaigns must share one check runner and one database.
 
 ### 2.1 Constraints
@@ -59,7 +57,7 @@ delivery gate. The campaigns must share one check runner and one database.
   protect the device.
 - Keep the engine as the owner of state. Adapters stay thin.
 - Keep backward compatibility. An old plane must work as a one-campaign plane.
-- Keep the rule that a campaign branch is unique in one plane.
+- Keep the rule that a work branch is unique in one plane.
 
 ## 3. Where each data item lives
 
@@ -70,14 +68,13 @@ and for rebuildable caches.
 | Item | Location | Reason |
 |---|---|---|
 | Plane config | `.sliceme/config.json` | Small bootstrap data. Plane discovery reads it. |
-| Campaign registry | `state.db` table `campaigns` | Many processes create and read it. The code joins it with units and candidates. |
+| Campaign registry | `state.db` table `campaigns` | Many processes create and read it. The code joins it with records. |
 | DAG | `.sliceme/<branch-key>.dag.json` | The planner subagent writes it with the Write tool. Files are the agent contract. |
-| Coordinator cache | `.sliceme/<branch-key>.state.json` | A rebuildable cache. Git and the database win on conflict. |
-| Session descriptor | `.sliceme/<branch-key>.session.json` | The adapter writes it. One file per campaign. |
+| Session descriptor | `.sliceme/<branch-key>.session.json` | The adapter writes it; it carries the per-node status map. One file per campaign. |
 | Pause flag | `.sliceme/<branch-key>.control.json` | The adapter reads and writes it. |
 | Active pointer | `.sliceme/active.<pid>.campaign` | The adapter binds a session to one campaign. |
 | Worker logs | `.sliceme/<branch-key>.worker_<id>.log` | Append-only text. |
-| Units, candidates, checks, review rows | `state.db` | Already in the database. |
+| Units, records, verdicts, approval rows | `state.db` | Already in the database. |
 
 The answer to the data question is therefore:
 
@@ -91,7 +88,7 @@ The registry is mutable and concurrent. Two sessions can create a campaign at
 the same time. SQLite in write-ahead logging mode gives atomic writes, and the
 store already uses a busy timeout.
 
-The registry must join with `units` and `candidates`. A table gives that join.
+The registry must join with `records`. A table gives that join.
 
 ### 3.2 Why `config.json` stays a file
 
@@ -106,8 +103,8 @@ registry.
 
 ### 4.1 Campaign identity
 
-Use the campaign branch as the campaign identity. The primary key is the
-existing `branch_key(campaign_branch)`.
+Use the work branch as the campaign identity. The primary key is the
+existing `branch_key(work_branch)`.
 
 The `branch_key` function replaces `/` with `--`. Two branch names can collide.
 For example, `feat/x` and `feat--x` give the same key. Sliceme checks this at
@@ -118,22 +115,21 @@ create time. Two campaigns must not share a key.
 `config.json` keeps the plane fields: `version`, `default_branch`, `checks`,
 `policy`, and `created_at`.
 
-The registry keeps the campaign fields: `target_branch` (the campaign branch),
-`worktree_branch` (equal to it), `delivery_base`, `base`, `unit_name`, `name`,
-`design`, and `state`.
+The registry keeps the campaign fields: `work_branch` (the pull request head),
+`base_branch` (the pull request base), `unit_name`, `name`, `design`, and
+`state`.
 
 `Service.config` returns the plane fields plus the bound campaign fields. Most
-call sites that read `config["target_branch"]` then keep working.
+call sites that read `config["work_branch"]` then keep working.
 `Service.plane_config` returns the plane fields only, for the few plane-scoped
 readers. `Service.campaign_config` is an alias for `Service.config`.
 
-### 4.3 Locks
+### 4.3 Lock
 
-- Keep `.sliceme/campaigns.lock` for campaign creation and wave recording. It
-  stops two creators from picking the same worktree path or branch name, and it
-  serializes the git mutation of a record.
-- Keep `.sliceme/review.lock` plane-wide as the delivery lock. Deliveries run
-  one at a time. This is the smallest safe change.
+- One `.sliceme/workspace.lock` serializes every git mutation: campaign
+  creation, wave recording, and delivery. It stops two creators from picking the
+  same worktree path or branch name, and it serializes the git mutation of a
+  record and a delivery.
 
 Checks are synchronous and run inside the caller, so they need no lock of their
 own.
@@ -154,11 +150,10 @@ The `campaigns` table in `sliceme/store.py`:
 ```sql
 CREATE TABLE IF NOT EXISTS campaigns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  key TEXT NOT NULL UNIQUE,            -- branch_key(target_branch)
-  target_branch TEXT NOT NULL UNIQUE,   -- the campaign branch (pull request head)
-  worktree_branch TEXT NOT NULL UNIQUE, -- equal to target_branch
-  delivery_base TEXT,                   -- the pull request base (default branch)
-  base TEXT,
+  key TEXT NOT NULL UNIQUE,            -- branch_key(work_branch)
+  work_branch TEXT NOT NULL UNIQUE,   -- the work branch (pull request head)
+  worktree TEXT,                        -- the campaign's one worktree path
+  base_branch TEXT,                   -- the pull request base (default branch)
   unit_name TEXT NOT NULL UNIQUE,
   name TEXT,
   design TEXT,
@@ -171,19 +166,19 @@ CREATE TABLE IF NOT EXISTS campaigns (
 CREATE INDEX IF NOT EXISTS idx_campaigns_state ON campaigns(state);
 ```
 
-The `campaign TEXT` column also appears on `units` and `candidates`. Node ids
-and sources can repeat across campaigns, so the checks and review rows carry the
+The `campaign TEXT` column also appears on `records`. Node ids
+and sources can repeat across campaigns, so the verdict and approval rows carry the
 campaign or the branch key.
 
-`latest_check_for_commit` reads the newest terminal check for a commit. A commit
+`latest_verdict_for_commit` reads the newest terminal check for a commit. A commit
 hash is unique across campaigns.
 
 ### 5.1 Store methods
 
 - `create_campaign`, `get_campaign`, `require_campaign`, `list_campaigns`, and
   `set_campaign_state`.
-- A `campaign` filter on `list_units`, `list_candidates`, `list_checks`, and
-  `check_counts`.
+- A `campaign` filter on `list_records`, `list_verdicts`, and
+  `verdict_counts`.
 
 ## 6. Engine behavior
 
@@ -191,24 +186,24 @@ hash is unique across campaigns.
 
 - `Service.__init__` takes the argument `campaign`. `Service.campaign` resolves
   it in this order: the explicit reference, the only campaign, or an error that
-  says to pass a campaign. The reference accepts a key, a campaign branch, or a
+  says to pass a campaign. The reference accepts a key, a work branch, or a
   unit name.
 - Every campaign-scoped method reads `self.config`. Plane-only readers use
   `self.plane_config`.
-- `create_campaign_workspace` derives the unit name and the worktree path from
-  the campaign, under `campaigns.lock`.
-- `wave_unit`, `record_wave`, `normalize_dag`, `_dag_waves`, `_project_unit`,
+- `create_campaign_workspace` derives the worktree path from the campaign,
+  under `workspace.lock`.
+- `wave_unit`, `record_wave`, `normalize_dag`, `_dag_waves`, `_project_campaign`,
   `status`, `resume`, `simulation`, `check_wave`, the review verbs, `deliver`,
   `report`, and `remove_campaign_artifacts` take or resolve a campaign.
 - `status` returns a plane summary when the caller names no campaign. The
   summary holds `default_branch` and a list of campaigns.
-- `_prune_reviews` keeps every key in the `campaigns` table.
+- `_prune_approvals` keeps every key in the `campaigns` table.
 
 ### 6.2 `sliceme/integrate.py`
 
-- `_mark_delivered` takes a campaign and marks only that campaign's candidates.
+- `_mark_delivered` takes a campaign and marks only that campaign's records.
 - `deliver` and `plan_waves` receive the campaign config.
-- One pull request per campaign. The plane delivery lock serializes deliveries.
+- One pull request per campaign. The workspace lock serializes deliveries.
 
 ### 6.3 `sliceme/campaign.py`
 
@@ -217,8 +212,8 @@ hash is unique across campaigns.
 
 ### 6.4 `sliceme/surface.py` and `sliceme/cli.py`
 
-- `start`, `status`, `ready`, `plan`, `deliver`, `check`, `wave`, and `review`
-  all accept `campaign`.
+- `start`, `status`, `ready`, `plan`, `deliver`, `check`, `open`, `record`,
+  `approve`, `report`, and `evidence` all accept `campaign`.
 - `start` creates a campaign for the derived (or `--feature-branch`) campaign
   branch. It does not retarget the plane.
 - The CLI resolves the campaign before the code builds the `Service`.
@@ -230,8 +225,8 @@ The reduced review surface is campaign-scoped:
 - `packet.campaign_branch_key` reads the bound campaign.
 - `packet.build_packet` returns the commits, the report, and the evidence of one
   campaign.
-- `review --decision` records one campaign-level decision.
-- `review --report` writes `.sliceme/<branch-key>.report.md` for one campaign.
+- `approve` records one campaign-level decision.
+- `report` writes `.sliceme/<branch-key>.report.md` for one campaign.
 
 A plane with several campaigns and no `--campaign` returns the plane summary
 instead of one review.
@@ -242,7 +237,7 @@ instead of one review.
 
 - `activeCampaignPath(cwd, pid)`, `readActiveCampaign`, `writeActiveCampaign`,
   and `clearActiveCampaign` own the pointer file.
-- The `sliceme` tool writes the pointer when a reply carries a campaign branch,
+- The `sliceme` tool writes the pointer when a reply carries a work branch,
   and it passes `--campaign <branch>` to every campaign-scoped engine call.
 - The `sliceme.campaign` resource accepts the optional `campaign` field, so one
   plane can run one named campaign.
@@ -251,22 +246,22 @@ instead of one review.
 ## 9. Migration
 
 - Add only. `Store._ensure_columns` adds the new columns.
-- On the first use of a plane, check `config.json` for `target_branch`. If no
-  campaign row exists, create one. Use the recorded unit name `campaign` and the
-  recorded worktree path.
+- On the first use of a plane, check `config.json` for `work_branch`. If no
+  campaign row exists, create one. Use the recorded writer name `campaign` and
+  the recorded worktree path.
 - Keep the legacy `config.json` fields as a mirror for one release. Point them
   at the migrated campaign. Old readers keep working.
-- Do not rename the `campaign` unit or the `worktrees/campaign` directory.
+- Do not rename the `campaign` writer name or the `worktrees/campaign` directory.
 
 ## 10. Tests
 
 Tests under `tests/`:
 
-- `test_campaigns.py`: two campaigns in one plane. The campaign branch,
-  worktree, unit, DAG path, and state path differ.
-- Scoping: record a wave in each campaign. The `candidates` and `checks` rows do
+- `test_campaigns.py`: two campaigns in one plane. The work branch,
+  worktree, writer name, and DAG path differ.
+- Scoping: record a wave in each campaign. The `records` and `verdicts` rows do
   not mix.
-- Delivery isolation: deliver one campaign. The other campaign stays `prepared`
+- Delivery isolation: deliver one campaign. The other campaign stays `recorded`
   and `working`.
 - Cleanup: run `gc`. It keeps the other campaign's rows and files.
 - Concurrency: create two campaigns at once. The lock gives distinct branches
@@ -280,7 +275,7 @@ Tests under `tests/`:
 
 | Risk | Response |
 |---|---|
-| Shared delivery worktree | Keep the plane delivery lock. Move to a per-campaign worktree only if parallel delivery is necessary. |
+| Shared delivery worktree | Keep the workspace lock. Move to a per-campaign worktree only if parallel delivery is necessary. |
 | Branch-key collision | Check at create time. Reject the second campaign. |
 | Adapter reads config directly | Use the pointer file and the descriptor. Keep a fallback for one release. |
 | Cleanup during a run | Use the campaign `state` field as the guard. |
@@ -312,8 +307,8 @@ Each entry has these fields:
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | The campaign name. Unique in the plan. |
-| `target` | yes | The campaign branch for the campaign. |
-| `base` | no | Deprecated and ignored. The delivery base is the plane delivery base (`main`). |
+| `target` | yes | The work branch for the campaign. |
+| `base` | no | Deprecated and ignored. The base branch is the plane base branch (`main`). |
 | `dirs` | no | The directory scope for the planner. |
 
 ### 12.2 Why a plan exists
@@ -328,8 +323,8 @@ campaign owned.
 
 - `sliceme plan --design DESIGN.md` prints the entries in order, the registry
   state of each, and the next entry to run.
-- `sliceme start --feature-branch <branch> --campaign <name> --no-unit` starts
-  one entry. The coordinator reads the entry's target (the campaign branch) and
+- `sliceme start --feature-branch <branch> --campaign <name>` starts
+  one entry. The coordinator reads the entry's target (the work branch) and
   directory scope.
 - The planner receives the scope and plans every node inside it.
 - After delivery, the coordinator reports the next entry.
@@ -337,8 +332,8 @@ campaign owned.
 ### 12.4 The order
 
 The coordinator runs the entries in plan order. Each entry bases its campaign
-on the plane delivery base (`main`). A later campaign sees an earlier
-campaign's files only after those files merge into the delivery base. Delivery
+on the plane base branch (`main`). A later campaign sees an earlier
+campaign's files only after those files merge into the base branch. Delivery
 needs user confirmation, so the coordinator reports the next entry instead of
 starting it without a command.
 

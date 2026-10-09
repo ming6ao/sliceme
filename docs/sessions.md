@@ -20,7 +20,7 @@ Pi saves every session as JSONL and reopens it with `pi --continue`,
 - A suspended session is discoverable, nameable, and resumable from the same
   checkout, from a second terminal, or after a process crash.
 - A long campaign resumes from the wave where it stopped. Sliceme never re-runs
-  a done node. Committed candidates re-verify from the check cache. A node whose
+  a done node. Committed records re-verify from the check cache. A node whose
   worker stopped during the suspension continues from the preserved campaign
   worktree.
 - The user can store and manage suspended sessions as campaigns.
@@ -49,8 +49,8 @@ every campaign-scoped engine call passes `--campaign <branch>`.
   a safe point, parks, and registers. Resume reopens the transcript and injects
   a continuation prompt.
 - **Campaign layer.** `dag.json`, `state.db`, and git already describe campaign
-  progress; `state.json` is an optional, read-only legacy override. The resume
-  descriptor adds what they cannot:
+  progress; the resume descriptor carries the node statuses they cannot. The
+  resume descriptor adds what they cannot:
   which pi session to reopen, why the pause happened, and which wave to record
   on resume.
 
@@ -59,8 +59,8 @@ every campaign-scoped engine call passes `--campaign <branch>`.
 | Command | Behavior |
 |---|---|
 | `/sliceme [DESIGN.md]` | The start entry point. It activates the tool and starts a campaign. It refuses while the agent is busy (`ctx.isIdle()`). |
-| `/suspend [label]` | Parks the current session: writes the pause control flag, aborts the in-flight turn, waits for idle, and writes the resume descriptor. An interrupted node becomes `paused`, so resume continues its edits. |
-| `/campaigns` | An interactive list of registered campaigns: label, campaign branch, wave, done/total, last activity, status. Actions: resume, show, prune, delete. |
+| `/suspend [label]` | Parks the current session: writes the pause control flag, aborts the in-flight turn, waits for idle, and writes the resume descriptor. An interrupted node stays `running`, so resume continues its edits. |
+| `/campaigns` | An interactive list of registered campaigns: label, work branch, wave, done/total, last activity, status. Actions: resume, show, prune, delete. |
 
 Pi owns `/resume`, so the adapter does not register it. The `session_start`
 hook with reason `"resume"` provides the campaign hook instead.
@@ -108,7 +108,7 @@ guard before a switch) and `agent_settled` (a turn-boundary checkpoint).
 |---|---|---|---|
 | Resume descriptor | `.sliceme/<branch-key>.session.json` | pi adapter | pi session binding, pause reason, wave, resume plan. |
 | Pause flag | `.sliceme/<branch-key>.control.json` | pi adapter | Cooperative pause request. |
-| Active pointer | `.sliceme/active.<pid>.campaign` | pi adapter | The session's campaign branch. |
+| Active pointer | `.sliceme/active.<pid>.campaign` | pi adapter | The session's work branch. |
 | Transcript | pi session JSONL | pi | Conversation history. |
 
 Suspension is a pi-session concern. There is deliberately no engine `suspend`
@@ -145,7 +145,7 @@ The adapter writes the descriptor. The engine reads it.
 {
   "campaign": "nanochat-cpp",
   "feature_branch": "feat/nanochat-cpp",
-  "worktree_branch": "feat/nanochat-cpp",
+  "work_branch": "feat/nanochat-cpp",
   "design": "DESIGN.md",
   "pi": {
     "session_id": "uuid",
@@ -157,9 +157,9 @@ The adapter writes the descriptor. The engine reads it.
   "reason": "user",                // user | crash | budget | error
   "suspended_at": 1733234400.0,
   "current_wave": 1,
-  "nodes": { "w1": "done", "w3": "paused" },
+  "nodes": { "w1": "recorded", "w3": "running" },
   "resume_plan": {
-    "record_wave": 1,       // run wave --record --current first
+    "record_wave": 1,       // run record first
     "resume": ["w3"],       // edits already in the campaign worktree
     "respawn": ["w4"],      // no attributable changes
     "verify": ["w3"],       // re-verify from cache after recording
@@ -171,9 +171,9 @@ The adapter writes the descriptor. The engine reads it.
 The descriptor does not duplicate the engine's full per-node state. The
 `nodes` map records the status at suspend time, so resume can compare it with
 the plane. A node entry is a status string, or a small object with `status`,
-`attempt`, `candidate`, and `commit`. There is no per-node worktree or branch:
+`attempt`, `record`, and `commit`. There is no per-node worktree or branch:
 every node in a wave shares the campaign worktree. Each campaign has its own
-descriptor file, keyed by the campaign branch.
+descriptor file, keyed by the work branch.
 
 A successful `deliver` writes `completed` at once, so a crash after the pull
 request cannot leave a `suspended` descriptor. When every wave finished but
@@ -184,33 +184,34 @@ work, it rewrites the descriptor to `ready` and stays silent.
 
 ## 7. Node states and reconciliation
 
-The node states are `pending`, `running`, `recorded`, `done`, `failed`, and
-`paused`. The code declares the `stopped` state but nothing writes it.
+The node states are `pending`, `running`, `recorded`, and `failed`. A recorded
+node satisfies a dependency; pass or fail lives in the wave verdict (the
+`verdicts` row with `source='wave:<n>'`), not on the node.
 
 On resume, reconcile from plane evidence, which wins over the descriptor:
 
 | Plane evidence | Resume status |
 |---|---|
-| latest candidate `landed` | `done`; never re-run |
-| node `done` and recorded commit equals the latest candidate `head_commit` | `done`; re-verify from cache only |
-| candidate `prepared` with a recorded commit | `recorded`; verify |
-| candidate `prepared` but no attributable commit for the node | `pending`; re-spawn |
-| node `running` or `paused` and the campaign worktree is present | `paused`; record, then continue |
-| node `running` or `paused` but the campaign worktree does not exist | `pending`; fresh spawn |
+| latest record `delivered` | `recorded`; never re-run |
+| node `recorded` and recorded commit equals the latest record `head_commit` | `recorded`; re-verify from cache only |
+| record `recorded` with a recorded commit | `recorded`; verify |
+| record `recorded` but no attributable commit for the node | `pending`; re-spawn |
+| node `running` and the campaign worktree is present | `running`; record, then continue |
+| node `running` but the campaign worktree does not exist | `pending`; fresh spawn |
 
 The commit comparison is essential. A check can pass a node that delivery did
-not land. That node reads `done` in a legacy `state.json`, but its candidate is
-still `prepared`, because the check result lives in the `checks` table and never
-changes the candidate row. A status-only rule would wrongly re-run that node.
+not land. That node is `recorded` in the descriptor, but its record is
+still `recorded`, because the check result lives in the `verdicts` table and never
+changes the record row. A status-only rule would wrongly re-run that node.
 
 ## 8. Wave-scoped continuation
 
-The campaign worktree persists across a suspend. A `paused` node is a node whose
+The campaign worktree persists across a suspend. A `running` node is a node whose
 worker the suspension interrupted before `record`. On resume the coordinator:
 
-1. runs `wave --record --current`, which commits the edits and attributes every
+1. runs `record`, which commits the edits and attributes every
    changed path to exactly one node by owned directories;
-2. re-verifies a node when its prepared candidate fingerprint did not change
+2. re-verifies a node when its recorded record fingerprint did not change
    (the runner returns `cached`, so no check re-runs);
 3. re-spawns a node that produced no attributable changes.
 
@@ -239,7 +240,7 @@ previous reviewer evidence.
 ## 11. Test plan
 
 `tests/test_sessions.py` covers the descriptor round-trip, the resume mapping
-(including the `landed` and verified-but-undelivered cases), the
+(including the `delivered` and verified-but-undelivered cases), the
 preserved-worktree path, the missing-worktree fallback, idempotent resume, and
-the additive `checks` migration. Adapter tests cover the pause flag, the hooks,
+the additive `verdicts` migration. Adapter tests cover the pause flag, the hooks,
 the resume prompt, and the registry.

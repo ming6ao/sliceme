@@ -54,9 +54,11 @@ const ENGINE_ACTIONS = [
 	"status",
 	"ready",
 	"plan",
-	"wave",
+	"open",
+	"record",
 	"check",
-	"review",
+	"approve",
+	"report",
 	"evidence",
 	"deliver",
 ] as const;
@@ -66,15 +68,12 @@ type EngineAction = (typeof ENGINE_ACTIONS)[number];
 /** Parameter names each engine verb forwards to the CLI. */
 const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	start: [
-		"name",
 		"path",
-		"kind",
 		"design",
 		"feature_branch",
 		"base",
 		"checks",
 		"force",
-		"no_unit",
 		"campaign",
 	],
 	status: [
@@ -93,9 +92,11 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	],
 	ready: ["campaign"],
 	plan: ["design", "campaign"],
-	wave: ["open", "record", "wave", "current", "only", "messages", "summary", "campaign"],
-	check: ["current", "campaign"],
-	review: ["decision", "all", "report", "narrative", "design", "commit", "note", "actor", "campaign"],
+	open: ["campaign"],
+	record: ["campaign"],
+	check: ["campaign"],
+	approve: ["all", "commit", "note", "actor", "campaign"],
+	report: ["narrative", "design", "campaign"],
 	evidence: ["design", "campaign"],
 	deliver: ["source", "cleanup", "no_checks", "campaign"],
 };
@@ -212,14 +213,14 @@ function clearPause(ctx: ExtensionContext, branch: string): void {
 }
 
 /**
- * The engine's `config.json` mirror of the campaign's feature branch.
+ * The engine's `config.json` mirror of the campaign's work branch.
  *
  * The per-process pointer is the primary source; this mirror is the fallback
  * for a resumed session in a new process (`docs/multi-campaign.md` §4.4).
  */
 function configuredBranch(cwd: string): string | undefined {
 	const config = readJson<any>(path.join(stateDir(cwd), "config.json"), null);
-	const branch = config?.target_branch ?? config?.main_branch;
+	const branch = config?.work_branch ?? config?.target_branch ?? config?.main_branch;
 	return typeof branch === "string" && branch ? branch : undefined;
 }
 
@@ -250,7 +251,7 @@ function writeSessionDescriptor(
 	const descriptor = {
 		campaign: plan.campaign ?? over.campaign ?? existing.campaign ?? null,
 		feature_branch: branch,
-		worktree_branch: plan.worktree_branch ?? existing.worktree_branch ?? null,
+		work_branch: plan.work_branch ?? existing.work_branch ?? null,
 		pi: { session_id: sessionId, session_file: sessionFile, cwd: ctx.cwd },
 		label: over.label ?? existing.label,
 		status: over.status ?? "suspended",
@@ -266,7 +267,7 @@ function writeSessionDescriptor(
 
 /** Whether a node status counts as finished for suspend/resume reporting. */
 function isFinishedStatus(status: string): boolean {
-	return status === "done" || status === "recorded";
+	return status === "recorded";
 }
 
 /** Whether the engine's resume plan still has campaign work to do. */
@@ -406,15 +407,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		label: "Sliceme",
 		description:
 			"Drive a Sliceme campaign through the engine: start (plane + campaign), plan " +
-			"(design split), status, ready (current-wave node ids and paused), wave (open or " +
-			"record the current wave), check (combined-tree checks), review (one campaign " +
-			"decision, or the report), evidence (the deterministic evidence document), and " +
-			"deliver (push + pull request). The campaign loop runs in the sliceme.campaign " +
-			"workflow resource.",
+			"(design split), status, ready (current-wave node ids and paused), open (create the " +
+			"campaign worktree), record (the current wave as per-node commits), check " +
+			"(combined-tree checks), approve (one campaign approval), report (the deterministic " +
+			"report), evidence (the deterministic evidence document), and deliver (push + pull " +
+			"request). The campaign loop runs in the sliceme.campaign workflow resource.",
 		promptSnippet: "Call the Sliceme engine (start → plan → resource loop → deliver)",
 		promptGuidelines: [
-			"Start a campaign with `start` and inspect the design split with `plan`. Then run " +
-				"`wave --open` to create the campaign worktree from the delivery base, and run " +
+			"Start a campaign with `start` and inspect the design split with `plan`. Then " +
+				"run `open` to create the campaign worktree from the base branch, and run " +
 				"the campaign loop through the `sliceme.campaign` workflow resource: call the " +
 				'subagent tool with workflow "sliceme.campaign" and async true.',
 			"The resource reads the current wave from the engine. Do not pass node ids or wave " +
@@ -425,9 +426,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"Stop at the human gates: an explicit user suspension and the campaign " +
 				"approval before `deliver`.",
 			"After the campaign resource returns `complete`, run `evidence`, then " +
-				"`review --report`. Show the evidence summary and the pull request details " +
+				"run `report`. Show the evidence summary and the pull request details " +
 				"(the head branch, the base `main`, and the title) to the user, and ask for " +
-				"confirmation one time. On a confirmation run `review --decision approve` and " +
+				"confirmation one time. On a confirmation run `approve` and " +
 				"then `deliver`; on a decline stop and keep the campaign for a later attempt.",
 			"A node is ready only once every dependency is done. Use `ready` for the ready node " +
 				"ids, the current wave, and `paused`.",
@@ -437,11 +438,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		defaultActive: false,
 		parameters: Type.Object({
 			action: StringEnum(ENGINE_ACTIONS),
-			name: Type.Optional(Type.String({ description: "start: unit name" })),
 			path: Type.Optional(Type.String({ description: "start: directory to bootstrap" })),
-			kind: Type.Optional(StringEnum(["worker"] as const, { description: "start: unit kind" })),
 			design: Type.Optional(
-				Type.String({ description: "start/plan/review report/evidence: design path" }),
+				Type.String({ description: "start/plan/report/evidence: design path" }),
 			),
 			campaign: Type.Optional(Type.String({ description: "campaign to operate on" })),
 			base: Type.Optional(Type.String({ description: "start: delivery base override" })),
@@ -452,9 +451,6 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				Type.Array(Type.String(), { description: "start: trusted check NAME=COMMAND" }),
 			),
 			force: Type.Optional(Type.Boolean({ description: "start: overwrite an existing config" })),
-			no_unit: Type.Optional(
-				Type.Boolean({ description: "start: initialise the plane without a unit" }),
-			),
 			unit: Type.Optional(Type.String({ description: "status: show one unit" })),
 			short: Type.Optional(Type.Boolean({ description: "status: print only the unit name" })),
 			dense: Type.Optional(Type.Boolean({ description: "status: print the compact summary" })),
@@ -476,38 +472,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			plan_only: Type.Optional(
 				Type.Boolean({ description: "status --resume: compatibility no-op; resume writes nothing" }),
 			),
-			open: Type.Optional(
-				Type.Boolean({ description: "wave: create or reuse the campaign worktree" }),
-			),
-			record: Type.Optional(
-				Type.Boolean({ description: "wave: record a wave as per-node commits" }),
-			),
-			wave: Type.Optional(Type.Number({ description: "wave: wave index to record" })),
-			current: Type.Optional(
-				Type.Boolean({ description: "wave/check: use the engine's current wave" }),
-			),
-			only: Type.Optional(
-				Type.Array(Type.String(), { description: "wave: scope the record to these nodes" }),
-			),
-			messages: Type.Optional(
-				Type.String({ description: "wave: JSON object of node id to description" }),
-			),
-			summary: Type.Optional(Type.String({ description: "wave: candidate summary" })),
-			decision: Type.Optional(
-				StringEnum(["approve", "request_changes", "override"] as const, {
-					description: "review: record one campaign decision",
-				}),
-			),
 			all: Type.Optional(
-				Type.Boolean({ description: "review: with approve, approve the whole campaign" }),
+				Type.Boolean({ description: "approve: approve the whole campaign commit set" }),
 			),
-			report: Type.Optional(
-				Type.Boolean({ description: "review: write the deterministic report" }),
-			),
-			narrative: Type.Optional(Type.String({ description: "review report: what-changed text" })),
-			commit: Type.Optional(Type.String({ description: "review: commit to approve" })),
-			note: Type.Optional(Type.String({ description: "review: decision note" })),
-			actor: Type.Optional(Type.String({ description: "review: who recorded the decision" })),
+			narrative: Type.Optional(Type.String({ description: "report: what-changed text" })),
+			commit: Type.Optional(Type.String({ description: "approve: commit to approve" })),
+			note: Type.Optional(Type.String({ description: "approve: approval note" })),
+			actor: Type.Optional(Type.String({ description: "approve: who recorded the approval" })),
 			source: Type.Optional(Type.String({ description: "deliver: worktree branch" })),
 			cleanup: Type.Optional(
 				StringEnum(["none", "worktrees", "all"] as const, {
@@ -538,13 +509,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			pi.sendUserMessage(
 				`Start a Sliceme campaign for the design document "${design}". ` +
 					`Use the sliceme tool with action "start", passing design "${design}", ` +
-					`and then "plan". Run "wave --open" to create the campaign worktree ` +
-					`from the delivery base. Run the campaign ` +
+					`and then "plan". Run "open" to create the campaign worktree ` +
+					`from the base branch. Run the campaign ` +
 					`loop through the sliceme.campaign workflow resource: call the subagent tool ` +
 					`with workflow "sliceme.campaign" and async true. When it completes, run ` +
-					`"evidence" and "review --report", show the evidence summary and the pull ` +
+					`"evidence" and "report", show the evidence summary and the pull ` +
 					`request details to the user, and ask for confirmation one time. On a ` +
-					`confirmation run "review --decision approve" and then "deliver"; on a ` +
+					`confirmation run "approve" and then "deliver"; on a ` +
 					`decline stop and keep the campaign. Stop only at the human gates: an ` +
 					`explicit user suspension and the final confirmation before delivery.`,
 			);

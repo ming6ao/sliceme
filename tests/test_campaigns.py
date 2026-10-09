@@ -4,8 +4,8 @@ These pin the contract of ``docs/multi-campaign.md``:
 
 * one plane holds several campaigns, each with its own target branch, worktree,
   DAG, and review queue;
-* candidates, checks, and review rows stay scoped to one campaign;
-* a delivery marks only its own campaign landed;
+* records, checks, and review rows stay scoped to one campaign;
+* a delivery marks only its own campaign delivered;
 * the campaign registry migrates an old one-campaign plane.
 """
 
@@ -32,8 +32,8 @@ DAG = {
     "base": "main",
     "concurrency": 2,
     "nodes": [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
-        {"id": "w2", "owns": ["dir:src/b"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w2", "owns": ["src/b"], "depends_on": [], "acceptance": ["true"]},
     ],
 }
 
@@ -72,7 +72,6 @@ class MultiCampaignCase(unittest.TestCase):
             self.root,
             feature_branch="feat/y",
             base="main",
-            no_unit=True,
         )
         # The campaign branch is the pull request head and the worktree branch.
         # The fixture creates it from the delivery base; a real run opens the
@@ -116,10 +115,10 @@ class RegistryTests(MultiCampaignCase):
         svc = self.service()
         try:
             rows = svc.store.list_campaigns()
-            self.assertEqual([r["target_branch"] for r in rows], ["feat/x", "feat/y"])
+            self.assertEqual([r["work_branch"] for r in rows], ["feat/x", "feat/y"])
             self.assertEqual([r["key"] for r in rows], ["feat--x", "feat--y"])
             self.assertEqual(len({r["unit_name"] for r in rows}), 2)
-            self.assertEqual(len({r["worktree_branch"] for r in rows}), 2)
+            self.assertEqual(len({r["work_branch"] for r in rows}), 2)
         finally:
             svc.close()
 
@@ -152,13 +151,13 @@ class RegistryTests(MultiCampaignCase):
 
 
 class ScopeTests(MultiCampaignCase):
-    def test_candidates_stay_in_their_campaign(self):
+    def test_records_stay_in_their_campaign(self):
         self.record("feat/x", "feat/x")
         self.record("feat/y", "feat/y", content_a="a = 3\n")
         svc = self.service()
         try:
-            x = svc.store.list_candidates(campaign="feat--x")
-            y = svc.store.list_candidates(campaign="feat--y")
+            x = svc.store.list_records(campaign="feat--x")
+            y = svc.store.list_records(campaign="feat--y")
             self.assertTrue(x)
             self.assertTrue(y)
             self.assertNotEqual([c["id"] for c in x], [c["id"] for c in y])
@@ -167,7 +166,7 @@ class ScopeTests(MultiCampaignCase):
         finally:
             svc.close()
 
-    def test_status_scopes_units_and_candidates(self):
+    def test_status_scopes_units_and_records(self):
         self.record("feat/x", "feat/x")
         self.record("feat/y", "feat/y", content_a="a = 3\n")
         x = self.service("feat/x")
@@ -177,8 +176,8 @@ class ScopeTests(MultiCampaignCase):
             ys = y.status()
             self.assertEqual(xs["target_branch"], "feat/x")
             self.assertEqual(ys["target_branch"], "feat/y")
-            self.assertTrue(all(c["campaign"] == "feat--x" for c in xs["candidates"]))
-            self.assertTrue(all(c["campaign"] == "feat--y" for c in ys["candidates"]))
+            self.assertTrue(all(c["campaign"] == "feat--x" for c in xs["records"]))
+            self.assertTrue(all(c["campaign"] == "feat--y" for c in ys["records"]))
         finally:
             x.close()
             y.close()
@@ -202,11 +201,11 @@ class DeliveryIsolationTests(MultiCampaignCase):
         self.record("feat/y", "feat/y", content_a="a = 3\n")
         x = self.service("feat/x")
         try:
-            x.review_decision(action="approve", all_commits=True, actor="test")
+            x.record_approval(action="approve", all_commits=True, actor="test")
             result = x.deliver()
-            self.assertEqual([r["status"] for r in result["results"]], ["landed"])
+            self.assertEqual([r["status"] for r in result["results"]], ["delivered"])
             self.assertTrue(result["pull_request"]["url"])
-            worktree_branch = x.store.get_campaign("feat--x")["worktree_branch"]
+            worktree_branch = x.store.get_campaign("feat--x")["work_branch"]
         finally:
             x.close()
         # The approved work is on the campaign branch; the delivery base is
@@ -218,7 +217,7 @@ class DeliveryIsolationTests(MultiCampaignCase):
         y = self.service("feat/y")
         try:
             self.assertTrue(
-                all(c["status"] == "prepared" for c in y.store.list_candidates(campaign="feat--y"))
+                all(c["status"] == "recorded" for c in y.store.list_records(campaign="feat--y"))
             )
             self.assertEqual(y.store.get_campaign("feat--y")["state"], "working")
             self.assertEqual(y.store.get_campaign("feat--x")["state"], "delivered")
@@ -250,14 +249,12 @@ class CleanupTests(MultiCampaignCase):
     def write_campaign_files(self, branch):
         """Write one of every per-campaign file and return the disposable ones."""
         write_json(campaign.dag_path(self.root, branch), {"nodes": []})
-        write_json(campaign.state_path(self.root, branch), {"nodes": {}})
         write_json(campaign.session_path(self.root, branch), {"status": "suspended"})
         write_json(campaign.control_path(self.root, branch), {"pause": True})
         campaign.worker_log_path(self.root, branch, "w1").write_text("log\n")
         campaign.report_path(self.root, branch).write_text("# report\n")
         return [
             campaign.dag_path(self.root, branch),
-            campaign.state_path(self.root, branch),
             campaign.session_path(self.root, branch),
             campaign.control_path(self.root, branch),
             campaign.worker_log_path(self.root, branch, "w1"),
@@ -303,6 +300,36 @@ class CleanupTests(MultiCampaignCase):
                 self.assertTrue(path.exists(), str(path))
             # The report of a finished campaign stays as evidence.
             self.assertTrue(campaign.report_path(self.root, "feat/x").exists())
+        finally:
+            svc.close()
+
+    def test_gc_reads_the_campaign_state(self):
+        # The campaign owns the worktree and the delivery state, so gc prunes a
+        # delivered campaign's worktree and branch.
+        svc = self.service("feat/x")
+        try:
+            self.write_dag("feat/x")
+            unit = svc.create_campaign_workspace(base="main")
+            worktree = Path(unit["worktree"])
+            branch = unit["branch"]
+            self.assertTrue(worktree.exists())
+            svc.store.set_campaign_state("feat--x", "delivered")
+            svc.store.conn.commit()
+
+            result = svc.gc()
+
+            self.assertIn("feat--x", result["removed_worktrees"])
+            self.assertIn(branch, result["pruned_branches"])
+            self.assertFalse(worktree.exists())
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "--verify", branch],
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                ).returncode,
+                0,
+            )
         finally:
             svc.close()
 
@@ -354,13 +381,13 @@ class CleanupTests(MultiCampaignCase):
         svc = self.service()
         try:
             for key in ("feat--x", "feat--y", "feat--gone"):
-                svc.store.add_review_decision(branch_key=key, action="approve")
+                svc.store.add_approval(branch_key=key, action="approve")
             svc.store.conn.commit()
             # Force every row past the retention window.
-            svc.store.conn.execute("UPDATE review_decisions SET created_at=0")
+            svc.store.conn.execute("UPDATE approvals SET created_at=0")
             svc.store.conn.commit()
-            svc._prune_reviews()
-            kept = {d["branch_key"] for d in svc.store.list_review_decisions()}
+            svc._prune_approvals()
+            kept = {d["branch_key"] for d in svc.store.list_approvals()}
             self.assertIn("feat--x", kept)
             self.assertIn("feat--y", kept)
             self.assertNotIn("feat--gone", kept)
@@ -388,9 +415,9 @@ class MigrationTests(MultiCampaignCase):
             try:
                 rows = svc.store.list_campaigns()
                 self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0]["target_branch"], "feat/old")
+                self.assertEqual(rows[0]["work_branch"], "feat/old")
                 self.assertEqual(rows[0]["unit_name"], "campaign")
-                self.assertEqual(svc.config["target_branch"], "feat/old")
+                self.assertEqual(svc.config["work_branch"], "feat/old")
             finally:
                 svc.close()
 
@@ -424,13 +451,13 @@ class MigrationTests(MultiCampaignCase):
             )
             svc = Service(root)
             try:
-                row = svc.store.get_campaign("feat/old")
-                self.assertEqual(row["worktree_branch"], "sliceme/feat-old")
+                row = svc.store.get_campaign("sliceme/feat-old")
+                self.assertEqual(row["work_branch"], "sliceme/feat-old")
                 unit = svc.create_campaign_workspace()
-                # The worktree branch is the one every consumer records, so the
+                # The work branch is the one every consumer records, so the
                 # worktree, the review source, and the pull request head agree.
                 self.assertEqual(unit["branch"], "sliceme/feat-old")
-                self.assertEqual(svc.config["worktree_branch"], "sliceme/feat-old")
+                self.assertEqual(svc.config["work_branch"], "sliceme/feat-old")
             finally:
                 svc.close()
 
@@ -445,15 +472,128 @@ class MigrationTests(MultiCampaignCase):
             run("git", "commit", "-qm", "initial", cwd=root)
             Service.init_plane(root, feature_branch="feat/old", checks=self.checks)
             store = Store(root)
-            # A row from before the delivery base column existed.
-            store.conn.execute("UPDATE campaigns SET delivery_base=NULL")
+            # A row from before the base branch column existed.
+            store.conn.execute("UPDATE campaigns SET base_branch=NULL")
             store.conn.commit()
             store.close()
             store = Store(root)
             try:
                 self.assertEqual(
-                    store.get_campaign("feat/old")["delivery_base"], "main"
+                    store.get_campaign("feat/old")["base_branch"], "main"
                 )
+            finally:
+                store.close()
+
+    def test_an_old_units_schema_is_retired(self):
+        # A plane from before S2c keeps its units table and records.unit_id
+        # only long enough for one open to backfill campaigns.worktree and
+        # rebuild records without the dropped foreign key.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run("git", "init", "-q", "-b", "main", cwd=root)
+            run("git", "config", "user.email", "t@example.com", cwd=root)
+            run("git", "config", "user.name", "Tester", cwd=root)
+            (root / "a.txt").write_text("hi\n")
+            run("git", "add", "-A", cwd=root)
+            run("git", "commit", "-qm", "initial", cwd=root)
+            Service.init_plane(root, feature_branch="feat/old", checks=self.checks)
+            store = Store(root)
+            store.conn.execute("DROP TABLE records")
+            store.conn.execute(
+                "CREATE TABLE candidates ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " unit_id INTEGER NOT NULL REFERENCES units(id),"
+                " campaign TEXT, head_commit TEXT NOT NULL,"
+                " status TEXT NOT NULL DEFAULT 'recorded', summary TEXT,"
+                " created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
+            store.conn.execute(
+                "CREATE TABLE units (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " name TEXT NOT NULL UNIQUE, campaign TEXT,"
+                " kind TEXT NOT NULL DEFAULT 'worker', worktree TEXT NOT NULL,"
+                " branch TEXT NOT NULL, base_commit TEXT,"
+                " state TEXT NOT NULL DEFAULT 'working',"
+                " created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
+            store.conn.execute(
+                "INSERT INTO units(name, campaign, kind, worktree, branch,"
+                " base_commit, state, created_at, updated_at)"
+                " VALUES('campaign','feat--old','campaign','/tmp/wt','feat/old','x','working',0,0)"
+            )
+            store.conn.execute(
+                "INSERT INTO candidates(unit_id, campaign, head_commit, status,"
+                " created_at, updated_at)"
+                " VALUES(1,'feat--old','abc','recorded',0,0)"
+            )
+            store.conn.execute("UPDATE campaigns SET worktree=NULL WHERE key='feat--old'")
+            store.conn.commit()
+            store.close()
+
+            store = Store(root)
+            try:
+                tables = {
+                    row[0]
+                    for row in store.conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                self.assertNotIn("units", tables)
+                columns = {
+                    row[1] for row in store.conn.execute("PRAGMA table_info(records)")
+                }
+                self.assertNotIn("unit_id", columns)
+                self.assertEqual(store.get_campaign("feat/old")["worktree"], "/tmp/wt")
+                # The legacy record survives the rebuild even though its unit
+                # row is gone.
+                self.assertEqual(
+                    [dict(r) for r in store.conn.execute(
+                        "SELECT head_commit FROM records"
+                    )],
+                    [{"head_commit": "abc"}],
+                )
+            finally:
+                store.close()
+
+    def test_an_old_branch_schema_is_renamed(self):
+        # A plane from before the branch rename keeps its four branch names only
+        # long enough for one open to collapse them onto
+        # ``work_branch``/``base_branch``.
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run("git", "init", "-q", "-b", "main", cwd=root)
+            run("git", "config", "user.email", "t@example.com", cwd=root)
+            run("git", "config", "user.name", "Tester", cwd=root)
+            (root / "a.txt").write_text("hi\n")
+            run("git", "add", "-A", cwd=root)
+            run("git", "commit", "-qm", "initial", cwd=root)
+            state = root / ".sliceme"
+            state.mkdir()
+            conn = sqlite3.connect(str(state / "state.db"))
+            conn.executescript(
+                "CREATE TABLE campaigns ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " key TEXT NOT NULL UNIQUE,"
+                " target_branch TEXT NOT NULL UNIQUE,"
+                " worktree_branch TEXT NOT NULL UNIQUE,"
+                " worktree TEXT, delivery_base TEXT, base TEXT,"
+                " unit_name TEXT NOT NULL UNIQUE, name TEXT, design TEXT,"
+                " state TEXT NOT NULL DEFAULT 'working',"
+                " created_at REAL NOT NULL, updated_at REAL NOT NULL);"
+                "INSERT INTO campaigns(key, target_branch, worktree_branch, worktree,"
+                " delivery_base, base, unit_name, state, created_at, updated_at)"
+                " VALUES('feat--old','feat/old','sliceme/feat-old','/tmp/wt',"
+                "'release','main','campaign','working',1,1);"
+            )
+            conn.commit()
+            conn.close()
+            store = Store(root)
+            try:
+                row = store.get_campaign("sliceme/feat-old")
+                self.assertEqual(row["work_branch"], "sliceme/feat-old")
+                self.assertEqual(row["base_branch"], "release")
+                self.assertEqual(row["worktree"], "/tmp/wt")
             finally:
                 store.close()
 
@@ -462,11 +602,10 @@ class MigrationTests(MultiCampaignCase):
         try:
             again = svc.store.create_campaign(
                 key="feat--x",
-                target_branch="feat/x",
-                worktree_branch="feat/x",
+                work_branch="feat/x",
                 unit_name="campaign:feat--x",
             )
-            self.assertEqual(again["target_branch"], "feat/x")
+            self.assertEqual(again["work_branch"], "feat/x")
             self.assertEqual(len(svc.store.list_campaigns()), 2)
         finally:
             svc.close()

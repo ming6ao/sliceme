@@ -18,8 +18,8 @@ from sliceme.util import write_json
 class StatusSummaryCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
     nodes = [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
-        {"id": "w2", "owns": ["dir:src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w2", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
     ]
 
     def setUp(self):
@@ -52,20 +52,15 @@ class StatusSummaryCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_summary_lines_match_the_reference_layout(self):
+        # The wave plan comes from the DAG; the node status comes from the
+        # record (w1) and the session descriptor (w2 running).
+        self.svc.store.create_record(
+            head_commit="0" * 40, summary=None, node="w1", campaign="feat--x"
+        )
+        self.svc.store.conn.commit()
         write_json(
-            campaign.state_path(self.root, "feat/x"),
-            {
-                "campaign": "dense",
-                "target_branch": "feat/x",
-                "worktree_branch": "feat/x",
-                "base": "main",
-                "wave_size": 2,
-                "waves": [
-                    {"index": 0, "members": ["w1"], "status": "done"},
-                    {"index": 1, "members": ["w2"], "status": "pending"},
-                ],
-                "nodes": {"w1": {"status": "done"}, "w2": {"status": "running"}},
-            },
+            campaign.session_path(self.root, "feat/x"),
+            {"feature_branch": "feat/x", "nodes": {"w2": {"status": "running"}}},
         )
         view = self.svc.status_summary()
         self.assertEqual(view["campaign"], "dense")
@@ -78,8 +73,8 @@ class StatusSummaryCase(unittest.TestCase):
         )
         self.assertEqual(view["lines"][2], "design:   DESIGN.md")
         self.assertEqual(view["lines"][3], "nodes:    2  wave size: 2")
-        self.assertEqual(view["lines"][4], "  w0 w1 [-] done")
-        self.assertEqual(view["lines"][5], "  w1 w2 [-] running")
+        self.assertEqual(view["lines"][4], "  w0 w1 recorded")
+        self.assertEqual(view["lines"][5], "  w1 w2 running")
         self.assertEqual(view["lines"][6], "wave 0 [done]: w1")
         self.assertEqual(view["lines"][7], "wave 1 [pending]: w2")
         self.assertEqual(
@@ -90,22 +85,7 @@ class StatusSummaryCase(unittest.TestCase):
             ],
         )
 
-    def test_wave_entries_accept_the_engine_wave_key(self):
-        write_json(
-            campaign.state_path(self.root, "feat/x"),
-            {
-                "wave_size": 1,
-                "waves": [{"wave": 0, "members": ["w1", "w2"], "status": "running"}],
-                "nodes": {"w1": {"status": "running"}, "w2": {"status": "pending"}},
-            },
-        )
-        view = self.svc.status_summary()
-        self.assertEqual([w["wave"] for w in view["dag_waves"]], [0])
-        self.assertEqual(view["lines"][4], "  w0 w1 [-] running")
-        self.assertEqual(view["lines"][5], "  w0 w2 [-] pending")
-        self.assertEqual(view["lines"][6], "wave 0 [running]: w1, w2")
-
-    def test_node_label_and_phase_are_rendered(self):
+    def test_node_label_is_rendered(self):
         write_json(
             campaign.dag_path(self.root, "feat/x"),
             {
@@ -114,40 +94,22 @@ class StatusSummaryCase(unittest.TestCase):
                 "nodes": [
                     {
                         "id": "w1",
-                        "phase": "build",
                         "label": "the parser",
-                        "owns": ["dir:src/a"],
+                        "owns": ["src/a"],
                         "depends_on": [],
                     }
                 ],
             },
         )
         view = self.svc.status_summary()
-        self.assertEqual(view["lines"][4], "  w0 w1 [build] pending — the parser")
-
-    def test_malformed_wave_entries_are_skipped(self):
-        # A hand-edited state.json must not crash the default human status.
-        write_json(
-            campaign.state_path(self.root, "feat/x"),
-            {
-                "wave_size": 1,
-                "waves": [
-                    "not-a-dict",
-                    {"index": 0, "members": ["w1"], "status": "done"},
-                ],
-                "nodes": {"w1": {"status": "done"}},
-            },
-        )
-        view = self.svc.status_summary()
-        self.assertEqual([w["members"] for w in view["dag_waves"]], [["w1"]])
-        self.assertEqual(view["lines"][4], "  w0 w1 [-] done")
+        self.assertEqual(view["lines"][4], "  w0 w1 pending — the parser")
 
     def test_waves_fall_back_to_the_dag_plan(self):
         # No state.json waves yet: the engine's DAG projection fills the gap.
         view = self.svc.status_summary()
         self.assertEqual([w["members"] for w in view["dag_waves"]], [["w1"], ["w2"]])
         self.assertEqual([w["status"] for w in view["dag_waves"]], ["pending", "pending"])
-        self.assertEqual(view["lines"][4], "  w0 w1 [-] pending")
+        self.assertEqual(view["lines"][4], "  w0 w1 pending")
         self.assertEqual(view["lines"][6], "wave 0 [pending]: w1")
 
     def test_missing_or_empty_dag_yields_a_header_only_summary(self):
@@ -174,9 +136,8 @@ class StatusSummaryCase(unittest.TestCase):
     def test_plane_with_several_campaigns_summarizes_the_plane(self):
         self.svc.store.create_campaign(
             key="feat--y",
-            target_branch="feat/y",
-            worktree_branch="feat/y",
-            base="main",
+            work_branch="feat/y",
+            base_branch="main",
             unit_name="campaign:feat--y",
         )
         self.svc.store.conn.commit()

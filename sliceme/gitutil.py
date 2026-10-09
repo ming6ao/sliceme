@@ -10,10 +10,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
-from .util import SlicemeError, rmtree
+from .util import SlicemeError, rmtree, state_dir
 
 
 @dataclass
@@ -329,3 +331,59 @@ def detect_toolchain_files(repo: str | os.PathLike[str], commit: str) -> dict[st
 
 def create_branch(repo: str | os.PathLike[str], branch: str, commit: str) -> None:
     git(repo, "branch", "-f", branch, commit, check=True)
+
+
+@contextmanager
+def workspace_lock(root: Path) -> Iterator[None]:
+    """The one workspace lock: serializes campaign creation, record, and delivery.
+
+    Checks are synchronous and run inside the caller, so they need no lock of
+    their own; one lock guards every git mutation in a workspace.
+    """
+    import fcntl
+
+    path = state_dir(root) / "workspace.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _record_error(reason: str, message: str) -> SlicemeError:
+    """A record error carrying a machine-readable reason code.
+
+    The code is on both the ``reason`` attribute and at the head of the
+    message, so a caller can switch on the code and never parse the text.
+    """
+    error = SlicemeError(f"{reason}: {message}")
+    error.reason = reason
+    return error
+
+
+def _changed_entries(
+    worktree: Path, base: str | None = None
+) -> list[tuple[str, str, str | None]]:
+    """Staged changes as ``(status, path, old_path)``, rename-aware.
+
+    With no *base* the diff is against ``HEAD`` (the last recorded wave).
+    """
+    args = ["diff", "--cached", "--name-status", "-M"]
+    if base:
+        args.append(base)
+    result = git(worktree, *args, check=False)
+    if not result.ok:
+        return []
+    entries: list[tuple[str, str, str | None]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        if status[:1] in {"R", "C"} and len(parts) >= 3:
+            entries.append((status, parts[2], parts[1]))
+        else:
+            entries.append((status, parts[1], None))
+    return entries

@@ -6,7 +6,6 @@ Internal module: :class:`sliceme.service.Service` composes this mixin and
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .. import campaign, gitutil
@@ -20,44 +19,37 @@ class SessionVerbs:
     def resume(self, *, plan_only: bool = False) -> dict[str, Any]:
         """Reconcile a suspended campaign and return its resume plan.
 
-        Git and ``state.db`` always win over the adapter-written descriptor and
-        ``state.json``.  The plan is a pure computation over git plus
-        ``state.db``: it writes nothing, so ``plan_only`` is a compatibility
-        no-op kept for the CLI surface.
+        Git and ``state.db`` always win over the adapter-written descriptor.
+        The plan is a pure computation over git plus ``state.db``: it writes
+        nothing, so ``plan_only`` is a compatibility no-op kept for the CLI
+        surface.
         """
         config = self.config
         campaign_row = self.campaign
         branch = (
-            (campaign_row or {}).get("target_branch")
-            or config.get("target_branch")
-            or config.get("main_branch")
+            (campaign_row or {}).get("work_branch")
+            or config.get("work_branch")
             or "main"
         )
         descriptor = campaign.load_session(self.root, branch) or {}
         descriptor_nodes = descriptor.get("nodes") or {}
-        state = campaign.load_state(self.root, branch)
-        state_nodes: dict[str, Any] = state.get("nodes") or {}
         dag = campaign.load_dag(self.root, branch) or {}
         node_ids = [str(n["id"]) for n in dag.get("nodes", []) if n.get("id")]
         if not node_ids:
-            node_ids = sorted(state_nodes)
+            node_ids = sorted(str(key) for key in descriptor_nodes)
 
         latest: dict[str, dict[str, Any]] = {}
-        for candidate in self.store.list_candidates(campaign=self.campaign_key()):
-            node = candidate.get("node")
+        for record in self.store.list_records(campaign=self.campaign_key()):
+            node = record.get("node")
             if node:
-                latest[str(node)] = candidate  # ascending id order: last wins
+                latest[str(node)] = record  # ascending id order: last wins
 
-        campaign_row = self.campaign
-        unit = None
-        if campaign_row is not None:
-            unit = self.store.get_unit_by_campaign(str(campaign_row["key"]))
-        unit = unit or self.store.get_unit("campaign")
-        worktree = Path(unit["worktree"]) if unit and unit.get("worktree") else None
+        # The campaign owns the one worktree, so resume reads it from the row.
+        worktree = self.campaign_worktree()
         worktree_present = bool(worktree and worktree.exists())
         worktree_dirty = bool(worktree_present and not gitutil.is_clean(worktree))
 
-        current_wave, _members = self._current_wave(branch)
+        current_wave = self._wave_cursor(branch).index
 
         plan: dict[str, Any] = {
             "record_wave": None,
@@ -68,28 +60,29 @@ class SessionVerbs:
         }
         statuses: dict[str, str] = {}
         for node in node_ids:
-            entry = state_nodes.get(node) if isinstance(state_nodes.get(node), dict) else {}
-            desc_node = (
-                descriptor_nodes.get(node)
-                if isinstance(descriptor_nodes.get(node), dict)
-                else {}
-            )
-            recorded_commit = entry.get("commit") or desc_node.get("commit")
-            candidate = latest.get(node)
-            if not recorded_commit and candidate is not None:
-                recorded_commit = candidate.get("head_commit")
+            entry = self._descriptor_entry(descriptor_nodes, node)
+            recorded_commit = entry.get("commit")
+            record = latest.get(node)
+            if (
+                not recorded_commit
+                and record is not None
+                and not record.get("empty")
+            ):
+                recorded_commit = record.get("head_commit")
             status = self._resume_status(
-                entry, candidate, recorded_commit, worktree_present
+                entry, record, recorded_commit, worktree_present
             )
             statuses[node] = status
-            if status == "done":
-                continue
             if status == "recorded":
+                # A delivered node is finished; an undelivered one re-verifies
+                # from the check cache.
+                if record is not None and record.get("status") == "delivered":
+                    continue
                 plan["verify"].append(node)
-            elif status == "paused":
+            elif status == "running":
                 plan["resume"].append(node)
             elif status == "pending" and (
-                candidate is not None or int(entry.get("attempts") or 0) > 0
+                record is not None or int(entry.get("attempts") or 0) > 0
             ):
                 plan["respawn"].append(node)
         if plan["resume"] or worktree_dirty:
@@ -97,8 +90,9 @@ class SessionVerbs:
 
         result = {
             "campaign": descriptor.get("campaign") or dag.get("campaign"),
+            "work_branch": branch,
             "feature_branch": branch,
-            "worktree_branch": config.get("worktree_branch"),
+            "worktree_branch": config.get("work_branch"),
             "worktree": str(worktree) if worktree else None,
             "worktree_present": worktree_present,
             "worktree_dirty": worktree_dirty,
@@ -110,39 +104,55 @@ class SessionVerbs:
         return result
 
     @staticmethod
+    def _descriptor_entry(nodes: dict[str, Any], node: str) -> dict[str, Any]:
+        """One descriptor node entry as an object (a bare status string is
+        accepted)."""
+        entry = nodes.get(node)
+        if isinstance(entry, dict):
+            return entry
+        if isinstance(entry, str) and entry:
+            return {"status": entry}
+        return {}
+
+    @staticmethod
     def _resume_status(
         entry: dict[str, Any],
-        candidate: dict[str, Any] | None,
+        record: dict[str, Any] | None,
         recorded_commit: Any,
         worktree_present: bool,
     ) -> str:
         """Map one node to its resume status from plane evidence.
 
-        The commit comparison is essential: a verified-but-undelivered node is
-        ``done`` in ``state.json`` while its candidate is still ``prepared``,
-        so a status-only rule would wrongly re-run it.
+        The vocabulary is ``pending``, ``running``, ``recorded``, and
+        ``failed``.  The commit comparison is essential: a verified-but-
+        undelivered node is ``recorded`` while its record is still
+        ``recorded``, so a status-only rule would wrongly re-run it.
         """
-        candidate_status = candidate.get("status") if candidate else None
-        head = candidate.get("head_commit") if candidate else None
-        if candidate_status == "landed":
-            return "done"
-        if entry.get("status") == "done":
-            if not candidate:
-                return "done"
+        record_status = record.get("status") if record else None
+        # An empty marker means the node recorded zero changes.  It carries no
+        # commit, so it must not borrow a sibling's head to look recorded.
+        if record is not None and record.get("empty"):
+            return "recorded"
+        head = record.get("head_commit") if record else None
+        if record_status == "delivered":
+            return "recorded"
+        if entry.get("status") in {"done", "recorded"}:
+            if not record:
+                return "recorded"
             if recorded_commit and head == recorded_commit:
-                return "done"
-        if candidate_status == "prepared":
+                return "recorded"
+        if record_status == "recorded":
             if recorded_commit and head == recorded_commit:
                 return "recorded"
             return "pending"
-        if entry.get("status") in {"running", "paused", "recorded"}:
-            return "paused" if worktree_present else "pending"
+        if entry.get("status") in {"running", "paused"}:
+            return "running" if worktree_present else "pending"
         return "pending"
 
     def sessions(self) -> dict[str, Any]:
         """List every registered campaign from its descriptor files."""
         branch = (
-            self.plane_config.get("target_branch")
+            self.plane_config.get("work_branch")
             or self.plane_config.get("main_branch")
             or "main"
         )
@@ -152,7 +162,7 @@ class SessionVerbs:
         except SlicemeError:
             current = None
         if current is not None:
-            branch = current["target_branch"]
+            branch = current["work_branch"]
         entries: list[dict[str, Any]] = []
         for key, descriptor in campaign.list_sessions(self.root):
             feature_branch = str(descriptor.get("feature_branch") or key)
@@ -160,28 +170,26 @@ class SessionVerbs:
             campaign_key = row["key"] if row else None
             recorded = (
                 {
-                    str(candidate["node"])
-                    for candidate in self.store.list_candidates(campaign=campaign_key)
-                    if candidate.get("node")
+                    str(record["node"])
+                    for record in self.store.list_records(campaign=campaign_key)
+                    if record.get("node") and not record.get("empty")
                 }
                 if campaign_key
                 else set()
             )
-            state = campaign.load_state(self.root, feature_branch)
             dag = campaign.load_dag(self.root, feature_branch) or {}
             total = len([n for n in dag.get("nodes", []) if n.get("id")])
             done = len(recorded)
             entries.append(
                 {
+                    "work_branch": feature_branch,
                     "feature_branch": feature_branch,
                     "is_current": feature_branch == branch,
                     "campaign": descriptor.get("campaign") or dag.get("campaign"),
                     "label": descriptor.get("label"),
                     "status": descriptor.get("status") or "suspended",
                     "reason": descriptor.get("reason"),
-                    "wave": state.get("current_wave")
-                    if state.get("current_wave") is not None
-                    else descriptor.get("current_wave"),
+                    "wave": descriptor.get("current_wave"),
                     "done": done,
                     "total": total,
                     "suspended_at": descriptor.get("suspended_at"),

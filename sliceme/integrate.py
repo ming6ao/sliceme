@@ -7,8 +7,8 @@
   base, the repository default branch, with the ``gh`` program;
 * a ``git merge-tree`` pre-check refuses a conflicting merge before the push;
 * the plane's trusted checks run on the campaign head before the push;
-* candidates move to ``landed`` and units to ``landed``, keeping branches for
-  provenance;
+* records move to ``delivered`` and the campaign to ``delivered``, keeping
+  branches for provenance;
 * re-running is a no-op: an open pull request is returned as is.
 
 A **safety rail** refuses delivery when the campaign branch equals the plane's
@@ -16,11 +16,11 @@ recorded (default) branch (captured once at init, §6.1).  The campaign branch
 is the pull request head, so it must stay a feature branch.
 
 When ``check_only`` is set (the orchestrator's ``verify`` step), the node's
-acceptance commands run at the candidate commit, the verdict is recorded with
+acceptance commands run at the record commit, the verdict is recorded with
 source ``node:<id>``, and nothing is merged.
 
-This module also owns candidate integration ordering and simulation: prepared
-candidates are grouped into the campaign DAG's wave order, and ``simulate``
+This module also owns record integration ordering and simulation: recorded
+records are grouped into the campaign DAG's wave order, and ``simulate``
 materializes each wave's combined tree so the plane's trusted checks can run
 once over the combined result.
 """
@@ -39,8 +39,9 @@ from .util import SlicemeError, scratch_dir
 from .verifier import CheckResult, checks_from_config, run_checks
 
 __all__ = [
-    "LandResult",
+    "DeliveryResult",
     "Wave",
+    "base_branch_of",
     "deliver_pull_request",
     "delivery_base_of",
     "found_default_branch",
@@ -48,6 +49,7 @@ __all__ = [
     "plan_waves",
     "simulate",
     "target_branch_of",
+    "work_branch_of",
 ]
 
 
@@ -55,8 +57,8 @@ __all__ = [
 # Integration primitives
 # ---------------------------------------------------------------------------
 @dataclass
-class LandResult:
-    status: str  # landed | failed
+class DeliveryResult:
+    status: str  # delivered | failed
     detail: str = ""
     pull_request: dict[str, Any] | None = None
     checks: list[CheckResult] = field(default_factory=list)
@@ -74,35 +76,53 @@ class LandResult:
 DEFAULT_BRANCH_NAMES = ("main", "master")
 
 
-def target_branch_of(config: dict[str, Any]) -> str:
-    """The campaign branch: the feature branch the campaign works on.
+def work_branch_of(config: dict[str, Any]) -> str:
+    """The campaign work branch: the branch the campaign commits on.
 
-    The campaign branch is the campaign identity.  It must never be the
-    default branch; the pull request base is :func:`delivery_base_of`.
+    The campaign work branch is the pull request head and the campaign
+    identity.  It must never be the default branch; the pull request base is
+    :func:`base_branch_of`.  The read-time shim accepts the retired names
+    (``target_branch``, ``main_branch``, ``worktree_branch``,
+    ``feature_branch``) for one release.
     """
     return (
-        config.get("target_branch")
+        config.get("work_branch")
+        or config.get("worktree_branch")
+        or config.get("target_branch")
         or config.get("main_branch")
+        or config.get("feature_branch")
         or "main"
     )
 
 
-# Backwards-compatible name (the campaign branch used to be called main_branch).
-main_branch_of = target_branch_of
+def base_branch_of(config: dict[str, Any]) -> str:
+    """The pull request base: the branch the campaign lands on.
 
-
-def delivery_base_of(config: dict[str, Any]) -> str:
-    """The pull request base: the repository's default branch.
-
-    ``target_branch`` is the campaign branch (the pull request head).  The
-    delivery base is the branch the pull request lands on.  The plane records
-    it once at ``start`` so ``origin/HEAD`` may change later.
+    The base branch and the protected ``default_branch`` are the same value
+    only until a caller passes ``--base``.  The read-time shim accepts the
+    retired names (``delivery_base``, ``base``) for one release.
     """
     return (
-        config.get("delivery_base")
+        config.get("base_branch")
+        or config.get("delivery_base")
+        or config.get("base")
         or config.get("default_branch")
         or "main"
     )
+
+
+# Retired names kept as read aliases for one release.
+def target_branch_of(config: dict[str, Any]) -> str:
+    """Deprecated alias of :func:`work_branch_of`."""
+    return work_branch_of(config)
+
+
+main_branch_of = work_branch_of
+
+
+def delivery_base_of(config: dict[str, Any]) -> str:
+    """Deprecated alias of :func:`base_branch_of`."""
+    return base_branch_of(config)
 
 
 def found_default_branch(root: Path, *, exclude: str | None = None) -> str:
@@ -125,9 +145,9 @@ def found_default_branch(root: Path, *, exclude: str | None = None) -> str:
         name = configured.stdout.strip()
         if name != exclude:
             return name
-    for candidate in ("main", "master"):
-        if candidate != exclude and gitutil.branch_exists(root, candidate):
-            return candidate
+    for name in ("main", "master"):
+        if name != exclude and gitutil.branch_exists(root, name):
+            return name
     return "main"
 
 
@@ -154,27 +174,27 @@ def is_default_branch(
 # Final delivery: push the campaign branch and open a pull request
 # ---------------------------------------------------------------------------
 def _mark_delivered(store: Store, campaign: str | None = None) -> None:
-    """Mark this campaign's prepared candidates as landed.
+    """Mark this campaign's recorded records as delivered.
 
-    The candidate's ``head_commit`` stays as provenance (the node's commit on
-    the campaign worktree).
+    The record's ``head_commit`` stays as provenance (the node's commit on
+    the campaign worktree).  The campaign state moves to ``delivered``, because
+    the worktree holds no undelivered work after a successful delivery.
     """
-    for candidate in store.list_candidates(statuses=["prepared"], campaign=campaign):
-        store.update_candidate(int(candidate["id"]), status="landed")
-        unit = store.get_unit(int(candidate["unit_id"]))
-        if unit:
-            store.set_unit_state(int(unit["id"]), "landed")
+    for record in store.list_records(statuses=["recorded"], campaign=campaign):
+        store.update_record(int(record["id"]), status="delivered")
+    if campaign:
+        store.set_campaign_state(campaign, "delivered")
     store.conn.commit()
 
 
-def landed(
+def delivered_result(
     detail: str,
     pull_request: dict[str, Any] | None = None,
     *,
     checks: list[CheckResult] | None = None,
-) -> LandResult:
-    return LandResult(
-        status="landed",
+) -> DeliveryResult:
+    return DeliveryResult(
+        status="delivered",
         detail=detail,
         pull_request=pull_request,
         checks=checks or [],
@@ -203,7 +223,7 @@ def _delivery_checks(
     """The single check runner, for the plane's trusted checks before a push."""
     from .checks import CheckRunner
 
-    branch = config.get("main_branch")
+    branch = config.get("work_branch")
     dag = campaign.load_dag(root, branch) if branch else None
     return CheckRunner(root, store, config, dag=dag, campaign=campaign_key)
 
@@ -211,16 +231,16 @@ def _delivery_checks(
 def _delivery_gpu(
     store: Store, root: Path, config: dict[str, Any], campaign_key: str | None
 ) -> str:
-    """The strongest GPU tier among the campaign's prepared nodes."""
-    branch = config.get("main_branch")
+    """The strongest GPU tier among the campaign's recorded nodes."""
+    branch = config.get("work_branch")
     dag = campaign.load_dag(root, branch) if branch else None
     by_id = {str(node["id"]): node for node in (dag or {}).get("nodes") or []}
     member_nodes = [
-        by_id[str(candidate["node"])]
-        for candidate in store.list_candidates(
-            statuses=["prepared"], campaign=campaign_key
+        by_id[str(record["node"])]
+        for record in store.list_records(
+            statuses=["recorded"], campaign=campaign_key
         )
-        if candidate.get("node") and str(candidate["node"]) in by_id
+        if record.get("node") and str(record["node"]) in by_id
     ]
     return strongest_gpu_tier(member_nodes)
 
@@ -233,7 +253,7 @@ def deliver_pull_request(
     campaign: str | None = None,
     source: str | None = None,
     run_checks_flag: bool = True,
-) -> list[LandResult]:
+) -> list[DeliveryResult]:
     """Push the campaign worktree branch and open the delivery pull request.
 
     Called once, after every wave is recorded and every commit is approved.
@@ -253,10 +273,10 @@ def deliver_pull_request(
             f"refusing to deliver: the campaign branch '{campaign_branch}' equals "
             "the delivery base"
         )
-    source = source or config.get("worktree_branch")
+    source = source or config.get("work_branch")
     if not source or not gitutil.branch_exists(root, source):
         raise SlicemeError(
-            "no campaign worktree branch to deliver; run `sliceme wave --open` first"
+            "no campaign worktree branch to deliver; run `sliceme open` first"
         )
     source = str(source)
     if not gitutil.branch_exists(root, base):
@@ -270,12 +290,12 @@ def deliver_pull_request(
     base_head = gitutil.rev_parse(root, base)
     if gitutil.merge_base(root, base_head, source_head) == source_head:
         _mark_delivered(store, campaign)
-        return [landed(f"already contained in {base}")]
+        return [delivered_result(f"already contained in {base}")]
 
     outcome = gitutil.merge_tree(root, base_head, source_head)
     if not outcome.clean:
         return [
-            LandResult(
+            DeliveryResult(
                 status="failed",
                 detail=_conflict_detail(outcome),
             )
@@ -298,7 +318,7 @@ def deliver_pull_request(
             checks = _check_results(row)
             if row["status"] != "passed":
                 return [
-                    LandResult(
+                    DeliveryResult(
                         status="failed",
                         detail="checks failed; pull request not opened",
                         checks=checks,
@@ -322,7 +342,7 @@ def deliver_pull_request(
 
     _mark_delivered(store, campaign)
     return [
-        landed(
+        delivered_result(
             f"pull request opened: {found['url']}",
             found,
             checks=checks,
@@ -336,7 +356,7 @@ def deliver_pull_request(
 @dataclass
 class Wave:
     index: int
-    candidates: list[dict[str, Any]] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
     combined: str = ""
     check_status: str | None = None
     checks: list[CheckResult] = field(default_factory=list)
@@ -346,8 +366,8 @@ class Wave:
             "wave": self.index,
             "combined": self.combined,
             "members": [
-                {"candidate": c["id"], "unit": c["unit_name"], "branch": c["unit_branch"]}
-                for c in self.candidates
+                {"record": c["id"], "node": c.get("node"), "commit": c.get("head_commit")}
+                for c in self.records
             ],
             "check_status": self.check_status,
             "checks": [c.to_dict() for c in self.checks],
@@ -356,7 +376,7 @@ class Wave:
 
 def _wave_index_by_node(root: Path, config: dict[str, Any]) -> dict[str, int]:
     """Map every DAG node id to its wave index (empty for a non-campaign plane)."""
-    branch = config.get("main_branch")
+    branch = config.get("work_branch")
     dag = campaign.load_dag(root, branch) if branch else None
     if not dag or not dag.get("nodes"):
         return {}
@@ -369,35 +389,35 @@ def plan_waves(
     store: Store,
     root: Path,
     config: dict[str, Any],
-    candidates: list[dict[str, Any]],
+    records: list[dict[str, Any]],
 ) -> list[Wave]:
-    """Group candidates into DAG waves, each internally priority-ordered."""
-    if not candidates:
+    """Group records into DAG waves, each internally priority-ordered."""
+    if not records:
         return []
     wave_of = _wave_index_by_node(root, config)
     fallback = (max(wave_of.values()) + 1) if wave_of else 0
 
-    def key(candidate: dict[str, Any]) -> tuple[Any, ...]:
-        node = str(candidate.get("node") or candidate.get("unit_name") or "")
+    def key(record: dict[str, Any]) -> tuple[Any, ...]:
+        node = str(record.get("node") or "")
         return (
             wave_of.get(node, fallback),
-            -int(candidate.get("priority") or 0),
-            float(candidate.get("created_at") or 0.0),
-            int(candidate["id"]),
+            -int(record.get("priority") or 0),
+            float(record.get("created_at") or 0.0),
+            int(record["id"]),
         )
 
-    ordered = sorted(candidates, key=key)
+    ordered = sorted(records, key=key)
     waves: list[Wave] = []
     by_index: dict[int, Wave] = {}
-    for candidate in ordered:
-        node = str(candidate.get("node") or candidate.get("unit_name") or "")
+    for record in ordered:
+        node = str(record.get("node") or "")
         index = wave_of.get(node, fallback)
         wave = by_index.get(index)
         if wave is None:
             wave = Wave(index=index)
             by_index[index] = wave
             waves.append(wave)
-        wave.candidates.append(candidate)
+        wave.records.append(record)
     waves.sort(key=lambda w: w.index)
     return waves
 
@@ -429,16 +449,16 @@ def simulate(
     statuses: list[str] | None = None,
     run_checks_flag: bool = True,
 ) -> dict[str, Any]:
-    candidates = store.list_candidates(
-        statuses=statuses or ["prepared", "pending"], campaign=campaign
+    records = store.list_records(
+        statuses=statuses or ["recorded", "pending"], campaign=campaign
     )
-    waves = plan_waves(store, root, config, candidates)
-    base_ref = config.get("base") or config.get("main_branch") or "main"
+    waves = plan_waves(store, root, config, records)
+    base_ref = base_branch_of(config)
     scratch = scratch_dir(root)
     for wave in waves:
         combined = gitutil.rev_parse(root, base_ref)
-        for candidate in wave.candidates:
-            ok, combined = _merge_into_wave(root, combined, candidate["unit_branch"])
+        for record in wave.records:
+            ok, combined = _merge_into_wave(root, combined, record["head_commit"])
             if not ok:
                 combined = ""
                 break
@@ -456,7 +476,7 @@ def simulate(
         finally:
             gitutil.cleanup_worktree(root, path)
     return {
-        "candidate_count": len(candidates),
+        "record_count": len(records),
         "waves": [w.to_dict() for w in waves],
         "overall": _overall_status(waves),
     }

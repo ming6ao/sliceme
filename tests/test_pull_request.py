@@ -31,7 +31,7 @@ class PullRequestCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
 
     nodes = [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
     ]
 
     def setUp(self):
@@ -75,7 +75,7 @@ class PullRequestCase(unittest.TestCase):
         return unit
 
     def approve(self):
-        return self.svc.review_decision(action="approve", all_commits=True, actor="test")
+        return self.svc.record_approval(action="approve", all_commits=True, actor="test")
 
     def campaign_row(self):
         return self.svc.store.get_campaign("feat/x")
@@ -93,7 +93,7 @@ class PullRequestCase(unittest.TestCase):
         unit = self.record_one()
         self.approve()
         result = self.svc.deliver()
-        self.assertEqual(result["results"][0]["status"], "landed")
+        self.assertEqual(result["results"][0]["status"], "delivered")
         url = result["pull_request"]["url"]
         self.assertTrue(url.startswith("https://example.test/pull/"))
         row = self.campaign_row()
@@ -162,7 +162,7 @@ class PullRequestCase(unittest.TestCase):
             with mock.patch.object(pullrequest, "_COMMON_BIN_DIRS", (str(FAKE_GH_BIN),)):
                 with mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
                     result = self.svc.deliver()
-        self.assertEqual(result["results"][0]["status"], "landed")
+        self.assertEqual(result["results"][0]["status"], "delivered")
         self.assertTrue(result["pull_request"]["url"].startswith("https://example.test/pull/"))
         self.assertEqual(self.campaign_row()["state"], "delivered")
         self.assertIn(unit["branch"], self.remote_heads())
@@ -186,8 +186,7 @@ class PullRequestCase(unittest.TestCase):
         # The campaign branch is the pull request head; delivery must refuse it
         # when it is the default branch.
         config = dict(self.svc.config)
-        config["target_branch"] = "main"
-        config["main_branch"] = "main"
+        config["work_branch"] = "main"
         with self.assertRaises(SlicemeError) as ctx:
             integrate.deliver_pull_request(self.svc.store, self.svc.root, config)
         self.assertIn("default branch", str(ctx.exception))
@@ -197,9 +196,8 @@ class PullRequestCase(unittest.TestCase):
         # must not equal it, or the pull request would have head == base.
         run("git", "branch", "develop", "main", cwd=self.root)
         config = dict(self.svc.config)
-        config["target_branch"] = "develop"
-        config["main_branch"] = "develop"
-        config["delivery_base"] = "develop"
+        config["work_branch"] = "develop"
+        config["base_branch"] = "develop"
         with self.assertRaises(SlicemeError) as ctx:
             integrate.deliver_pull_request(self.svc.store, self.svc.root, config)
         self.assertIn("delivery base", str(ctx.exception))

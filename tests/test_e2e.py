@@ -1,7 +1,7 @@
 """End-to-end: one design from ``start`` to the delivery pull request.
 
 This pins the main-based campaign model.  ``start`` derives the campaign branch
-from the design name and records the delivery base.  ``wave --open`` fetches the
+from the design name and records the delivery base.  ``open`` fetches the
 delivery base and creates the campaign worktree on the campaign branch.  The
 engine records and checks the wave, a human approves the campaign, the engine
 writes the evidence document, and ``deliver`` pushes the campaign branch and
@@ -66,7 +66,6 @@ class EndToEndCase(unittest.TestCase):
             design="DESIGN.md",
             base="main",
             checks=self.checks,
-            no_unit=True,
         )
         self.svc = Service(self.root)
         write_json(
@@ -80,7 +79,7 @@ class EndToEndCase(unittest.TestCase):
                     {
                         "id": "w1",
                         "goal": "add the endpoint",
-                        "owns": ["dir:src/api"],
+                        "owns": ["src/api"],
                         "depends_on": [],
                         "acceptance": ["true"],
                     }
@@ -100,7 +99,7 @@ class EndToEndCase(unittest.TestCase):
         self.assertEqual(svc.config["worktree_branch"], "feat/design")
         self.assertEqual(svc.config["delivery_base"], "main")
 
-        # `wave --open` fetches the delivery base and creates the campaign
+        # `open` fetches the delivery base and creates the campaign
         # worktree on the campaign branch.
         unit = svc.create_campaign_workspace()
         self.assertEqual(unit["branch"], "feat/design")
@@ -108,19 +107,19 @@ class EndToEndCase(unittest.TestCase):
         (Path(unit["worktree"]) / "src" / "api" / "app.py").write_text("value = 2\n")
 
         recorded = svc.record_wave(0, messages={"w1": "add the endpoint"})
-        self.assertEqual([c["node"] for c in recorded["candidates"]], ["w1"])
+        self.assertEqual([c["node"] for c in recorded["records"]], ["w1"])
 
         check = svc.check_wave()
         self.assertEqual(check["status"], "passed")
 
-        svc.review_decision(action="approve", all_commits=True, actor="reviewer")
+        svc.record_approval(action="approve", all_commits=True, actor="reviewer")
         evidence = svc.evidence(design="DESIGN.md")
         self.assertTrue(Path(evidence["path"]).is_file())
         self.assertTrue(Path(evidence["json_path"]).is_file())
         self.assertIn("## Evidence", evidence["content"])
 
         result = svc.deliver()
-        self.assertEqual([r["status"] for r in result["results"]], ["landed"])
+        self.assertEqual([r["status"] for r in result["results"]], ["delivered"])
         self.assertEqual(result["feature_branch"], "feat/design")
         pull = self.pr("feat/design")
         self.assertEqual(pull["base"], "main")
@@ -158,7 +157,7 @@ class EndToEndCase(unittest.TestCase):
         unit = svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "api" / "app.py").write_text("value = 2\n")
         svc.record_wave(0, messages={"w1": "add the endpoint"})
-        svc.review_decision(action="approve", all_commits=True, actor="reviewer")
+        svc.record_approval(action="approve", all_commits=True, actor="reviewer")
 
         result = svc.deliver()
         self.assertEqual(result["results"][0]["status"], "failed")

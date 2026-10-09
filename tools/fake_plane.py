@@ -43,35 +43,35 @@ DAG = {
         {
             "id": "w1",
             "label": "API auth",
-            "owns": ["dir:src/api"],
+            "owns": ["src/api"],
             "depends_on": [],
             "acceptance": ["true"],
         },
         {
             "id": "w2",
             "label": "Store migrations",
-            "owns": ["dir:src/store"],
+            "owns": ["src/store"],
             "depends_on": [],
             "acceptance": ["true"],
         },
         {
             "id": "w3",
             "label": "Web session flow",
-            "owns": ["dir:src/web"],
+            "owns": ["src/web"],
             "depends_on": ["w1"],
             "acceptance": ["true"],
         },
         {
             "id": "w4",
             "label": "CLI flags",
-            "owns": ["dir:src/cli"],
+            "owns": ["src/cli"],
             "depends_on": ["w2"],
             "acceptance": ["true"],
         },
         {
             "id": "w5",
             "label": "Usage docs",
-            "owns": ["dir:docs"],
+            "owns": ["docs"],
             "depends_on": ["w1", "w2"],
             "acceptance": ["true"],
         },
@@ -313,10 +313,10 @@ def build_campaign(svc: Service) -> dict[str, str]:
         )
         for node in members:
             for rel, text in NODE_EDITS[node].items():
-                write_text(Path(svc.store.get_unit("campaign")["worktree"]), rel, text)
+                write_text(Path(svc.store.get_campaign(FEATURE_BRANCH)["worktree"]), rel, text)
         result = svc.record_wave(wave, messages={node: messages[node] for node in members})
-        for candidate in result["candidates"]:
-            commits[str(candidate["node"])] = str(candidate["head_commit"])
+        for record in result["records"]:
+            commits[str(record["node"])] = str(record["head_commit"])
     return commits
 
 
@@ -325,7 +325,7 @@ def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int
     store = svc.store
     # A superseded failure for w2 first, so the later passing check is the newest
     # terminal row and wins in the evidence panel.
-    store.create_check(
+    store.create_verdict(
         fingerprint=sha256_text(f"stale:{commits['w2']}"),
         source="node:w2",
         commit_ref=commits["w2"],
@@ -338,7 +338,7 @@ def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int
     )
     for node, spec in EVIDENCE.items():
         commit = commits[node]
-        store.create_check(
+        store.create_verdict(
             fingerprint=sha256_text(f"{node}:{commit}:{spec['status']}"),
             source=f"node:{node}",
             commit_ref=commit,
@@ -353,70 +353,15 @@ def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int
 
 
 def add_review_data(svc: Service, commits: dict[str, str]) -> None:
-    svc.review_decision(
+    svc.record_approval(
         action="approve", commit=commits["w1"], actor="demo-reviewer"
     )
-    svc.review_decision(
+    svc.record_approval(
         action="request_changes",
         commit=commits["w3"],
         actor="demo-reviewer",
         note="Fix the failing session test before approval.",
     )
-
-
-def write_state(root: Path, config: dict, commits: dict[str, str]) -> None:
-    state = {
-        "campaign": CAMPAIGN,
-        "feature_branch": FEATURE_BRANCH,
-        "target_branch": FEATURE_BRANCH,
-        "worktree_branch": config.get("worktree_branch"),
-        "base": "main",
-        "delivery_base": "main",
-        "delivered": False,
-        "wave_size": 2,
-        "current_wave": 2,
-        "waves": [
-            {
-                "index": 0,
-                "members": ["w1", "w2"],
-                "status": "done",
-                "integrated": ["w1", "w2"],
-                "cleanup_done": True,
-            },
-            {
-                "index": 1,
-                "members": ["w3", "w4"],
-                "status": "done",
-                "integrated": ["w3", "w4"],
-                "cleanup_done": True,
-            },
-            {
-                "index": 2,
-                "members": ["w5"],
-                "status": "done",
-                "integrated": ["w5"],
-                "cleanup_done": True,
-            },
-        ],
-        "nodes": {
-            node: {
-                "status": "done",
-                "attempts": 1,
-                "commit": commit,
-                "wave": wave,
-            }
-            for wave, (node, commit) in enumerate(
-                [
-                    ("w1", commits["w1"]),
-                    ("w2", commits["w2"]),
-                    ("w3", commits["w3"]),
-                    ("w4", commits["w4"]),
-                    ("w5", commits["w5"]),
-                ]
-            )
-        },
-    }
-    write_json(campaign.state_path(root, FEATURE_BRANCH), state)
 
 
 def write_session_descriptors(root: Path, config: dict, commits: dict[str, str]) -> None:
@@ -425,7 +370,7 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
     ready = {
         "campaign": CAMPAIGN,
         "feature_branch": FEATURE_BRANCH,
-        "worktree_branch": config.get("worktree_branch"),
+        "work_branch": config.get("work_branch"),
         "design": "DESIGN.md",
         "pi": {
             "session_id": "demo-session-0001",
@@ -446,7 +391,7 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
             node: {
                 "status": "done",
                 "attempt": 1,
-                "candidate": None,
+                "record": None,
                 "commit": commits[node],
             }
             for node in commits
@@ -464,7 +409,7 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
     decoy = {
         "campaign": "notifications-service",
         "feature_branch": DECOY_BRANCH,
-        "worktree_branch": DECOY_BRANCH,
+        "work_branch": DECOY_BRANCH,
         "design": "DESIGN.md",
         "pi": {
             "session_id": "demo-session-0002",
@@ -481,9 +426,9 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
             {"index": 1, "members": ["n3"], "status": "running"},
         ],
         "nodes": {
-            "n1": {"status": "done", "attempt": 1, "candidate": 9001, "commit": "0" * 40},
-            "n2": {"status": "done", "attempt": 1, "candidate": 9002, "commit": "1" * 40},
-            "n3": {"status": "paused", "attempt": 2, "candidate": None, "commit": None},
+            "n1": {"status": "done", "attempt": 1, "record": 9001, "commit": "0" * 40},
+            "n2": {"status": "done", "attempt": 1, "record": 9002, "commit": "1" * 40},
+            "n3": {"status": "paused", "attempt": 2, "record": None, "commit": None},
         },
         "resume_plan": {
             "record_wave": 1,
@@ -550,7 +495,6 @@ def main() -> int:
             ),
             design="DESIGN.md",
         )
-        write_state(root, config, commits)
         write_session_descriptors(root, config, commits)
         write_worker_logs(root, commits)
         snapshot = svc.review_snapshot()
@@ -566,7 +510,7 @@ def main() -> int:
     print("inspect the plane with:")
     print(f"  python3 -m sliceme --root {root} status")
     print(
-        f"  python3 -m sliceme --root {root} review --report --campaign {FEATURE_BRANCH}"
+        f"  python3 -m sliceme --root {root} report --campaign {FEATURE_BRANCH}"
     )
     return 0
 

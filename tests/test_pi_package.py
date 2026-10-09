@@ -127,7 +127,7 @@ class PiPackageTests(unittest.TestCase):
         # The tool forwards the engine verbs and their flags; it does not own a
         # scheduler.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for verb in ("start", "status", "ready", "plan", "wave", "check", "review", "evidence", "deliver"):
+        for verb in ("start", "status", "ready", "plan", "open", "record", "check", "approve", "report", "evidence", "deliver"):
             self.assertIn(f'"{verb}"', coordinator, verb)
         self.assertIn("ENGINE_ACTIONS", coordinator)
         self.assertIn("ACTION_FLAGS", coordinator)
@@ -140,15 +140,15 @@ class PiPackageTests(unittest.TestCase):
         # the approval and delivery (`docs/main-based-campaigns-plan.md` Phase 6).
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('"evidence"', coordinator)
-        self.assertIn("review --report", coordinator)
+        self.assertIn("run `report`", coordinator)
         self.assertIn("confirmation one time", coordinator)
-        self.assertIn("review --decision approve", coordinator)
+        self.assertIn("run `approve`", coordinator)
 
     def test_the_coordinator_opens_the_worktree_before_the_resource(self):
         # The campaign resource has no `open` grant, so the coordinator must run
-        # `wave --open` before it starts the resource (plan correction 4).
+        # `open` before it starts the resource (plan correction 4).
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        self.assertIn("wave --open", coordinator)
+        self.assertIn("run `open`", coordinator)
 
     def test_campaign_resource_is_registered(self):
         # The trusted resource is registered in `session_start` and disposed in
@@ -164,8 +164,8 @@ class PiPackageTests(unittest.TestCase):
         for verb in (
             '["status"]',
             '["ready"]',
-            '["wave", "--record", "--current"]',
-            '["check", "--current"]',
+            '["record"]',
+            '["check"]',
         ):
             self.assertIn(verb, resource, verb)
         # Registration is disposed on shutdown.
@@ -246,7 +246,7 @@ class PiPackageTests(unittest.TestCase):
             "progress",
         ):
             self.assertNotIn(gone, names)
-        for present in ("deliver", "review", "wave", "check", "ready", "status"):
+        for present in ("deliver", "approve", "report", "open", "record", "check", "ready", "status"):
             self.assertIn(present, names)
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         for gone in ("spawn", "record", "verify", "exec", "progress"):
@@ -255,15 +255,18 @@ class PiPackageTests(unittest.TestCase):
     def test_campaign_actions_are_documented(self):
         names = {a.name for a in surface.ACTIONS}
         self.assertIn("deliver", names)
-        self.assertIn("wave", names)
-        self.assertIn("review", names)
+        self.assertIn("open", names)
+        self.assertIn("record", names)
+        self.assertIn("approve", names)
+        self.assertIn("report", names)
         self.assertIn("check", names)
         # The workflow doc documents the campaign additions.
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("`deliver`", workflow)
-        self.assertIn("`wave`", workflow)
-        self.assertIn("`review`", workflow)
-        self.assertIn("--no-unit", workflow)
+        self.assertIn("`open`", workflow)
+        self.assertIn("`record`", workflow)
+        self.assertIn("`approve`", workflow)
+        self.assertIn("--feature-branch", workflow)
 
     def test_session_suspend_resume_contract(self):
         # The extension writes the descriptor, sets and clears the pause flag,

@@ -12,26 +12,26 @@ from sliceme.util import SlicemeError
 
 
 class NormalizeTests(unittest.TestCase):
-    def test_dir_prefix_and_trailing_slash(self):
-        self.assertEqual(normalize_dir("dir:src/api"), "src/api")
+    def test_trailing_slash(self):
+        self.assertEqual(normalize_dir("src/api"), "src/api")
         self.assertEqual(normalize_dir("src/api/"), "src/api")
         self.assertEqual(normalize_dir("./src/api/"), "src/api")
 
     def test_root_normalizes_to_dot(self):
-        self.assertEqual(normalize_dir("dir:."), ".")
+        self.assertEqual(normalize_dir("."), ".")
         self.assertEqual(normalize_dir(""), ".")
         self.assertEqual(normalize_dir("/"), ".")
 
 
 class ParseOwnsTests(unittest.TestCase):
-    def test_accepts_dir_and_bare_paths(self):
-        self.assertEqual(parse_owns(["dir:src/api", "docs"]), ["src/api", "docs"])
+    def test_accepts_bare_paths(self):
+        self.assertEqual(parse_owns(["src/api", "docs"]), ["src/api", "docs"])
 
     def test_dedupes_normalized_paths(self):
-        self.assertEqual(parse_owns(["dir:src/api/", "src/api"]), ["src/api"])
+        self.assertEqual(parse_owns(["src/api/", "src/api"]), ["src/api"])
 
-    def test_rejects_non_directory_kinds(self):
-        for spec in ("file:src/a.py", "symbol:src/a.py#A", "api:GET /x"):
+    def test_rejects_kind_prefixes(self):
+        for spec in ("file:src/a.py", "symbol:src/a.py#A", "api:GET /x", "dir:src/api"):
             with self.assertRaises(SlicemeError):
                 parse_owns([spec])
 
@@ -40,7 +40,7 @@ class ParseOwnsTests(unittest.TestCase):
             with self.assertRaises(SlicemeError):
                 parse_owns([spec])
         with self.assertRaises(SlicemeError):
-            parse_owns(["dir:src/api", ""])
+            parse_owns(["src/api", ""])
 
     def test_missing_owns_list_stays_valid(self):
         self.assertEqual(parse_owns([]), [])

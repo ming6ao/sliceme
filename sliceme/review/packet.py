@@ -81,27 +81,27 @@ def commit_changes(root: Path, commit: str) -> dict[str, Any]:
 
 def campaign_branch_key(service: "Service") -> str:
     config = service.config
-    branch = str(config.get("target_branch") or config.get("main_branch") or "main")
+    branch = str(config.get("work_branch") or "main")
     return campaign.branch_key(branch)
 
 
 def _campaign_branch(service: "Service") -> str:
     config = service.config
-    return str(config.get("target_branch") or config.get("main_branch") or "main")
+    return str(config.get("work_branch") or "main")
 
 
 def _target_branch(service: "Service") -> str:
-    """The review diff base: the delivery base (the pull request base).
+    """The review diff base: the base branch (the pull request base).
 
     ``_campaign_branch`` is the pull request head.  Diffing the head against
-    itself gives an empty campaign, so the diff base is the delivery base
+    itself gives an empty campaign, so the diff base is the base branch
     instead.
     """
-    return integrate.delivery_base_of(service.config)
+    return integrate.base_branch_of(service.config)
 
 
 def _worktree_branch(service: "Service") -> str | None:
-    branch = service.config.get("worktree_branch")
+    branch = service.config.get("work_branch")
     return str(branch) if branch else None
 
 
@@ -134,17 +134,14 @@ def campaign_commits(service: "Service") -> list[str]:
 
 
 def review_commits(service: "Service") -> list[str]:
-    """Campaign commits plus any prepared candidate commits, oldest first."""
+    """Campaign commits plus any recorded node commits, oldest first."""
     commits = campaign_commits(service)
     seen = set(commits)
-    for candidate in service.store.list_candidates(
-        statuses=["prepared"], campaign=service.campaign_key()
+    for record in service.store.list_records(
+        statuses=["recorded"], campaign=service.campaign_key()
     ):
-        try:
-            head = gitutil.rev_parse(service.root, candidate["unit_branch"])
-        except SlicemeError:
-            continue
-        if head not in seen:
+        head = str(record.get("head_commit") or "")
+        if head and head not in seen:
             seen.add(head)
             commits.append(head)
     return commits
@@ -171,7 +168,7 @@ def report_info(service: "Service") -> dict[str, Any]:
 
 def _campaign_approval(service: "Service") -> tuple[dict[str, Any] | None, bool]:
     """The latest campaign-level decision and whether it is an approve."""
-    return service.campaign_decision(), service.campaign_approved()
+    return service.campaign_approval(), service.campaign_approved()
 
 
 def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, Any]:
@@ -198,6 +195,7 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
 
     return {
         "branch_key": branch_key,
+        "work_branch": _campaign_branch(service),
         "feature_branch": _campaign_branch(service),
         "source_tip": source_tip,
         "target_tip": target_tip,
@@ -215,17 +213,21 @@ def build_packet(service: "Service", *, commit: str | None = None) -> dict[str, 
 def _evidence_map(service: "Service", hashes: set[str]) -> dict[str, dict[str, Any]]:
     """The newest verification for each reviewed commit, keyed by commit hash."""
     found: dict[str, dict[str, Any]] = {}
-    for candidate in service.store.list_candidates(campaign=service.campaign_key()):
-        head = str(candidate.get("head_commit") or "")
+    for record in service.store.list_records(campaign=service.campaign_key()):
+        # An empty marker is not a commit: its stored head is another node's
+        # commit, so it must not overwrite that node's evidence entry.
+        if record.get("empty"):
+            continue
+        head = str(record.get("head_commit") or "")
         if head not in hashes:
             continue
-        check = service.store.latest_check_for_commit(head)
+        check = service.store.latest_verdict_for_commit(head)
         if check is None:
             continue
         changes = commit_changes(service.root, head)
         found[head] = {
-            "candidate": int(candidate["id"]),
-            "node": candidate.get("node"),
+            "record": int(record["id"]),
+            "node": record.get("node"),
             "status": check.get("status"),
             "duration": check.get("duration"),
             "fingerprint": check.get("fingerprint"),

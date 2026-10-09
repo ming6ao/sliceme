@@ -27,8 +27,8 @@ assert.ok(!CAMPAIGN_TOKEN.test(""));
 assert.deepEqual(campaignCommands(ENGINE), {
 	status: "python3 /opt/sliceme/bin/sliceme --json status",
 	ready: "python3 /opt/sliceme/bin/sliceme --json ready",
-	record: "python3 /opt/sliceme/bin/sliceme --json wave --record --current",
-	check: "python3 /opt/sliceme/bin/sliceme --json check --current",
+	record: "python3 /opt/sliceme/bin/sliceme --json record",
+	check: "python3 /opt/sliceme/bin/sliceme --json check",
 });
 
 // The campaign token is the only variable text and is bound with --campaign.
@@ -39,7 +39,7 @@ assert.equal(
 );
 assert.equal(
 	withCampaign.record,
-	"python3 /opt/sliceme/bin/sliceme --json wave --record --current --campaign feat.x",
+	"python3 /opt/sliceme/bin/sliceme --json record --campaign feat.x",
 );
 
 // A full resolution exposes the four grants and a script that uses the state
@@ -61,9 +61,9 @@ assert.ok(!resolved.hostCommands.some((grant) => grant.key === "approve"));
 assert.ok(!resolved.hostCommands.some((grant) => grant.key === "deliver"));
 
 // No `open` host grant: the coordinator opens the worktree with
-// `sliceme wave --open` before it starts the resource (plan correction 4).
+// `sliceme open` before it starts the resource (plan correction 4).
 assert.ok(!resolved.hostCommands.some((grant) => grant.key === "open"));
-assert.ok(!resolved.script.includes("wave --open"));
+assert.ok(!resolved.script.includes("--open"));
 for (const key of ["status", "ready-0", "record-0", "check-0"]) {
 	const grant = resolved.hostCommands.find((entry) => entry.key === key);
 	assert.ok(grant, `missing grant ${key}`);

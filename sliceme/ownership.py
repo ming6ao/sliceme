@@ -18,10 +18,11 @@ wave of its own and exactly one GPU node runs at a time.
 
 Canonical ownership form:
 
-* ``dir:src/api`` and ``src/api/`` both normalize to ``src/api``;
+* ``src/api`` and ``src/api/`` both normalize to ``src/api``;
 * the repository root is ``"."``;
-* non-directory specs (``file:``, ``symbol:``, ...) are rejected, so a plan can
-  never silently rely on finer-grained enforcement that no longer exists.
+* a kind prefix (``dir:``, ``file:``, ``symbol:``, ...) is rejected, so a plan
+  carries repository-relative directories only and can never silently rely on
+  finer-grained enforcement that no longer exists.
 """
 
 from __future__ import annotations
@@ -34,24 +35,13 @@ from .util import SlicemeError
 
 DEFAULT_WAVE_SIZE = 3
 
-#: Scope kinds that are *not* ownable. Kept explicit so a stale plan fails
-#: loudly instead of being reinterpreted as a directory path.
-_NON_DIR_KINDS = frozenset(
-    {"file", "symbol", "api", "schema", "config", "migration", "infra", "test", "unknown"}
-)
-
 
 # ---------------------------------------------------------------------------
 # Directory ownership
 # ---------------------------------------------------------------------------
 def normalize_dir(path: str) -> str:
-    """Canonical repo-relative directory: ``dir:src/api/`` -> ``src/api``."""
-    text = str(path).strip()
-    if ":" in text:
-        prefix, rest = text.split(":", 1)
-        if prefix.strip().lower() == "dir":
-            text = rest
-    text = text.replace("\\", "/")
+    """Canonical repo-relative directory: ``src/api/`` -> ``src/api``."""
+    text = str(path).strip().replace("\\", "/")
     norm = posixpath.normpath(text)
     while norm.startswith("./"):
         norm = norm[2:]
@@ -60,11 +50,12 @@ def normalize_dir(path: str) -> str:
 
 
 def parse_owns(specs: list[str]) -> list[str]:
-    """Parse an ``owns`` list into normalized directories.
+    """Parse an ``owns`` list into normalized repository-relative directories.
 
-    Accepts ``dir:path`` and bare paths. An empty or whitespace-only entry and
-    a recognized non-directory kind each raise :class:`SlicemeError`. A missing
-    ``owns`` list stays valid (an empty list parses to ``[]``).
+    Accepts bare directory paths only. An empty or whitespace-only entry and a
+    kind prefix (``dir:``, ``file:``, ``symbol:``, ...) each raise
+    :class:`SlicemeError`. A missing ``owns`` list stays valid (an empty list
+    parses to ``[]``).
     """
     owns: list[str] = []
     seen: set[str] = set()
@@ -75,12 +66,10 @@ def parse_owns(specs: list[str]) -> list[str]:
                 "owns entry is empty; declare the deepest directory the node touches"
             )
         if ":" in text:
-            prefix = text.split(":", 1)[0].strip().lower()
-            if prefix in _NON_DIR_KINDS:
-                raise SlicemeError(
-                    f"owns must be directories, not {prefix}: '{text}' "
-                    "(declare the deepest directory that contains the paths)"
-                )
+            raise SlicemeError(
+                f"owns must be a repository-relative directory, not '{text}' "
+                "(write the bare path, for example 'src/api')"
+            )
         directory = normalize_dir(text)
         if directory not in seen:
             seen.add(directory)
@@ -117,6 +106,11 @@ def path_within_owns(path: str, owns: list[str]) -> bool:
         if directory == "." or parent == directory or parent.startswith(directory + "/"):
             return True
     return False
+
+
+def owners_of(path: str, owners: dict[str, list[str]]) -> list[str]:
+    """The wave node ids whose owned directories contain *path*."""
+    return [node_id for node_id, owns in owners.items() if path_within_owns(path, owns)]
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +162,7 @@ def _conflict_reason(a: dict[str, Any], b: dict[str, Any]) -> str | None:
     """Return a human reason when nodes *a* and *b* must not share a wave.
 
     When *a* is compared against *b*, *b* is already placed and *a* is the
-    candidate moving later, so the message names the blocker (*b*).
+    record moving later, so the message names the blocker (*b*).
 
     A GPU node conflicts with every other node, so it lands in a wave of its
     own and exactly one GPU node runs at a time. Directory ownership adds the
@@ -304,46 +298,6 @@ def plan_dag_waves(
 
 
 # ---------------------------------------------------------------------------
-# Per-node readiness: the spawn gate (DEC-2)
-# ---------------------------------------------------------------------------
-#: Node statuses that mean a node is underway or finished, so it is never
-#: "ready" to spawn again.
-_NOT_READY_STATUSES = frozenset({"done", "running"})
-
-
-def _status_of(state: dict[str, Any], node_id: str) -> str:
-    """Read one node's status from a campaign state mapping."""
-    entries = state.get("nodes") if isinstance(state, dict) else None
-    entry = entries.get(node_id) if isinstance(entries, dict) else None
-    if isinstance(entry, dict):
-        return str(entry.get("status") or "pending")
-    return "pending"
-
-
-def readiness(nodes: list[dict[str, Any]], state: dict[str, Any]) -> list[str]:
-    """Return the ids of the nodes ready to spawn, in DAG declaration order.
-
-    A node is ready when its own status is neither ``done`` nor ``running`` and
-    every id in its ``depends_on`` has status ``done``.  *state* is the campaign
-    state mapping ``{"nodes": {id: {"status": ...}}}`` that
-    :func:`sliceme.campaign.load_state` returns.  A dependency missing from
-    *state* counts as pending, so the dependent is simply not ready yet.
-
-    Readiness is the spawn gate (DEC-2).  Waves stay a display hint; a node
-    starts once its dependencies complete rather than at a fixed wave.
-    """
-    done = {_node_id(n) for n in nodes if _status_of(state, _node_id(n)) == "done"}
-    ready: list[str] = []
-    for node in nodes:
-        nid = _node_id(node)
-        if _status_of(state, nid) in _NOT_READY_STATUSES:
-            continue
-        if all(str(dep) in done for dep in (node.get("depends_on") or [])):
-            ready.append(nid)
-    return ready
-
-
-# ---------------------------------------------------------------------------
 # DAG normalization: contract same-ownership chains
 # ---------------------------------------------------------------------------
 #: GPU tiers, weakest to strongest. A merged node needs the strongest tier.
@@ -367,7 +321,7 @@ def _merged_node(by_id: dict[str, dict[str, Any]], members: list[str]) -> dict[s
             for source in sources
         ),
         "owns": [
-            f"dir:{directory}"
+            directory
             for directory in sorted({d for source in sources for d in node_owns(source)})
         ],
         "depends_on": list(
@@ -399,8 +353,7 @@ def merge_same_own_nodes(
     """Contract same-ownership nodes that share a dependency edge.
 
     Two nodes merge when a ``depends_on`` edge connects them, their owned
-    directories are equal, and neither sets ``no_merge``. ``phase`` is a
-    display label only and never gates a merge.
+    directories are equal, and neither sets ``no_merge``.
     The lowest topological index survives.  Returns the merged nodes and a map
     from every absorbed id to its survivor.  The result is idempotent.
     """
@@ -467,7 +420,6 @@ __all__ = [
     "parse_owns",
     "path_within_owns",
     "plan_dag_waves",
-    "readiness",
     "strongest_gpu_tier",
     "validate_dag",
 ]

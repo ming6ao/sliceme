@@ -129,9 +129,8 @@ class ServicePlanCase(unittest.TestCase):
         svc = self.plane()
         svc.store.create_campaign(
             key="feat--core",
-            target_branch="feat/core",
-            worktree_branch="feat/core",
-            base="main",
+            work_branch="feat/core",
+            base_branch="main",
             unit_name="campaign:feat--core",
             name="core",
         )

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import campaign, gitutil, integrate, sandbox
+from ..gitutil import workspace_lock
 from ..store import Store
 from ..util import (
     SlicemeError,
@@ -20,15 +21,29 @@ from ..util import (
     read_json,
     slugify,
     state_dir,
-    worktrees_dir,
     write_json,
 )
-from .support import (
-    _ensure_gitignore,
-    _unique_branch,
-    _unique_worktree,
-    campaign_lock,
-)
+
+
+def _ensure_gitignore(root: Path) -> None:
+    """Ignore ``.sliceme/`` via the repo-local exclude file.
+
+    Using ``.git/info/exclude`` (shared by all worktrees) keeps the main
+    worktree clean, unlike creating an untracked ``.gitignore``.
+    """
+    entry = ".sliceme/"
+    res = gitutil.git(root, "rev-parse", "--git-common-dir", check=False)
+    git_dir = Path(res.stdout.strip()) if res.ok else root / ".git"
+    if not git_dir.is_absolute():
+        git_dir = (root / git_dir).resolve()
+    exclude = git_dir / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    content = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if entry in {line.strip() for line in content.splitlines()}:
+        return
+    if content and not content.endswith("\n"):
+        content += "\n"
+    exclude.write_text(content + entry + "\n", encoding="utf-8")
 
 
 def _campaign_branch_of(design: str | None, feature_branch: str | None) -> str:
@@ -94,15 +109,11 @@ class BootstrapVerbs:
             raise SlicemeError("the campaign branch cannot be the default branch")
         # The campaign worktree accumulates on the campaign branch, so the
         # worktree branch and the pull request head are one branch.
-        worktree_branch = campaign_branch
+        work_branch = campaign_branch
         config = {
             "version": 1,
-            "target_branch": campaign_branch,
-            # Deprecated mirror kept for one release; read target_branch first.
-            "main_branch": campaign_branch,
-            "worktree_branch": worktree_branch,
-            "delivery_base": delivery_base,
-            "base": delivery_base,
+            "work_branch": work_branch,
+            "base_branch": delivery_base,
             "default_branch": default_branch,
             "checks": checks or [],
             "policy": {"require_verification": True, "allow_auto_approve": [], "remote": "origin"},
@@ -116,8 +127,7 @@ class BootstrapVerbs:
             cls._create_plane_campaign(
                 store,
                 branch=campaign_branch,
-                worktree_branch=worktree_branch,
-                delivery_base=delivery_base,
+                base_branch=delivery_base,
                 design=design,
             )
             store.conn.commit()
@@ -131,8 +141,7 @@ class BootstrapVerbs:
         store: Store,
         *,
         branch: str,
-        worktree_branch: str | None = None,
-        delivery_base: str,
+        base_branch: str,
         design: str | None,
     ) -> dict[str, Any]:
         """Create the campaign row for *branch* (idempotent on the branch)."""
@@ -151,17 +160,15 @@ class BootstrapVerbs:
             return existing
         key = branch_key(branch)
         by_key = store.get_campaign(key)
-        if by_key is not None and by_key["target_branch"] != branch:
+        if by_key is not None and by_key["work_branch"] != branch:
             raise SlicemeError(
                 f"branch key collision: '{branch}' and "
-                f"'{by_key['target_branch']}' share the key '{key}'"
+                f"'{by_key['work_branch']}' share the key '{key}'"
             )
         return store.create_campaign(
             key=key,
-            target_branch=branch,
-            worktree_branch=worktree_branch or branch,
-            delivery_base=delivery_base,
-            base=delivery_base,
+            work_branch=branch,
+            base_branch=base_branch,
             design=design,
             unit_name="campaign" if not store.list_campaigns() else f"campaign:{key}",
         )
@@ -184,27 +191,31 @@ class BootstrapVerbs:
         campaign_branch = _campaign_branch_of(design, feature_branch)
         cfg = read_json(config_path(root)) or {}
         default_branch = cfg.get("default_branch") or integrate.found_default_branch(root)
-        delivery_base = base or cfg.get("delivery_base") or default_branch
+        delivery_base = base or cfg.get("base_branch") or cfg.get("delivery_base") or default_branch
         if integrate.is_default_branch(
             root, campaign_branch, {"default_branch": default_branch}
         ):
             raise SlicemeError("the campaign branch cannot be the default branch")
-        worktree_branch = campaign_branch
-        cfg["target_branch"] = campaign_branch
-        cfg["main_branch"] = campaign_branch
-        cfg["worktree_branch"] = worktree_branch
-        cfg["delivery_base"] = delivery_base
-        cfg["base"] = delivery_base
+        cfg["work_branch"] = campaign_branch
+        cfg["base_branch"] = delivery_base
         cfg["default_branch"] = default_branch
+        for retired in (
+            "target_branch",
+            "main_branch",
+            "worktree_branch",
+            "delivery_base",
+            "base",
+            "feature_branch",
+        ):
+            cfg.pop(retired, None)
         write_json(config_path(root), cfg)
-        with campaign_lock(root):
+        with workspace_lock(root):
             store = Store(root)
             try:
                 cls._create_plane_campaign(
                     store,
                     branch=campaign_branch,
-                    worktree_branch=worktree_branch,
-                    delivery_base=delivery_base,
+                    base_branch=delivery_base,
                     design=design,
                 )
                 store.conn.commit()
@@ -216,24 +227,22 @@ class BootstrapVerbs:
         cls,
         path: str | os.PathLike[str] | None = None,
         *,
-        name: str | None = None,
         design: str | None = None,
         feature_branch: str | None = None,
         base: str | None = None,
-        kind: str = "worker",
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
-        no_unit: bool = False,
     ) -> dict[str, Any]:
-        """Bootstrap the plane and a unit for *path* (default cwd), idempotently.
+        """Bootstrap the plane and its campaign for *path* (default cwd),
+        idempotently.
 
         Safe to call on every session start:
 
         1. If no plane is found walking up from *path*, create it at the git root.
-        2. If *path* is not already inside a unit worktree, create one.
+        2. Register a campaign for the design or the feature branch.
 
-        Returns a summary including ``worktree`` so the caller can bind its
-        tools to the unit (the running process cwd is not changed).
+        Returns the campaign branch and the recorded worktree (``None`` until
+        ``open`` creates it).
         """
         start = Path(path or os.getcwd()).resolve()
 
@@ -272,113 +281,32 @@ class BootstrapVerbs:
         # the repo's .git/info/exclude was reset (e.g. re-cloned metadata).
         _ensure_gitignore(root)
 
-        if no_unit:
+        service = cls(root)
+        try:
+            rows = service.store.list_campaigns()
+            branch = (
+                _campaign_branch_of(design, feature_branch)
+                if (design or feature_branch)
+                else None
+            )
+            row = next(
+                (r for r in rows if branch and r["work_branch"] == branch),
+                None,
+            )
+            if row is None and len(rows) == 1:
+                row = rows[0]
             return {
                 "root": str(root),
                 "initialized": initialized,
-                "created": False,
-                "unit": None,
-                "branch": None,
-                "worktree": None,
+                "campaign": (row or {}).get("key"),
+                "work_branch": (row or {}).get("work_branch"),
+                # Retired mirror kept for one release.
+                "feature_branch": (row or {}).get("work_branch"),
+                "worktree": (row or {}).get("worktree"),
             }
-
-        service = cls(root)
-        try:
-            created = False
-            try:
-                unit = service.current_unit(start)
-            except SlicemeError:
-                existing = {u["name"] for u in service.store.list_units()}
-                base_name = name or slugify(start.name) or "session"
-                unit_name = base_name
-                counter = 2
-                while unit_name in existing:
-                    unit_name = f"{base_name}-{counter}"
-                    counter += 1
-                unit = service.create_workspace(unit_name, kind=kind, base=base)
-                created = True
         finally:
             service.close()
 
-        return {
-            "root": str(root),
-            "initialized": initialized,
-            "created": created,
-            "unit": unit["name"],
-            "branch": unit.get("branch"),
-            "worktree": unit.get("worktree"),
-        }
-
-    def create_workspace(
-        self,
-        name: str,
-        *,
-        kind: str = "worker",
-        base: str | None = None,
-    ) -> dict[str, Any]:
-        config = self.config
-        base_ref = base or config.get("base") or config.get("main_branch") or "main"
-        base_commit = gitutil.rev_parse(self.root, base_ref)
-
-        branch = _unique_branch(self.root, name)
-        worktree = _unique_worktree(worktrees_dir(self.root), name)
-        gitutil.add_worktree(self.root, worktree, branch=branch, base=base_commit)
-        try:
-            unit_id = self.store.create_unit(
-                name=name,
-                kind=kind,
-                worktree=str(worktree),
-                branch=branch,
-                base_commit=base_commit,
-            )
-        except Exception:
-            gitutil.cleanup_worktree(self.root, worktree)
-            raise
-        self.store.conn.commit()
-        return self.store.get_unit(unit_id)  # type: ignore[return-value]
-
-    def list_units(self) -> list[dict[str, Any]]:
-        return self.store.list_units()
-
-    def _scoped_units(self) -> list[dict[str, Any]]:
-        """Units that belong to the bound campaign (or every unit)."""
-        key = self.campaign_key()
-        if key is None:
-            return self.store.list_units()
-        return self.store.list_units(campaign=key)
-
     def unit_detail(self, unit_ref: str | int) -> dict[str, Any]:
-        unit = self.store.require_unit(unit_ref)
-        unit["candidates"] = [
-            c for c in self.store.list_candidates() if int(c["unit_id"]) == int(unit["id"])
-        ]
-        return self._project_unit(unit, self.config.get("main_branch"))
-
-    def current_unit(self, path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-        """Resolve the unit whose worktree contains *path* (default cwd).
-
-        Lets an agent launched inside its own worktree call the CLI without
-        passing ``--unit``. Falls back to matching the checked-out branch.
-        """
-        resolved = Path(path or os.getcwd()).resolve()
-        best: dict[str, Any] | None = None
-        best_len = -1
-        for unit in self.store.list_units():
-            try:
-                worktree = Path(unit["worktree"]).resolve()
-            except (OSError, TypeError):
-                continue
-            if worktree == resolved or worktree in resolved.parents:
-                if len(str(worktree)) > best_len:
-                    best, best_len = unit, len(str(worktree))
-        if best is not None:
-            return best
-        branch = gitutil.current_branch(resolved)
-        if branch:
-            for unit in self.store.list_units():
-                if unit["branch"] == branch:
-                    return unit
-        raise SlicemeError(
-            "current directory is not an Sliceme unit worktree; "
-            "run `sliceme workspace create` and cd into it, or pass --unit"
-        )
+        """The dashboard projection of one campaign, found by reference."""
+        return self._project_campaign(self.store.require_campaign(unit_ref))

@@ -31,8 +31,8 @@ class ApprovalCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
 
     nodes = [
-        {"id": "w1", "owns": ["dir:src/a"], "depends_on": [], "acceptance": ["true"]},
-        {"id": "w2", "owns": ["dir:src/b"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+        {"id": "w2", "owns": ["src/b"], "depends_on": [], "acceptance": ["true"]},
     ]
 
     def setUp(self):
@@ -94,17 +94,17 @@ class ApprovalGateTests(ApprovalCase):
         commits = [c["hash"] for c in self.svc.review_snapshot()["commits"]]
         self.assertGreaterEqual(len(commits), 2)
         # The decision is campaign-level: it does not bind to one commit.
-        decision = self.svc.review_decision(action="approve", actor="test")
+        decision = self.svc.record_approval(action="approve", actor="test")
         self.assertIsNone(decision["commit_hash"])
         self.assertTrue(self.svc.campaign_approved())
         self.assertEqual(self.svc.unapproved_commits(), [])
 
     def test_approve_admits_delivery_and_consumes_the_decision(self):
         self.record_wave0()
-        self.svc.review_decision(action="approve", actor="test")
+        self.svc.record_approval(action="approve", actor="test")
         delivered = self.svc.deliver()
-        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
-        self.assertIsNotNone(self.svc.campaign_decision()["consumed_at"])
+        self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
+        self.assertIsNotNone(self.svc.campaign_approval()["consumed_at"])
         self.assertFalse(self.svc.campaign_approved())
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.require_all_approved()
@@ -113,17 +113,17 @@ class ApprovalGateTests(ApprovalCase):
     def test_override_admits_delivery_and_needs_a_note(self):
         self.record_wave0()
         with self.assertRaises(SlicemeError):
-            self.svc.review_decision(action="override")
-        self.svc.review_decision(action="override", note="accepted risk")
+            self.svc.record_approval(action="override")
+        self.svc.record_approval(action="override", note="accepted risk")
         delivered = self.svc.deliver()
-        self.assertEqual([r["status"] for r in delivered["results"]], ["landed"])
+        self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
 
     def test_request_changes_needs_a_note_and_supersedes_an_approval(self):
         self.record_wave0()
-        self.svc.review_decision(action="approve", actor="test")
+        self.svc.record_approval(action="approve", actor="test")
         with self.assertRaises(SlicemeError):
-            self.svc.review_decision(action="request_changes")
-        self.svc.review_decision(action="request_changes", note="not yet")
+            self.svc.record_approval(action="request_changes")
+        self.svc.record_approval(action="request_changes", note="not yet")
         self.assertFalse(self.svc.campaign_approved())
         self.assertTrue(self.svc.unapproved_commits())
         with self.assertRaises(SlicemeError) as ctx:
@@ -133,17 +133,13 @@ class ApprovalGateTests(ApprovalCase):
     def test_surface_dispatch_records_one_decision(self):
         self.record_wave0()
         decision = surface.dispatch(
-            self.svc, "review", {"decision": "approve", "actor": "test"}
+            self.svc, "approve", {"actor": "test"}
         )
         self.assertEqual(decision["action"], "approve")
         self.assertIsNone(decision["commit_hash"])
 
 
 class CommentVerbsAreGoneTests(ApprovalCase):
-    def test_review_refuses_without_a_flag(self):
-        with self.assertRaises(SlicemeError):
-            surface.dispatch(self.svc, "review", {})
-
     def test_removed_comment_methods_are_absent(self):
         for name in (
             "review_comment",

@@ -24,7 +24,7 @@ from typing import Any
 from . import gitutil
 from .sandbox import Sandbox
 from .sandbox import require_sandbox as _require_sandbox
-from .store import CHECK_VERDICTS, Store
+from .store import VERDICT_STATUSES, Store
 from .util import SlicemeError
 from .verifier import (
     CheckSpec,
@@ -130,8 +130,8 @@ class CheckRunner:
             sandbox_digest=profile.digest(),
             checks_digest=CHECKS_VERSION,
         )
-        cached = self.store.find_check(
-            fingerprint.fingerprint, statuses=CHECK_VERDICTS
+        cached = self.store.find_verdict(
+            fingerprint.fingerprint, statuses=VERDICT_STATUSES
         )
         if cached is not None:
             return {**cached, "cached": True}
@@ -169,9 +169,9 @@ class CheckRunner:
             )
         except Exception as exc:  # noqa: BLE001 - surface any failure as a verdict
             row.update(status="error", error=str(exc))
-        check_id = self.store.create_check(**row)
+        check_id = self.store.create_verdict(**row)
         self.store.conn.commit()
-        return {**self.store.get_check(check_id), "cached": False}
+        return {**self.store.get_verdict(check_id), "cached": False}
 
 
 def _exit_code(results: list[Any]) -> int:

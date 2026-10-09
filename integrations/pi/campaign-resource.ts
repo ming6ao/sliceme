@@ -52,8 +52,8 @@ export function campaignCommands(engine: string[], campaign?: string): CampaignC
 	return {
 		status: engineCommand(engine, ["status"], campaign),
 		ready: engineCommand(engine, ["ready"], campaign),
-		record: engineCommand(engine, ["wave", "--record", "--current"], campaign),
-		check: engineCommand(engine, ["check", "--current"], campaign),
+		record: engineCommand(engine, ["record"], campaign),
+		check: engineCommand(engine, ["check"], campaign),
 	};
 }
 
