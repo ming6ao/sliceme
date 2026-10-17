@@ -189,6 +189,7 @@ class ReportTests(CampaignCase):
         status = self.svc.status()
         self.assertEqual(status["work_branch"], "feat/x")
         self.assertEqual(status["default_branch"], "main")
+        self.assertEqual(status["dag_path"], str(campaign.dag_path(self.root, "feat/x")))
         self.assertTrue(status["dag_phases"])
 
     def test_report_reads_the_campaign_state(self):
@@ -210,7 +211,7 @@ class DagPhaseStatusTests(CampaignCase):
         self.dag(
             [
                 {"id": "w1", "owns": ["a"], "depends_on": []},
-                {"id": "w2", "owns": ["a"], "depends_on": []},
+                {"id": "w2", "owns": ["a/b"], "depends_on": []},
                 {"id": "w3", "owns": ["c"], "depends_on": ["w1"]},
                 {"id": "w4", "owns": ["d"], "depends_on": []},
             ]

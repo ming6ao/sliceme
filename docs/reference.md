@@ -366,7 +366,7 @@ recorded in `dag.json`, so Sliceme rejects a post-plan manifest change.
 | `sliceme/pullrequest.py` | The `gh` forge client: find or create the delivery pull request |
 | `sliceme/campaign.py` | `dag.json` layout and readers; the deterministic report and evidence document |
 | `sliceme/review/` | Reduced review: `packet.py` (snapshot + commits + report + evidence), `diff.py` (diff parsing) |
-| `integrations/pi/` | the pi adapter: `common.ts` (invocation and paths), `coordinator.ts` (tool, agents, commands), `campaign-resource.ts` (the `sliceme.campaign` resource), `agents/{planner,worker}.md` |
+| `integrations/pi/` | the pi adapter: `common.ts` (invocation and paths), `coordinator.ts` (tool, agents, commands), `plan-resource.ts` (the `sliceme.plan` resource), `campaign-resource.ts` (the `sliceme.campaign` resource), `agents/{planner,worker}.md` |
 
 The engine is dependency-free Python 3.11+. `Service` is the only state owner;
 adapters only parse arguments and render results. `bin/sliceme` is a shim so the

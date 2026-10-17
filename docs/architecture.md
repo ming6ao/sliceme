@@ -25,8 +25,10 @@ campaign worktree. One synchronous check runner tests the recorded phase tree
 against a content fingerprint. Sliceme then opens one pull request from the
 work branch onto the default branch after the user confirms.
 
-A pi coordinator session owns the campaign loop. The trusted `sliceme.campaign`
-workflow resource runs the loop, and pi-subagents owns child execution. A
+A pi coordinator session owns the planning and campaign loops. The trusted
+`sliceme.plan` workflow resource runs the bounded planner re-pass loop. The
+trusted `sliceme.campaign` workflow resource runs the work loop, and pi-subagents
+owns child execution. A
 dependency-free Python engine owns state, isolation, and delivery. The DAG
 (`dag.json`) is the only authored schedule, and phases are a pure projection of
 it.
@@ -80,6 +82,7 @@ flowchart TB
     direction LR
     CO["Coordinator<br/>integrations/pi/coordinator.ts<br/>sliceme tool"]
     RS["Campaign resource<br/>integrations/pi/campaign-resource.ts<br/>sliceme.campaign"]
+    PR["Plan resource<br/>integrations/pi/plan-resource.ts<br/>sliceme.plan"]
     SA["Agents<br/>planner · worker<br/>integrations/pi/agents/*.md"]
   end
 
@@ -147,12 +150,13 @@ adapter owns state.
 | `sliceme/pullrequest.py` | The `gh` forge client. |
 | `sliceme/campaign.py` | `dag.json` layout and readers; the deterministic report and evidence document. |
 | `sliceme/review/` | The reduced review surface: `packet.py`, `diff.py`. |
-| `integrations/pi/*.ts` | pi adapter: the `sliceme` tool, the `sliceme.campaign` resource, and the invocation helpers. |
+| `integrations/pi/*.ts` | pi adapter: the `sliceme` tool, the `sliceme.plan` and `sliceme.campaign` resources, and the invocation helpers. |
 | `integrations/pi/agents/*.md` | Planner and worker prompts plus their `tools:` scoping. |
 
 ## 5. The action surface and the request path
 
-The engine owns the actions in `surface.ACTIONS`. The `sliceme.campaign`
+The engine owns the actions in `surface.ACTIONS`. The `sliceme.plan` resource
+runs the planner and validates the DAG. The `sliceme.campaign`
 workflow resource adds the loop; it does not add engine actions.
 
 ```mermaid

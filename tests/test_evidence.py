@@ -49,7 +49,7 @@ class EvidenceCase(unittest.TestCase):
                     {
                         "id": "w1",
                         "goal": "change a",
-                        "owns": ["src"],
+                        "dir": "src",
                         "depends_on": [],
                         "acceptance": ["true"],
                     }
@@ -97,7 +97,7 @@ class EvidenceTests(EvidenceCase):
         commit = evidence["commits"][0]
         self.assertEqual(commit["node"], "w1")
         self.assertEqual(commit["goal"], "change a")
-        self.assertEqual(commit["owns"], ["src"])
+        self.assertEqual(commit["dir"], "src")
         self.assertEqual(commit["check"]["status"], "passed")
         self.assertEqual(commit["check"]["commands"], ["true"])
         self.assertEqual(commit["check"]["fingerprint"], "fp-evidence")

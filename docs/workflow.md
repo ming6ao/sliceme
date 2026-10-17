@@ -6,9 +6,8 @@
 > to run one.
 >
 > **Status.** This document describes the directory-slice design: one node per
-> directory. The engine change is tracked in
-> [directory-slices-plan.md](./directory-slices-plan.md). The GPU field is
-> removed.
+> directory. The engine change is implemented, and the GPU field is removed. See
+> [directory-slices-plan.md](./directory-slices-plan.md).
 
 Sliceme delivers a design document as a set of parts on a **work branch**
 (`feat/<name>`). A top-level **coordinator** turns the design into a
@@ -88,8 +87,8 @@ COORDINATOR (this session)
 - Sliceme can reconstruct everything from `.sliceme/` plus git after a crash.
 
 The pi package ships one extension module. It registers the `sliceme` engine
-tool, the `sliceme.campaign` workflow resource, and the `sliceme-planner` and
-`sliceme-worker` agent definitions. The tool registers **inactive**; `/sliceme`
+tool, the `sliceme.plan` and `sliceme.campaign` workflow resources, and the
+`sliceme-planner` and `sliceme-worker` agent definitions. The tool registers **inactive**; `/sliceme`
 activates it for the session. There is no separate skill: the workflow lives
 here and in the prompt guidelines of the tool. The resource launches each
 `sliceme-worker` with its `tools:` allowlist, so a worker never gets the
@@ -117,18 +116,32 @@ review.
    `deliver` refuses a work branch that equals the default branch, with no
    override. The pull request base is the base branch (`main`).
 
-## Campaign loop (the coordinator)
+## Planning and campaign loops (the coordinator)
 
-Use the `sliceme` tool, then start the resource:
+Use the `sliceme` tool, then start the resources:
 
 ```text
-sliceme start DESIGN.md     derive the work branch; planner -> dag.json + phases
+sliceme start DESIGN.md     derive the work branch
+subagent(workflow: "sliceme.plan", cwd: <repo>, async: false, args: {design: "DESIGN.md"})
 sliceme plan --design DESIGN.md   the design's campaign split and the next entry
 sliceme open         fetch the base branch; create the worktree from origin/main
 subagent(workflow: "sliceme.campaign", cwd: <repo>, async: true)
 ```
 
-The resource runs the loop itself:
+The `sliceme.plan` resource runs the bounded planning loop itself:
+
+```text
+runs.run sliceme-planner    write dag.json (pass 1)
+ready                       validate the DAG and plan the phases
+...                         on a plan error, run the planner again with the
+                            error text, up to three passes, then "failed"
+```
+
+The planning loop stops after three passes. A plan error becomes the input to
+the next planner pass. The resource records no node, so a re-pass never rewrites
+a recorded node. On `failed` the coordinator stops and reports the last error.
+
+The `sliceme.campaign` resource runs the campaign loop itself:
 
 ```text
 ready                       the current phase's ready node ids, plus paused

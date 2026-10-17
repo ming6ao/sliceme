@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from .. import campaign, integrate
+from ..campaign import dag_path as _campaign_dag_path
 from ..ownership import (
     DEFAULT_PHASE_SIZE,
     merge_same_own_nodes,
@@ -237,6 +238,9 @@ class StatusVerbs:
         row = self.campaign
         if row is None:
             return {"campaign": None, "ready": [], "phase": None, "paused": False}
+        # Defensive merge first, so a shared directory becomes one node before
+        # the one-visit validation runs.
+        self.normalize_dag()
         branch = str(row["work_branch"])
         # A malformed DAG must stop the loop, not report an empty phase.  The
         # resource treats a failed verb as fatal, so the error reaches the user.
@@ -286,6 +290,7 @@ class StatusVerbs:
             "campaign": campaign.get("name") or campaign["key"],
             "campaign_key": key,
             "worktree_branch": self.config.get("work_branch"),
+            "dag_path": str(_campaign_dag_path(self.root, branch)) if branch else None,
             "default_branch": self.config.get("default_branch") or integrate.found_default_branch(self.root),
             "units": units,
             "records": records,
@@ -432,12 +437,17 @@ class StatusVerbs:
         """Contract same-ownership DAG chains before the phase projection.
 
         This runs before every projection, so a campaign never schedules an
-        un-normalized DAG.  A node with recorded progress stays separate.
+        un-normalized DAG.  A node with recorded progress gets ``no_merge``.
+        When that node shares its directory with another node, the merge is
+        impossible and the call raises ``revisited_directory``.
         """
         branch = self.config.get("work_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
         if not dag or not dag.get("nodes"):
-            return {"merged": {}}
+            empty: dict[str, Any] = {"merged": {}}
+            if branch:
+                empty["path"] = str(campaign.dag_path(self.root, branch))
+            return empty
 
         # Keep any node that already has progress out of the merge.
         nodes = [dict(node) for node in dag["nodes"]]
@@ -447,6 +457,18 @@ class StatusVerbs:
             for c in self.store.list_records(campaign=self.campaign_key())
             if c.get("node")
         }
+        # A re-pass must not rewrite a recorded node.  The engine rejects a plan
+        # that removed one, because its commit and its phase would be lost.
+        dag_ids = {str(node.get("id")) for node in nodes if node.get("id")}
+        missing = sorted(recorded - dag_ids)
+        if missing:
+            error = SlicemeError(
+                "revisited_directory: the plan removed recorded node(s) "
+                + ", ".join(missing)
+                + "; a re-pass must not rewrite a recorded node"
+            )
+            error.reason = "revisited_directory"
+            raise error
         for node in nodes:
             nid = str(node.get("id"))
             progressed = statuses.get(nid) not in (None, "pending")
@@ -475,7 +497,7 @@ class StatusVerbs:
         """Compute the scheduler's phase projection of the campaign DAG.
 
         The DAG is the only authored schedule; phases are derived here from
-        ``owns``/``depends_on`` and the campaign's ``concurrency`` cap.  A
+        ``dir``/``depends_on`` and the campaign's ``concurrency`` cap.  A
         malformed or cyclic DAG is reported rather than crashing ``status``.
         """
         if not branch:

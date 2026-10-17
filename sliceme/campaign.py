@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gitutil
+from .ownership import node_dir
 from .store import Store
 from .util import (
     SlicemeError,
@@ -335,7 +336,8 @@ def _commit_evidence(
                 "date": commit.get("date"),
                 "node": node_id,
                 "goal": (node or {}).get("goal"),
-                "owns": list((node or {}).get("owns") or []),
+                "dir": node_dir(node) if node else None,
+                "tasks": list((node or {}).get("tasks") or []),
                 "check": _check_evidence(store.latest_verdict_for_commit(hash_)),
                 "diffstat": changes["diffstat"],
                 "files": changes["files"],
@@ -471,10 +473,10 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
         lines.append("")
         lines.append(f"- Node: {commit.get('node') or '-'}")
         lines.append(f"- Goal: {commit.get('goal') or '-'}")
-        owns = commit.get("owns") or []
-        lines.append(
-            "- Owns: " + (", ".join(str(item) for item in owns) if owns else "-")
-        )
+        lines.append(f"- Directory: {commit.get('dir') or '-'}")
+        tasks = commit.get("tasks") or []
+        if tasks:
+            lines.append("- Tasks: " + "; ".join(str(task) for task in tasks))
         check = commit.get("check")
         if check:
             lines.append(f"- Check: {_check_evidence_line(check)}")

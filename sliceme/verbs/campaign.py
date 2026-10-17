@@ -13,8 +13,8 @@ from .. import campaign, gitutil, integrate, sandbox
 from ..gitutil import _changed_entries, _record_error
 from ..ownership import (
     DEFAULT_PHASE_SIZE,
-    node_owns,
-    owners_of,
+    deepest_owner_of,
+    node_dir,
     plan_dag_phases,
     validate_dag,
 )
@@ -37,14 +37,14 @@ def _describe_violation(
     status: str,
     path: str,
     old: str | None,
-    new_owners: list[str],
-    old_owners: list[str],
+    owner: str | None,
+    old_owner: str | None,
 ) -> str:
     if old:
-        return f"{status} {old} -> {path} spans nodes {old_owners}/{new_owners}"
-    if not new_owners:
-        return f"{status} {path} is outside every phase node"
-    return f"{status} {path} is claimed by {new_owners}"
+        return f"{status} {old} -> {path} spans nodes {old_owner} -> {owner}"
+    if owner is None:
+        return f"{status} {path} is outside every node"
+    return f"{status} {path} is owned by '{owner}'"
 
 
 class CampaignVerbs:
@@ -192,17 +192,20 @@ class CampaignVerbs:
     ) -> dict[str, Any]:
         """Record the current phase: conformance, then per-node commits.
 
-        Every changed path is attributed to exactly one same-phase node by its
-        owned directories; each such node gets one commit and a record on the
-        campaign branch.  A phase member that changed no file records an
-        explicit empty marker so the phase still completes.  The commit subject
-        falls back to the DAG node ``label``.  A path owned by no node
-        (``stray_path``) or by more than one (``ambiguous_path``) fails the
-        phase.  Every violation raises a :class:`SlicemeError` whose ``reason``
-        attribute is a machine-readable code (``stray_path``,
-        ``ambiguous_path``, ``cross_node_rename``, ``missing_description``);
-        callers switch on the code, never the text.
+        Every changed path is attributed to the deepest node directory that
+        contains it, across all nodes.  That owner must be a current-phase
+        member.  Each such node gets one commit and a record on the campaign
+        branch.  A phase member that changed no file records an explicit empty
+        marker so the phase still completes.  The commit subject falls back to
+        the DAG node ``label``.  A path owned by no node (``stray_path``) or by
+        a node outside the phase (``out_of_phase_path``) fails the phase.  Every
+        violation raises a :class:`SlicemeError` whose ``reason`` attribute is a
+        machine-readable code (``stray_path``, ``out_of_phase_path``,
+        ``cross_node_rename``, ``missing_description``); callers switch on the
+        code, never the text.
         """
+        # Contract a shared directory into one node before the projection.
+        self.normalize_dag()
         branch = self.config.get("work_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
         if not dag or not dag.get("nodes"):
@@ -220,10 +223,12 @@ class CampaignVerbs:
             )
         by_id = {str(node["id"]): node for node in dag["nodes"]}
         members = [by_id[node_id] for node_id in phase.members if node_id in by_id]
+        all_dirs = {str(node["id"]): node_dir(node) for node in dag["nodes"]}
         return self._record_phase_commits(
             unit,
             int(phase_index),
             members,
+            all_dirs=all_dirs,
             messages=messages,
             summary=summary,
         )
@@ -234,6 +239,7 @@ class CampaignVerbs:
         phase_index: int,
         members: list[dict[str, Any]],
         *,
+        all_dirs: dict[str, str | None],
         messages: dict[str, str] | None,
         summary: str | None,
     ) -> dict[str, Any]:
@@ -245,43 +251,42 @@ class CampaignVerbs:
         # phase's committed changes are not re-attributed to this phase.  The
         # campaign worktree accumulates commits across phases.
         entries = _changed_entries(worktree)
-        owners = {str(node["id"]): node_owns(node) for node in members}
-        assignment: dict[str, list[str]] = {node_id: [] for node_id in owners}
+        phase_ids = {str(node["id"]) for node in members}
+        assignment: dict[str, list[str]] = {node_id: [] for node_id in phase_ids}
         violations: list[tuple[str, str]] = []
         for status, path, old in entries:
-            new_owners = owners_of(path, owners)
-            old_owners = owners_of(old, owners) if old else []
-            if len(new_owners) == 0:
+            owner = deepest_owner_of(path, all_dirs)
+            old_owner = deepest_owner_of(old, all_dirs) if old else None
+            if owner is None:
                 violations.append(
-                    ("stray_path", _describe_violation(status, path, old, new_owners, old_owners))
+                    ("stray_path", _describe_violation(status, path, old, owner, old_owner))
                 )
                 continue
-            if len(new_owners) > 1:
+            if owner not in phase_ids:
                 violations.append(
                     (
-                        "ambiguous_path",
-                        _describe_violation(status, path, old, new_owners, old_owners),
+                        "out_of_phase_path",
+                        _describe_violation(status, path, old, owner, old_owner),
                     )
                 )
                 continue
-            node_id = new_owners[0]
-            if old and (len(old_owners) != 1 or old_owners[0] != node_id):
+            if old and old_owner != owner:
                 violations.append(
                     (
                         "cross_node_rename",
-                        _describe_violation(status, path, old, new_owners, old_owners),
+                        _describe_violation(status, path, old, owner, old_owner),
                     )
                 )
                 continue
-            assignment[node_id].append(path)
+            assignment[owner].append(path)
             if old:
-                assignment[node_id].append(old)
+                assignment[owner].append(old)
         if violations:
             reason, detail = violations[0]
             raise _record_error(
                 reason,
-                "phase conformance failed; every changed path must map to exactly one "
-                "phase node's owned directories: "
+                "phase conformance failed; every changed path must map to the "
+                "deepest owning node in this phase: "
                 + "; ".join(detail for _, detail in violations[:10]),
             )
         messages = messages or {}

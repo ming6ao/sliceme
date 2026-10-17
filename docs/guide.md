@@ -72,7 +72,7 @@ name the deepest directory that contains each path it will add, modify, or
 delete. A node is one directory slice.
 
 ```jsonc
-{ "id": "src/api", "dir": "src/api", "tasks": ["add the parser"], "depends_on": [] }
+{ "id": "api", "dir": "src/api", "tasks": ["add the parser"], "depends_on": [] }
 ```
 
 Normalization:
@@ -92,7 +92,9 @@ blank entry, fails loudly. A node that changes no file may omit `dir`.
 **One node, one directory, one visit.** The planner splits a multi-directory
 node into one node per directory. The planner also merges two nodes that share a
 directory into one node, so every directory has exactly one visit. The engine
-rejects a plan that breaks either rule. See
+rejects a node with two directories with `multi_directory_node`. The engine also
+merges two nodes that share one directory, because that merge is mechanical. It
+returns `revisited_directory` when the merge would make a cycle. See
 [directory-slices-plan.md](./directory-slices-plan.md).
 
 ### The conflict rule
@@ -159,7 +161,7 @@ agree on one branch.
   "design": "DESIGN.md",
   "concurrency": 4,
   "nodes": [
-    { "id": "backends/cpu", "label": "runtime-core",
+    { "id": "cpu", "label": "runtime-core",
       "goal": "Tensor and the CPU reference backend for all of kernels.h",
       "dir": "backends/cpu",
       "tasks": ["add the tensor type", "add the CPU kernels"],
@@ -171,7 +173,7 @@ agree on one branch.
 
 | Field | Meaning |
 |---|---|
-| `id` | Worker id; also the log suffix (`worker_<id>.log`). |
+| `id` | Worker id. It is a slug in `[A-Za-z0-9._-]{1,128}` and the log suffix (`worker_<id>.log`). It is never a path. |
 | `label` | Human label for the report and dashboard. |
 | `goal` | The prompt seed handed to the worker. |
 | `dir` | The one directory the node owns, at the deepest subdirectory that contains each path (`src/api`). Directory subtrees are the only conflict unit. |
@@ -210,7 +212,8 @@ USER
  ▼
 COORDINATOR  (top-level pi session — the session the user sees)
  │  tool: sliceme (engine verbs only)
- ├── PLANNER       (sliceme-planner, reads the design, writes dag.json)
+ ├── sliceme.plan workflow resource
+ │     └── PLANNER  (sliceme-planner, reads the design, writes dag.json)
  └── sliceme.campaign workflow resource
        ├── WORKER_*  (sliceme-worker, one per ready directory node, in the campaign worktree)
        │               edit the owned directory only -> stop  (never git)
@@ -224,12 +227,21 @@ checkout.
 
 ### The workflow resource
 
-The extension registers the trusted resource `sliceme.campaign` in
-`session_start` and disposes it in `session_shutdown`. The resource reads the
-plane from the workflow `cwd`, so the caller sets `cwd` to the repository root.
+The extension registers the trusted resources `sliceme.plan` and
+`sliceme.campaign` in `session_start` and disposes them in `session_shutdown`.
+Each resource reads the plane from the workflow `cwd`, so the caller sets `cwd`
+to the repository root.
 
-The `resolve` function accepts a small set of fields. It rejects every other
-field.
+The `sliceme.plan` resource runs the planner and the bounded re-pass loop. Its
+fields are:
+
+| Field | Type | Rule |
+|---|---|---|
+| `campaign` | string, optional | `[A-Za-z0-9._-]{1,128}` |
+| `design` | string, optional | a path without control characters; default `DESIGN.md` |
+
+The `sliceme.campaign` resource runs the campaign loop. The `resolve` function
+accepts a small set of fields. It rejects every other field.
 
 | Field | Type | Rule |
 |---|---|---|
@@ -318,8 +330,10 @@ evidence + report ──► user confirms ──► approve ──► deliver
     against the base branch (`main`). The work branch is never the default
     branch.
 
-The coordinator may invoke the planner again or edit `dag.json` after a
-failure. A coordinator-added `depends_on` edge or a corrected `dir` changes the
+The `sliceme.plan` resource runs the planner at most three times. A plan error
+becomes the input to the next pass. The resource records nothing, so a re-pass
+never rewrites a recorded node. When every pass fails, the coordinator stops and
+reports the last error. A corrected `dir` or a new `depends_on` edge changes the
 DAG projection, so the next `status` or `ready` reprojects the phases.
 
 ### Cleanup

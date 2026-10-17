@@ -41,7 +41,11 @@ function shellToken(token: string): string {
 }
 
 /** Build one fixed host command from the engine tokens, a verb, and the token. */
-function engineCommand(engine: string[], verb: readonly string[], campaign?: string): string {
+export function engineCommand(
+	engine: string[],
+	verb: readonly string[],
+	campaign?: string,
+): string {
 	const tokens = [...engine, "--json", ...verb];
 	if (campaign) tokens.push("--campaign", campaign);
 	return tokens.map(shellToken).join(" ");

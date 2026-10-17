@@ -24,6 +24,7 @@ AGENTS_DIR = PI_DIR / "agents"
 PI_COORDINATOR = PI_DIR / "coordinator.ts"
 PI_COMMON = PI_DIR / "common.ts"
 PI_RESOURCE = PI_DIR / "campaign-resource.ts"
+PI_PLAN_RESOURCE = PI_DIR / "plan-resource.ts"
 PI_UNIT = PI_DIR / "unit.ts"
 
 sys.path.insert(0, str(REPO_ROOT))
@@ -190,6 +191,22 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("path.resolve", coordinator)
         self.assertIn("resolveCampaignResource(args, engine)", coordinator)
 
+    def test_plan_resource_validates_bounded_fields(self):
+        # The plan resource owns the bounded planner re-pass loop. The real unit
+        # test is `tests/plan_resource_test.mjs`; these source checks keep the
+        # contract visible.
+        resource = PI_PLAN_RESOURCE.read_text(encoding="utf-8")
+        self.assertIn("PLAN_MAX_PASSES", resource)
+        self.assertIn("PLAN_RESOURCE_FIELDS", resource)
+        self.assertIn('new Set(["campaign", "design"])', resource)
+        self.assertIn("unsupported fields", resource)
+        self.assertIn('"sliceme-planner"', resource)
+        self.assertIn('state: "failed"', resource)
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn('"sliceme.plan"', coordinator)
+        self.assertIn("resolvePlanResource(args, engine)", coordinator)
+        self.assertIn("planResourceRegistration?.dispose()", coordinator)
+
     def test_sliceme_agents_are_registered(self):
         # The planner and worker register through the installed pi-subagents
         # owner; the verifier and addressing agents are gone.
@@ -354,6 +371,23 @@ class PiPackageTests(unittest.TestCase):
         # bounded-field rejection. Node 22.6+ strips the TypeScript types.
         node = shutil.which("node")
         harness = REPO_ROOT / "tests" / "campaign_resource_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_plan_resource_unit_test(self):
+        # The plan resolver is pure: the harness pins the re-pass bound, the
+        # grants, and the bounded-field rejection without a pi runtime.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "plan_resource_test.mjs"
         if node is None or not harness.is_file():
             self.skipTest("node is not installed")
         if not _node_strip_supported(node):

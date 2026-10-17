@@ -1,13 +1,13 @@
-"""DAG normalization: contract same-ownership chains (``sliceme/ownership.py``).
+"""DAG normalization: contract one directory into one node.
 
 These pin the merge contract:
-* two nodes that own the same directory and sit on one ``depends_on`` edge
-  become one node;
-* no edge or a different directory means no merge;
+* two nodes that share one directory become one node, with or without an edge;
+* the lowest topological index survives;
 * the survivor waits on the union of the external dependencies;
 * an absorbed id in another node's ``depends_on`` is rewritten;
 * the merge is deterministic and idempotent;
-* ``no_merge`` and recorded progress keep a node separate.
+* ``no_merge`` blocks the merge and raises ``revisited_directory``;
+* a merge that would make a cycle raises ``revisited_directory``.
 """
 
 import subprocess
@@ -18,18 +18,19 @@ from pathlib import Path
 from sliceme import campaign
 from sliceme.ownership import merge_same_own_nodes, plan_dag_phases, validate_dag
 from sliceme.service import Service
-from sliceme.util import write_json
+from sliceme.util import SlicemeError, write_json
 
 
-def node(nid, owns, depends_on=None, **extra):
+def node(nid, directory=None, depends_on=None, **extra):
     base = {
         "id": nid,
         "label": f"label {nid}",
         "goal": f"goal {nid}",
-        "owns": owns,
         "depends_on": depends_on or [],
         "acceptance": [f"cmd {nid}"],
     }
+    if directory is not None:
+        base["dir"] = directory
     base.update(extra)
     return base
 
@@ -39,24 +40,24 @@ def ids(nodes):
 
 
 class MergeTests(unittest.TestCase):
-    def test_equal_owns_on_one_edge_merges(self):
+    def test_equal_dir_on_one_edge_merges(self):
         merged, mapping = merge_same_own_nodes(
-            [node("a", ["src/x"]), node("b", ["src/x"], ["a"])]
+            [node("a", "src/x"), node("b", "src/x", ["a"])]
         )
         self.assertEqual(ids(merged), ["a"])
         self.assertEqual(mapping, {"b": "a"})
-        self.assertEqual(merged[0]["owns"], ["src/x"])
+        self.assertEqual(merged[0]["dir"], "src/x")
 
-    def test_equal_owns_without_an_edge_does_not_merge(self):
+    def test_equal_dir_without_an_edge_merges(self):
         merged, mapping = merge_same_own_nodes(
-            [node("a", ["src/x"]), node("b", ["src/x"])]
+            [node("a", "src/x"), node("b", "src/x")]
         )
-        self.assertEqual(ids(merged), ["a", "b"])
-        self.assertEqual(mapping, {})
+        self.assertEqual(ids(merged), ["a"])
+        self.assertEqual(mapping, {"b": "a"})
 
-    def test_different_owns_does_not_merge(self):
+    def test_different_dir_does_not_merge(self):
         merged, mapping = merge_same_own_nodes(
-            [node("a", ["src/x"]), node("b", ["src/y"], ["a"])]
+            [node("a", "src/x"), node("b", "src/y", ["a"])]
         )
         self.assertEqual(ids(merged), ["a", "b"])
         self.assertEqual(mapping, {})
@@ -65,8 +66,8 @@ class MergeTests(unittest.TestCase):
         # A non-owning display field never gates a merge.
         merged, mapping = merge_same_own_nodes(
             [
-                node("a", ["src/x"]),
-                node("b", ["src/x"], ["a"], label="another label"),
+                node("a", "src/x"),
+                node("b", "src/x", ["a"], label="another label"),
             ]
         )
         self.assertEqual(ids(merged), ["a"])
@@ -75,9 +76,9 @@ class MergeTests(unittest.TestCase):
     def test_three_node_chain_merges_into_one(self):
         merged, mapping = merge_same_own_nodes(
             [
-                node("a", ["src/x"]),
-                node("b", ["src/x"], ["a"]),
-                node("c", ["src/x"], ["b"]),
+                node("a", "src/x"),
+                node("b", "src/x", ["a"]),
+                node("c", "src/x", ["b"]),
             ]
         )
         self.assertEqual(ids(merged), ["a"])
@@ -86,9 +87,9 @@ class MergeTests(unittest.TestCase):
     def test_external_dependent_is_rewired_to_the_survivor(self):
         merged, _ = merge_same_own_nodes(
             [
-                node("a", ["src/x"]),
-                node("b", ["src/x"], ["a"]),
-                node("z", ["src/z"], ["b"]),
+                node("a", "src/x"),
+                node("b", "src/x", ["a"]),
+                node("z", "src/z", ["b"]),
             ]
         )
         by_id = {n["id"]: n for n in merged}
@@ -97,9 +98,9 @@ class MergeTests(unittest.TestCase):
 
     def test_merge_is_idempotent(self):
         nodes = [
-            node("a", ["src/x"]),
-            node("b", ["src/x"], ["a"]),
-            node("c", ["src/x"], ["b"]),
+            node("a", "src/x"),
+            node("b", "src/x", ["a"]),
+            node("c", "src/x", ["b"]),
         ]
         merged, mapping = merge_same_own_nodes(nodes)
         again, second = merge_same_own_nodes(merged)
@@ -108,33 +109,43 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(ids(again), ids(merged))
         self.assertEqual(again, merged)
 
-    def test_no_merge_keeps_a_node_separate(self):
-        merged, mapping = merge_same_own_nodes(
-            [
-                node("a", ["src/x"]),
-                node("b", ["src/x"], ["a"], no_merge=True),
-            ]
-        )
-        self.assertEqual(ids(merged), ["a", "b"])
-        self.assertEqual(mapping, {})
+    def test_no_merge_sharing_a_directory_is_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            merge_same_own_nodes(
+                [node("a", "src/x"), node("b", "src/x", ["a"], no_merge=True)]
+            )
+        self.assertEqual(ctx.exception.reason, "revisited_directory")
+
+    def test_a_revisit_that_would_make_a_cycle_is_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            merge_same_own_nodes(
+                [
+                    node("a", "src/x"),
+                    node("b", "src/y", ["a"]),
+                    node("c", "src/x", ["b"]),
+                ]
+            )
+        self.assertEqual(ctx.exception.reason, "revisited_directory")
 
     def test_fields_merge_in_dependency_order(self):
         merged, _ = merge_same_own_nodes(
             [
                 node(
                     "a",
-                    ["src/x"],
+                    "src/x",
                     label="build",
                     goal="add the target",
                     acceptance=["build", "shared"],
+                    tasks=["make the target"],
                 ),
                 node(
                     "b",
-                    ["src/x"],
+                    "src/x",
                     ["a"],
                     label="implement",
                     goal="write the source",
                     acceptance=["shared", "test"],
+                    tasks=["write the source"],
                 ),
             ]
         )
@@ -144,70 +155,34 @@ class MergeTests(unittest.TestCase):
         self.assertIn("[a] add the target", survivor["goal"])
         self.assertIn("[b] write the source", survivor["goal"])
         self.assertEqual(survivor["acceptance"], ["build", "shared", "test"])
-        self.assertEqual(survivor["owns"], ["src/x"])
+        self.assertEqual(survivor["tasks"], ["make the target", "write the source"])
+        self.assertEqual(survivor["dir"], "src/x")
+        self.assertNotIn("owns", survivor)
         self.assertEqual(survivor["depends_on"], [])
         self.assertEqual(survivor["merged_from"], ["b"])
 
     def test_merged_dag_keeps_validating_and_planning(self):
         nodes = [
-            node("a", ["src/x"]),
-            node("b", ["src/x"], ["a"]),
-            node("z", ["src/z"], ["b"]),
+            node("a", "src/x"),
+            node("b", "src/x", ["a"]),
+            node("z", "src/z", ["b"]),
         ]
         merged, _ = merge_same_own_nodes(nodes)
         validate_dag(merged)
         phases = plan_dag_phases(merged)
         self.assertEqual([w.members for w in phases], [["a"], ["z"]])
 
-    def test_ancestor_owns_does_not_merge(self):
+    def test_ancestor_dir_does_not_merge(self):
         merged, merge_map = merge_same_own_nodes(
-            [node("a", ["src"]), node("b", ["src/api"], ["a"])]
+            [node("a", "src"), node("b", "src/api", ["a"])]
         )
         self.assertEqual(ids(merged), ["a", "b"])
         self.assertEqual(merge_map, {})
 
-
-def cpu_backend_dag():
-    """The chain from the ``cpu-backend`` campaign (13 nodes)."""
-    return [
-        node("p0-bench-build", ["dev/kernels"]),
-        node("p0-bench-micro", ["dev/kernels"], ["p0-bench-build"]),
-        node("p0-baseline", ["docs"], ["p0-bench-micro"]),
-        node("p1-build-aggregate", ["backends/cpu"], ["p0-baseline"]),
-        node("p1-gemm-reorder", ["backends/cpu"], ["p1-build-aggregate"]),
-        node("p1-gate", ["dev/kernels", "docs"], ["p1-gemm-reorder"]),
-        node("p2-blocking", ["backends/cpu"], ["p1-gate"]),
-        node("p2-record", ["docs"], ["p2-blocking"]),
-        node("p3-muon", ["backends/cpu"], ["p2-record"]),
-        node("p3-classifier", ["backends/cpu"], ["p3-muon"]),
-        node("p3-attention", ["backends/cpu"], ["p3-classifier"]),
-        node("p3-e2e-gate", ["dev/kernels", "docs"], ["p3-attention"]),
-        node("p4-promote", ["docs"], ["p3-e2e-gate"]),
-    ]
-
-
-class CpuBackendCase(unittest.TestCase):
-    def test_campaign_chain_loses_four_nodes_and_four_phases(self):
-        original = cpu_backend_dag()
-        before = plan_dag_phases(original)
-        merged, mapping = merge_same_own_nodes(original)
-        after = plan_dag_phases(merged)
-        self.assertEqual(len(before), 13)
-        self.assertEqual(len(original), 13)
-        self.assertEqual(len(merged), 9)
-        self.assertEqual(len(after), 9)
-        self.assertEqual(
-            mapping,
-            {
-                "p0-bench-micro": "p0-bench-build",
-                "p1-gemm-reorder": "p1-build-aggregate",
-                "p3-classifier": "p3-muon",
-                "p3-attention": "p3-muon",
-            },
-        )
-        # The baseline now waits on the survivor of the Phase 0 merge.
-        by_id = {n["id"]: n for n in merged}
-        self.assertEqual(by_id["p0-baseline"]["depends_on"], ["p0-bench-build"])
+    def test_a_multi_directory_node_is_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            merge_same_own_nodes([{"id": "a", "owns": ["src/api", "docs"]}])
+        self.assertEqual(ctx.exception.reason, "multi_directory_node")
 
 
 class NormalizeDagTest(unittest.TestCase):
@@ -243,8 +218,15 @@ class NormalizeDagTest(unittest.TestCase):
             },
         )
 
+    def test_normalize_reports_the_dag_path_without_a_dag(self):
+        # The planning resource reads the path from `status` before any DAG
+        # exists, so normalization must always name it.
+        result = self.svc.normalize_dag()
+        self.assertEqual(result["merged"], {})
+        self.assertEqual(result["path"], str(campaign.dag_path(self.root, "feat/x")))
+
     def test_normalize_rewrites_the_file_and_reports_the_drop(self):
-        self.write_dag([node("a", ["src/x"]), node("b", ["src/x"], ["a"])])
+        self.write_dag([node("a", "src/x"), node("b", "src/x", ["a"])])
         result = self.svc.normalize_dag()
         self.assertEqual(result["merged"], {"b": "a"})
         self.assertEqual(result["before_nodes"], 2)
@@ -255,20 +237,41 @@ class NormalizeDagTest(unittest.TestCase):
         self.assertEqual(ids(on_disk["nodes"]), ["a"])
 
     def test_status_normalizes_automatically(self):
-        self.write_dag([node("a", ["src/x"]), node("b", ["src/x"], ["a"])])
+        self.write_dag([node("a", "src/x"), node("b", "src/x", ["a"])])
         status = self.svc.status()
         self.assertEqual(status["dag_merge"]["merged"], {"b": "a"})
         self.assertEqual([w["members"] for w in status["dag_phases"]], [["a"]])
         on_disk = campaign.load_dag(self.root, "feat/x")
         self.assertEqual(ids(on_disk["nodes"]), ["a"])
 
-    def test_normalize_protects_a_node_with_progress(self):
-        self.write_dag([node("a", ["src/x"]), node("b", ["src/x"], ["a"])])
-        campaign.write_session(
-            self.root, "feat/x", {"feature_branch": "feat/x", "nodes": {"b": {"status": "running"}}}
+    def test_normalize_rejects_removing_a_recorded_node(self):
+        # A re-pass must not rewrite a recorded node, even by dropping it.
+        self.write_dag([node("a", "src/x")])
+        self.svc.store.create_record(
+            head_commit="deadbeef",
+            summary=None,
+            node="b",
+            campaign=self.svc.campaign_key(),
         )
-        result = self.svc.normalize_dag()
-        self.assertEqual(result["merged"], {})
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.normalize_dag()
+        self.assertEqual(ctx.exception.reason, "revisited_directory")
+
+    def test_normalize_rejects_a_progressed_duplicate(self):
+        # A node with recorded progress cannot merge, so a shared directory is
+        # a plan error rather than a silent rewrite.
+        self.write_dag([node("a", "src/x"), node("b", "src/x", ["a"])])
+        campaign.write_session(
+            self.root,
+            "feat/x",
+            {"feature_branch": "feat/x", "nodes": {"b": {"status": "running"}}},
+        )
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.normalize_dag()
+        self.assertEqual(ctx.exception.reason, "revisited_directory")
+        status = self.svc.status()
+        self.assertIn("revisited_directory", status["dag_merge"]["error"])
+        self.assertIn("revisited_directory", status["dag_phases_error"])
         on_disk = campaign.load_dag(self.root, "feat/x")
         self.assertEqual(ids(on_disk["nodes"]), ["a", "b"])
 

@@ -32,6 +32,11 @@ import {
 	resolveCampaignResource,
 } from "./campaign-resource.ts";
 import {
+	PLAN_RESOURCE,
+	PLAN_RESOURCE_VERSION,
+	resolvePlanResource,
+} from "./plan-resource.ts";
+import {
 	applyEngineReply,
 	clearActiveCampaign,
 	controlPath,
@@ -330,6 +335,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	/** The absolute engine invocation, captured once per session. */
 	let engine: string[] = [];
 	let resourceRegistration: { dispose(): void } | undefined;
+	let planResourceRegistration: { dispose(): void } | undefined;
 	let agentRegistrations: { dispose(): void }[] = [];
 
 	const sliceme = (ctx: ExtensionContext, args: string[], signal?: AbortSignal) =>
@@ -373,17 +379,27 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	/** Register the trusted `sliceme.campaign` workflow resource. */
-	async function registerCampaignResource(ctx: ExtensionContext): Promise<void> {
+	/** Register the trusted campaign and planning workflow resources. */
+	async function registerWorkflowResources(ctx: ExtensionContext): Promise<void> {
 		const mod = await loadPiSubagents("workflow-resources");
 		if (!mod?.registerWorkflowResource) return;
+		const sessionId = ctx.sessionManager.getSessionId();
 		resourceRegistration?.dispose();
+		planResourceRegistration?.dispose();
 		resourceRegistration = mod.registerWorkflowResource({
-			sessionId: ctx.sessionManager.getSessionId(),
+			sessionId,
 			definition: {
 				name: CAMPAIGN_RESOURCE,
 				version: CAMPAIGN_RESOURCE_VERSION,
 				resolve: (args: Readonly<Record<string, unknown>>) => resolveCampaignResource(args, engine),
+			},
+		});
+		planResourceRegistration = mod.registerWorkflowResource({
+			sessionId,
+			definition: {
+				name: PLAN_RESOURCE,
+				version: PLAN_RESOURCE_VERSION,
+				resolve: (args: Readonly<Record<string, unknown>>) => resolvePlanResource(args, engine),
 			},
 		});
 	}
@@ -409,14 +425,18 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"(current-phase node ids and paused), open (create the campaign worktree), record " +
 			"(the current phase as per-node commits), check (combined-tree checks), approve (one " +
 			"campaign approval), report (the deterministic report), evidence (the deterministic " +
-			"evidence document), and deliver (push + pull request). The campaign loop runs in " +
-			"the sliceme.campaign workflow resource.",
+			"evidence document), and deliver (push + pull request). The planning loop runs in " +
+			"the sliceme.plan workflow resource, and the campaign loop runs in the " +
+			"sliceme.campaign workflow resource.",
 		promptSnippet: "Call the Sliceme engine (start → plan → resource loop → deliver)",
 		promptGuidelines: [
 			"Start a campaign with `start` and inspect the design split with `plan`. Then " +
-				"run `open` to create the campaign worktree from the base branch, and run " +
-				"the campaign loop through the `sliceme.campaign` workflow resource: call the " +
-				'subagent tool with workflow "sliceme.campaign" and async true.',
+				"run the planning loop through the `sliceme.plan` workflow resource: call the " +
+				'subagent tool with workflow "sliceme.plan", async false, and args {design}. ' +
+				"If it returns state `failed`, stop and report the error. Then run `open` to " +
+				"create the campaign worktree from the base branch, and run the campaign loop " +
+				"through the `sliceme.campaign` workflow resource: call the subagent tool with " +
+				'workflow "sliceme.campaign" and async true.',
 			"The resource reads the current phase from the engine. Do not pass node ids or phase " +
 				"indices to it; the engine reads its own state.",
 			"Workers are pure editors in the shared campaign worktree; they never run git and " +
@@ -490,7 +510,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			pi.sendUserMessage(
 				`Start a Sliceme campaign for the design document "${design}". ` +
 					`Use the sliceme tool with action "start", passing design "${design}", ` +
-					`and then "plan". Run "open" to create the campaign worktree ` +
+					`and then "plan". Run the planning loop through the sliceme.plan workflow ` +
+					`resource: call the subagent tool with workflow "sliceme.plan", async false, ` +
+					`and args {design: "${design}"}. If it returns state failed, stop and report ` +
+					`the error. Run "open" to create the campaign worktree ` +
 					`from the base branch. Run the campaign ` +
 					`loop through the sliceme.campaign workflow resource: call the subagent tool ` +
 					`with workflow "sliceme.campaign" and async true. When it completes, run ` +
@@ -585,11 +608,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		captureEngine();
 		try {
 			registerAgents();
-			await registerCampaignResource(ctx);
+			await registerWorkflowResources(ctx);
 		} catch (error) {
 			if (ctx.hasUI) {
 				ctx.ui.notify(
-					`sliceme: could not register the campaign resource: ${String((error as Error)?.message ?? error)}`,
+					`sliceme: could not register the workflow resources: ${String((error as Error)?.message ?? error)}`,
 					"warning",
 				);
 			}
@@ -640,6 +663,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		agentRegistrations = [];
 		resourceRegistration?.dispose();
 		resourceRegistration = undefined;
+		planResourceRegistration?.dispose();
+		planResourceRegistration = undefined;
 		try {
 			const branch = activeCampaign(ctx.cwd);
 			clearActiveCampaign(ctx.cwd);

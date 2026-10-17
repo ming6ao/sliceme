@@ -122,6 +122,38 @@ class RecordTests(PhaseScopeCase):
         # The unfiltered record carries a machine-readable reason code too.
         self.assertEqual(ctx.exception.reason, "stray_path")
 
+    def _nested_dag(self):
+        write_json(
+            campaign.dag_path(self.root, "feat/x"),
+            {
+                "campaign": "phases",
+                "feature_branch": "feat/x",
+                "base": "main",
+                "concurrency": 3,
+                "nodes": [
+                    {"id": "top", "dir": "src", "depends_on": [], "acceptance": ["true"]},
+                    {"id": "api", "dir": "src/a", "depends_on": ["top"], "acceptance": ["true"]},
+                ],
+            },
+        )
+
+    def test_a_cross_phase_change_is_rejected(self):
+        # Phase 0 holds only "top". A change under src/a belongs to "api",
+        # which sits in phase 1.
+        self._nested_dag()
+        unit = self.svc.create_phase_workspace(0)
+        self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.record_phase(0, messages={"top": "change"})
+        self.assertEqual(ctx.exception.reason, "out_of_phase_path")
+
+    def test_the_deepest_owner_records_a_path_outside_the_child_directory(self):
+        self._nested_dag()
+        unit = self.svc.create_phase_workspace(0)
+        (Path(unit["worktree"]) / "src" / "top.py").write_text("top = 1\n")
+        result = self.svc.record_phase(0, messages={"top": "add top"})
+        self.assertEqual([c["node"] for c in result["records"]], ["top"])
+
     def test_unfiltered_cross_node_rename_carries_the_reason_code(self):
         unit = self.svc.create_phase_workspace(0)
         run("git", "mv", "src/a/x.py", "src/b/x.py", cwd=unit["worktree"])

@@ -27,8 +27,9 @@ never author the same files.
 - **Deterministic evidence** — the engine writes the campaign commits, checks,
   diffs, and worker logs to one evidence document. The document is the pull
   request body. There is no narrative agent.
-- **One workflow resource** — the `sliceme.campaign` pi-subagents resource owns
-  the campaign loop. The extension registers the loop, the plan, and delivery.
+- **Two workflow resources** — the `sliceme.plan` resource owns the bounded
+  planner re-pass loop, and the `sliceme.campaign` resource owns the campaign
+  loop. The extension registers both, plus the plan and delivery steps.
 
 ## Install
 

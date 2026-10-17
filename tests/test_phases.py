@@ -188,6 +188,41 @@ class RemovedGpuFieldTests(unittest.TestCase):
             plan_dag_phases(dag)
 
 
+class OneDirectoryValidationTests(unittest.TestCase):
+    """The one-directory and one-visit rules (docs/directory-slices-plan.md)."""
+
+    def test_a_two_directory_node_is_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            validate_dag([{"id": "w1", "owns": ["src/api", "docs"]}])
+        self.assertEqual(ctx.exception.reason, "multi_directory_node")
+
+    def test_dir_and_a_matching_owns_shim_are_accepted(self):
+        validate_dag([{"id": "w1", "dir": "src/api", "owns": ["src/api/"]}])
+
+    def test_dir_and_a_conflicting_owns_are_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            validate_dag([{"id": "w1", "dir": "src/api", "owns": ["docs"]}])
+        self.assertEqual(ctx.exception.reason, "conflicting_directory")
+
+    def test_a_path_node_id_is_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            validate_dag([{"id": "src/api", "dir": "src/api"}])
+        self.assertEqual(ctx.exception.reason, "bad_node_id")
+
+    def test_a_revisited_directory_is_rejected(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            validate_dag(
+                [
+                    {"id": "a", "dir": "src/api"},
+                    {"id": "b", "dir": "src/api"},
+                ]
+            )
+        self.assertEqual(ctx.exception.reason, "revisited_directory")
+
+    def test_distinct_and_nested_directories_are_accepted(self):
+        validate_dag([{"id": "a", "dir": "src"}, {"id": "b", "dir": "src/api"}])
+
+
 class ReadinessTests(unittest.TestCase):
     """The readiness filter is retired; the phase is the one scheduling gate.
 

@@ -3,8 +3,11 @@
 import unittest
 
 from sliceme.ownership import (
+    deepest_owner_of,
+    node_dir,
     normalize_dir,
     owns_conflict,
+    parse_dir,
     parse_owns,
     path_within_owns,
 )
@@ -78,6 +81,65 @@ class PathWithinOwnsTests(unittest.TestCase):
     def test_root_owns_everything(self):
         self.assertTrue(path_within_owns("docs/api.md", ["."]))
         self.assertTrue(path_within_owns("a.txt", ["."]))
+
+
+class ParseDirTests(unittest.TestCase):
+    def test_normalizes_one_path(self):
+        self.assertEqual(parse_dir("src/api/"), "src/api")
+        self.assertEqual(parse_dir("src/api"), "src/api")
+        self.assertEqual(parse_dir("."), ".")
+
+    def test_rejects_empty_and_kind_prefix(self):
+        for spec in ("", "   ", "file:src/a.py", "dir:src/api"):
+            with self.assertRaises(SlicemeError):
+                parse_dir(spec)
+
+
+class NodeDirTests(unittest.TestCase):
+    def test_reads_dir(self):
+        self.assertEqual(node_dir({"id": "a", "dir": "src/api"}), "src/api")
+
+    def test_reads_the_one_entry_owns_shim(self):
+        self.assertEqual(node_dir({"id": "a", "owns": ["src/api/"]}), "src/api")
+
+    def test_dir_and_a_matching_shim_are_accepted(self):
+        self.assertEqual(
+            node_dir({"id": "a", "dir": "src/api", "owns": ["src/api"]}),
+            "src/api",
+        )
+
+    def test_rejects_two_owns_entries(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            node_dir({"id": "a", "owns": ["src/api", "docs"]})
+        self.assertEqual(ctx.exception.reason, "multi_directory_node")
+
+    def test_rejects_a_conflicting_shim(self):
+        with self.assertRaises(SlicemeError) as ctx:
+            node_dir({"id": "a", "dir": "src/api", "owns": ["docs"]})
+        self.assertEqual(ctx.exception.reason, "conflicting_directory")
+
+    def test_no_directory_returns_none(self):
+        self.assertIsNone(node_dir({"id": "a"}))
+        self.assertIsNone(node_dir({"id": "a", "owns": []}))
+
+
+class DeepestOwnerTests(unittest.TestCase):
+    def test_the_deepest_directory_wins(self):
+        dirs = {"top": "src", "api": "src/api", "docs": "docs"}
+        self.assertEqual(deepest_owner_of("src/api/x.py", dirs), "api")
+        self.assertEqual(deepest_owner_of("src/top.py", dirs), "top")
+        self.assertEqual(deepest_owner_of("docs/guide.md", dirs), "docs")
+
+    def test_the_root_is_the_shallowest_match(self):
+        dirs = {"root": ".", "api": "src/api"}
+        self.assertEqual(deepest_owner_of("src/api/x.py", dirs), "api")
+        self.assertEqual(deepest_owner_of("README.md", dirs), "root")
+
+    def test_an_unowned_path_has_no_owner(self):
+        self.assertIsNone(deepest_owner_of("other/x.py", {"a": "src/api"}))
+
+    def test_a_missing_directory_never_matches(self):
+        self.assertIsNone(deepest_owner_of("src/api/x.py", {"a": None}))
 
 
 if __name__ == "__main__":
