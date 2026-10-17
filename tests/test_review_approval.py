@@ -3,10 +3,8 @@
 The review surface records exactly one campaign-level approval.  Delivery
 proceeds only while the newest campaign decision is an unconsumed ``approve``
 (or an ``override`` with a note).  The browser client and the comment lifecycle
-are gone, so the gate no longer inspects comment state.
-
-Pins ``docs/simplification-plan.md`` (Migration stage 2, "Requirements
-relaxed"): "a human approves the campaign once before delivery".
+are gone, so the gate no longer inspects comment state.  One human approval of
+the whole campaign is enough before delivery.
 """
 
 import os
@@ -97,7 +95,6 @@ class ApprovalGateTests(ApprovalCase):
         decision = self.svc.record_approval(action="approve", actor="test")
         self.assertIsNone(decision["commit_hash"])
         self.assertTrue(self.svc.campaign_approved())
-        self.assertEqual(self.svc.unapproved_commits(), [])
 
     def test_approve_admits_delivery_and_consumes_the_decision(self):
         self.record_phase0()
@@ -125,7 +122,6 @@ class ApprovalGateTests(ApprovalCase):
             self.svc.record_approval(action="request_changes")
         self.svc.record_approval(action="request_changes", note="not yet")
         self.assertFalse(self.svc.campaign_approved())
-        self.assertTrue(self.svc.unapproved_commits())
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
         self.assertEqual(ctx.exception.reason, "not_approved")

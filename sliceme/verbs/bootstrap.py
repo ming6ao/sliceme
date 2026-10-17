@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .. import campaign, gitutil, integrate, sandbox
+from .. import campaign, gitutil, integrate
 from ..gitutil import workspace_lock
 from ..store import Store
 from ..util import (

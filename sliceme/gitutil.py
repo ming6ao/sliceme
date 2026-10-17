@@ -66,13 +66,6 @@ def toplevel(path: str | os.PathLike[str]) -> Path:
     return Path(res.stdout.strip()).resolve()
 
 
-def current_branch(path: str | os.PathLike[str]) -> str:
-    res = git(path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if res.ok:
-        return res.stdout.strip()
-    return ""
-
-
 def rev_parse(repo: str | os.PathLike[str], ref: str) -> str:
     res = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
     if not res.ok:
@@ -277,35 +270,6 @@ def merge_base(repo: str | os.PathLike[str], a: str, b: str) -> str:
     return res.stdout.strip()
 
 
-def merge_into(
-    worktree: str | os.PathLike[str],
-    branch: str,
-    *,
-    message: str,
-    no_ff: bool = True,
-    ff_only: bool = False,
-) -> GitResult:
-    args = ["merge", "--no-edit"]
-    if no_ff:
-        args.append("--no-ff")
-    if ff_only:
-        args.append("--ff-only")
-    args += ["-m", message, branch]
-    return git(worktree, *args, check=False)
-
-
-def merge_abort(worktree: str | os.PathLike[str]) -> None:
-    # A conflicted merge can leave ``merge --abort`` unable to proceed; fall
-    # back to a hard reset (the worktree was clean before the merge).
-    res = git(worktree, "merge", "--abort", check=False)
-    if not res.ok:
-        git(worktree, "reset", "--hard", check=False)
-
-
-def reset_hard(worktree: str | os.PathLike[str], commit: str = "HEAD") -> GitResult:
-    return git(worktree, "reset", "--hard", commit, check=False)
-
-
 def detect_toolchain_files(repo: str | os.PathLike[str], commit: str) -> dict[str, str]:
     """Hash lockfiles that pin the toolchain, so verification caches invalidate."""
     candidates = [
@@ -327,10 +291,6 @@ def detect_toolchain_files(repo: str | os.PathLike[str], commit: str) -> dict[st
 
             digests[name] = sha256_text(res.stdout)
     return digests
-
-
-def create_branch(repo: str | os.PathLike[str], branch: str, commit: str) -> None:
-    git(repo, "branch", "-f", branch, commit, check=True)
 
 
 @contextmanager

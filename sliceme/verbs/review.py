@@ -6,16 +6,9 @@ Internal module: :class:`sliceme.service.Service` composes this mixin and
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
-from .. import campaign, gitutil, integrate, sandbox
-from ..store import Store
-from ..util import (
-    SlicemeError,
-    branch_key,
-)
+from ..util import SlicemeError
 
 
 class ReviewVerbs:
@@ -86,18 +79,6 @@ class ReviewVerbs:
     def campaign_approved(self) -> bool:
         """Whether the newest campaign-level decision is an unconsumed approve."""
         return self._is_approved(self.campaign_approval())
-
-    def unapproved_commits(self) -> list[str]:
-        """Campaign commits that still need approval.
-
-        Approval is campaign-level, so either every commit is unapproved or
-        none is.
-        """
-        from ..review import packet
-
-        if self.campaign_approved():
-            return []
-        return packet.review_commits(self)
 
     @staticmethod
     def _is_approved(decision: dict[str, Any] | None) -> bool:

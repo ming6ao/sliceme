@@ -1,8 +1,7 @@
-"""The one phase cursor (S0/S1).
+"""The one phase cursor.
 
-These pin the unified cursor from ``docs/terminology-and-simplification-plan.md``
-(S0/S1): ``ready``, ``record``, and ``check`` all read one position; a phase
-advances when a member records zero changes (an explicit empty marker); and a
+The ``ready``, ``record``, and ``check`` verbs all read one position.  A phase
+advances when a member records zero changes (an explicit empty marker).  A
 recorded node satisfies a dependency without a ``state.json`` writer.
 """
 

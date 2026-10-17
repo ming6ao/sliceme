@@ -2,10 +2,8 @@
 
 ``report`` writes ``.sliceme/<branch-key>.report.md``, and the review
 packet includes that git-ignored file so a reviewer can read it.  The browser
-client is gone, so the report is the remaining review artifact.
-
-Pins ``docs/simplification-plan.md`` (Migration stage 2): "Keep ``review
---report``" and "keep ``campaign_branch_key`` and the report packet".
+client is gone, so the report is the remaining review artifact.  The report
+keeps ``review --report``, ``campaign_branch_key``, and the report packet.
 """
 
 import subprocess

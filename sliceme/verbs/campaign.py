@@ -6,7 +6,6 @@ Internal module: :class:`sliceme.service.Service` composes this mixin and
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,6 @@ from ..ownership import (
     plan_dag_phases,
     validate_dag,
 )
-from ..store import Store
 from ..util import (
     SlicemeError,
     worktrees_dir,

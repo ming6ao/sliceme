@@ -177,15 +177,6 @@ def resolve_action(name: str) -> Action:
     return action
 
 
-def all_params() -> tuple[Param, ...]:
-    """Union of parameters across actions, de-duplicated by name."""
-    seen: dict[str, Param] = {}
-    for action in ACTIONS:
-        for param in action.params:
-            seen.setdefault(param.name, param)
-    return tuple(seen.values())
-
-
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------

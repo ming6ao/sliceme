@@ -136,8 +136,8 @@ class PiPackageTests(unittest.TestCase):
 
     def test_the_single_gate_is_documented(self):
         # After the campaign resource completes, the coordinator writes the
-        # evidence and the report, then asks for the one confirmation before
-        # the approval and delivery (`docs/main-based-campaigns-plan.md` Phase 6).
+        # evidence and the report.  It then asks for the one confirmation
+        # before the approval and delivery.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('"evidence"', coordinator)
         self.assertIn("run `report`", coordinator)

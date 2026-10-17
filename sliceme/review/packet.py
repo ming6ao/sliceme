@@ -32,7 +32,6 @@ __all__ = [
     "commit_hashes",
     "diffstat",
     "report_info",
-    "review_commits",
 ]
 
 #: The largest check-output text that the Markdown evidence document keeps.
@@ -131,20 +130,6 @@ def campaign_commits(service: "Service") -> list[str]:
     if not source_tip or not target_tip:
         return []
     return commit_hashes(service, target_tip, source_tip)
-
-
-def review_commits(service: "Service") -> list[str]:
-    """Campaign commits plus any recorded node commits, oldest first."""
-    commits = campaign_commits(service)
-    seen = set(commits)
-    for record in service.store.list_records(
-        statuses=["recorded"], campaign=service.campaign_key()
-    ):
-        head = str(record.get("head_commit") or "")
-        if head and head not in seen:
-            seen.add(head)
-            commits.append(head)
-    return commits
 
 
 def report_info(service: "Service") -> dict[str, Any]:

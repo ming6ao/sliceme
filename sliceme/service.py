@@ -9,7 +9,6 @@ Every adapter (CLI, pi extension) calls these functions.  This mirrors the
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 

@@ -1,8 +1,7 @@
 """One workspace lock serializes campaign creation, record, and delivery.
 
-``docs/terminology-and-simplification-plan.md`` S6: the campaign-creation,
-phase-record, and delivery paths all take the single ``workspace.lock``; there is
-no separate delivery lock.
+The campaign-creation, phase-record, and delivery paths all take the single
+``workspace.lock``; there is no separate delivery lock.
 """
 
 import fcntl

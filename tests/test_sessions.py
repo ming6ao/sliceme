@@ -390,56 +390,9 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("status", columns)
             store.close()
 
-    def test_verdicts_wave_column_is_renamed_to_phase(self):
-        # A plane from before the wave rename keeps its rows and gains the new
-        # column name.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / ".sliceme").mkdir()
-            conn = sqlite3.connect(str(db_path(root)))
-            conn.execute(
-                "CREATE TABLE verdicts ("
-                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                " fingerprint TEXT NOT NULL,"
-                " wave INTEGER,"
-                " campaign TEXT,"
-                " source TEXT NOT NULL,"
-                " commit_ref TEXT NOT NULL,"
-                " tree TEXT,"
-                " commands TEXT NOT NULL,"
-                " checks TEXT,"
-                " sandbox TEXT,"
-                " sandbox_digest TEXT,"
-                " status TEXT NOT NULL,"
-                " duration REAL,"
-                " exit_code INTEGER,"
-                " output TEXT,"
-                " results TEXT,"
-                " error TEXT,"
-                " created_at REAL NOT NULL,"
-                " finished_at REAL)"
-            )
-            conn.execute(
-                "INSERT INTO verdicts(fingerprint, wave, source, commit_ref,"
-                " commands, status, created_at)"
-                " VALUES('f', 2, 'phase:2', 'c', '[]', 'passed', 0)"
-            )
-            conn.commit()
-            conn.close()
-
-            store = Store(root)
-            columns = {
-                row[1] for row in store.conn.execute("PRAGMA table_info(verdicts)")
-            }
-            self.assertIn("phase", columns)
-            self.assertNotIn("wave", columns)
-            row = store.conn.execute("SELECT phase FROM verdicts").fetchone()
-            self.assertEqual(row[0], 2)
-            store.close()
-
-    def test_a_legacy_checks_table_is_copied_with_the_phase_column(self):
-        # The old ``checks`` table names the column ``wave``; the copy must read
-        # that name and write the new ``phase`` column.
+    def test_a_legacy_checks_table_is_copied(self):
+        # An old ``checks`` table is renamed to ``verdicts`` and its rows are
+        # copied.  The retired phase number is not carried over.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / ".sliceme").mkdir()
@@ -448,7 +401,6 @@ class MigrationTests(unittest.TestCase):
                 "CREATE TABLE checks ("
                 " id INTEGER PRIMARY KEY AUTOINCREMENT,"
                 " fingerprint TEXT NOT NULL,"
-                " wave INTEGER,"
                 " campaign TEXT,"
                 " source TEXT NOT NULL,"
                 " commit_ref TEXT NOT NULL,"
@@ -467,9 +419,9 @@ class MigrationTests(unittest.TestCase):
                 " finished_at REAL)"
             )
             conn.execute(
-                "INSERT INTO checks(fingerprint, wave, source, commit_ref,"
+                "INSERT INTO checks(fingerprint, source, commit_ref,"
                 " commands, status, created_at)"
-                " VALUES('f', 3, 'phase:3', 'c', '[]', 'passed', 0)"
+                " VALUES('f', 'phase:3', 'c', '[]', 'passed', 0)"
             )
             conn.commit()
             conn.close()
@@ -482,9 +434,8 @@ class MigrationTests(unittest.TestCase):
                 )
             }
             self.assertNotIn("checks", tables)
-            row = store.conn.execute("SELECT phase, source FROM verdicts").fetchone()
-            self.assertEqual(row[0], 3)
-            self.assertEqual(row[1], "phase:3")
+            row = store.conn.execute("SELECT source FROM verdicts").fetchone()
+            self.assertEqual(row[0], "phase:3")
             store.close()
 
     def test_retired_tables_are_dropped_on_open(self):

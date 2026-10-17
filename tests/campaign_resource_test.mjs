@@ -55,8 +55,7 @@ assert.deepEqual(
 	expectedKeys,
 );
 
-// The resource cannot approve or deliver: the user permission is the only gate
-// (`docs/main-based-campaigns-plan.md` Phase 6).
+// The resource cannot approve or deliver: the user permission is the only gate.
 assert.ok(!resolved.hostCommands.some((grant) => grant.key === "approve"));
 assert.ok(!resolved.hostCommands.some((grant) => grant.key === "deliver"));
 

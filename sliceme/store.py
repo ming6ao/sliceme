@@ -158,28 +158,7 @@ class Store:
         self._rename_branch_columns()
         self._backfill_base_branch()
         self._drop_unit_schema()
-        self._rename_verdict_phase_column()
         self._rename_state_tables()
-
-    def _rename_verdict_phase_column(self) -> None:
-        """Rename the retired ``verdicts.wave`` column to ``phase``.
-
-        The wave term is retired, so a plane created before the rename keeps
-        its verdict rows and gains the new column name.
-        """
-        if "verdicts" not in {
-            row["name"]
-            for row in self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }:
-            return
-        existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(verdicts)").fetchall()
-        }
-        if "wave" in existing and "phase" not in existing:
-            self.conn.execute("ALTER TABLE verdicts RENAME COLUMN wave TO phase")
 
     def _rename_state_tables(self) -> None:
         """Rename the retired state tables and their statuses.
@@ -207,11 +186,11 @@ class Store:
             self.conn.execute("DROP TABLE candidates")
         if "checks" in tables:
             self.conn.execute(
-                "INSERT OR IGNORE INTO verdicts(id, fingerprint, phase, campaign,"
+                "INSERT OR IGNORE INTO verdicts(id, fingerprint, campaign,"
                 " source, commit_ref, tree, commands, checks, sandbox, sandbox_digest,"
                 " status, duration, exit_code, output, results, error,"
                 " created_at, finished_at)"
-                " SELECT id, fingerprint, wave, campaign, source, commit_ref, tree,"
+                " SELECT id, fingerprint, campaign, source, commit_ref, tree,"
                 " commands, checks, sandbox, sandbox_digest, status, duration,"
                 " exit_code, output, results, error, created_at, finished_at"
                 " FROM checks"
@@ -732,18 +711,6 @@ class Store:
             params.append(branch_key)
         sql += " ORDER BY id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
-
-    def latest_approvals_by_commit(self, branch_key: str) -> dict[str, dict[str, Any]]:
-        """The newest approval for each reviewed commit (ascending id: last wins)."""
-        rows = self.conn.execute(
-            "SELECT * FROM approvals WHERE branch_key=?"
-            " AND commit_hash IS NOT NULL ORDER BY id ASC",
-            (branch_key,),
-        ).fetchall()
-        found: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            found[str(row["commit_hash"])] = _dict(row)  # type: ignore[assignment]
-        return found
 
     def consume_approvals(self, approval_ids: Sequence[int]) -> None:
         ids = [int(item) for item in approval_ids]
