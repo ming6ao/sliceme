@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_records_campaign ON records(campaign);
 CREATE TABLE IF NOT EXISTS verdicts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   fingerprint TEXT NOT NULL,
-  wave INTEGER,
+  phase INTEGER,
   campaign TEXT,
   source TEXT NOT NULL,
   commit_ref TEXT NOT NULL,
@@ -64,7 +64,6 @@ CREATE TABLE IF NOT EXISTS verdicts (
   checks TEXT,
   sandbox TEXT,
   sandbox_digest TEXT,
-  gpu TEXT NOT NULL DEFAULT 'none',
   status TEXT NOT NULL,
   duration REAL,
   exit_code INTEGER,
@@ -159,7 +158,28 @@ class Store:
         self._rename_branch_columns()
         self._backfill_base_branch()
         self._drop_unit_schema()
+        self._rename_verdict_phase_column()
         self._rename_state_tables()
+
+    def _rename_verdict_phase_column(self) -> None:
+        """Rename the retired ``verdicts.wave`` column to ``phase``.
+
+        The wave term is retired, so a plane created before the rename keeps
+        its verdict rows and gains the new column name.
+        """
+        if "verdicts" not in {
+            row["name"]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }:
+            return
+        existing = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(verdicts)").fetchall()
+        }
+        if "wave" in existing and "phase" not in existing:
+            self.conn.execute("ALTER TABLE verdicts RENAME COLUMN wave TO phase")
 
     def _rename_state_tables(self) -> None:
         """Rename the retired state tables and their statuses.
@@ -187,12 +207,12 @@ class Store:
             self.conn.execute("DROP TABLE candidates")
         if "checks" in tables:
             self.conn.execute(
-                "INSERT OR IGNORE INTO verdicts(id, fingerprint, wave, campaign,"
+                "INSERT OR IGNORE INTO verdicts(id, fingerprint, phase, campaign,"
                 " source, commit_ref, tree, commands, checks, sandbox, sandbox_digest,"
-                " gpu, status, duration, exit_code, output, results, error,"
+                " status, duration, exit_code, output, results, error,"
                 " created_at, finished_at)"
                 " SELECT id, fingerprint, wave, campaign, source, commit_ref, tree,"
-                " commands, checks, sandbox, sandbox_digest, gpu, status, duration,"
+                " commands, checks, sandbox, sandbox_digest, status, duration,"
                 " exit_code, output, results, error, created_at, finished_at"
                 " FROM checks"
             )
@@ -563,12 +583,11 @@ class Store:
         status: str,
         commands: list[str] | None = None,
         checks: list[dict[str, Any]] | None = None,
-        wave: int | None = None,
+        phase: int | None = None,
         campaign: str | None = None,
         tree: str | None = None,
         sandbox: dict[str, Any] | None = None,
         sandbox_digest: str | None = None,
-        gpu: str = "none",
         duration: float | None = None,
         exit_code: int | None = None,
         output: str | None = None,
@@ -579,13 +598,13 @@ class Store:
         ts = now()
         with self.tx() as c:
             c.execute(
-                "INSERT INTO verdicts(fingerprint, wave, campaign, source, commit_ref,"
-                " tree, commands, checks, sandbox, sandbox_digest, gpu, status, duration,"
+                "INSERT INTO verdicts(fingerprint, phase, campaign, source, commit_ref,"
+                " tree, commands, checks, sandbox, sandbox_digest, status, duration,"
                 " exit_code, output, results, error, created_at, finished_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     fingerprint,
-                    wave,
+                    phase,
                     campaign,
                     source,
                     commit_ref,
@@ -594,7 +613,6 @@ class Store:
                     json.dumps(checks) if checks is not None else None,
                     json.dumps(sandbox) if sandbox is not None else None,
                     sandbox_digest,
-                    gpu,
                     status,
                     duration,
                     exit_code,

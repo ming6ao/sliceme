@@ -2,7 +2,7 @@
 
 Status: implemented, with two future-work items open. The engine `resume` and
 `sessions` actions, the adapter descriptor and pause flag, the
-`/suspend` and `/campaigns` commands, and wave-scoped continuation all work.
+`/suspend` and `/campaigns` commands, and phase-scoped continuation all work.
 Budget auto-suspend and a paused-worktree prune policy remain future work. The
 descriptor file is the only registry: there is no `campaign_sessions` table.
 
@@ -19,7 +19,7 @@ Pi saves every session as JSONL and reopens it with `pi --continue`,
   uncommitted campaign work.
 - A suspended session is discoverable, nameable, and resumable from the same
   checkout, from a second terminal, or after a process crash.
-- A long campaign resumes from the wave where it stopped. Sliceme never re-runs
+- A long campaign resumes from the phase where it stopped. Sliceme never re-runs
   a done node. Committed records re-verify from the check cache. A node whose
   worker stopped during the suspension continues from the preserved campaign
   worktree.
@@ -51,7 +51,7 @@ every campaign-scoped engine call passes `--campaign <branch>`.
 - **Campaign layer.** `dag.json`, `state.db`, and git already describe campaign
   progress; the resume descriptor carries the node statuses they cannot. The
   resume descriptor adds what they cannot:
-  which pi session to reopen, why the pause happened, and which wave to record
+  which pi session to reopen, why the pause happened, and which phase to record
   on resume.
 
 ## 3. Commands
@@ -60,7 +60,7 @@ every campaign-scoped engine call passes `--campaign <branch>`.
 |---|---|
 | `/sliceme [DESIGN.md]` | The start entry point. It activates the tool and starts a campaign. It refuses while the agent is busy (`ctx.isIdle()`). |
 | `/suspend [label]` | Parks the current session: writes the pause control flag, aborts the in-flight turn, waits for idle, and writes the resume descriptor. An interrupted node stays `running`, so resume continues its edits. |
-| `/campaigns` | An interactive list of registered campaigns: label, work branch, wave, done/total, last activity, status. Actions: resume, show, prune, delete. |
+| `/campaigns` | An interactive list of registered campaigns: label, work branch, phase, done/total, last activity, status. Actions: resume, show, prune, delete. |
 
 Pi owns `/resume`, so the adapter does not register it. The `session_start`
 hook with reason `"resume"` provides the campaign hook instead.
@@ -93,7 +93,7 @@ The adapter registers two hooks:
   It injects the resume prompt on `resume` and offers it on `startup`.
 - `session_shutdown` writes the descriptor synchronously and idempotently, with
   no subprocess. The descriptor status becomes `completed` after a delivery. It
-  becomes `ready` when every wave finished but delivery did not happen.
+  becomes `ready` when every phase finished but delivery did not happen.
   Otherwise it becomes `suspended`.
 
 `pi.appendEntry("sliceme.session", descriptor)` records a compact copy in the
@@ -106,7 +106,7 @@ guard before a switch) and `agent_settled` (a turn-boundary checkpoint).
 
 | Store | Path | Owner | Role |
 |---|---|---|---|
-| Resume descriptor | `.sliceme/<branch-key>.session.json` | pi adapter | pi session binding, pause reason, wave, resume plan. |
+| Resume descriptor | `.sliceme/<branch-key>.session.json` | pi adapter | pi session binding, pause reason, phase, resume plan. |
 | Pause flag | `.sliceme/<branch-key>.control.json` | pi adapter | Cooperative pause request. |
 | Active pointer | `.sliceme/active.<pid>.campaign` | pi adapter | The session's work branch. |
 | Transcript | pi session JSONL | pi | Conversation history. |
@@ -156,10 +156,10 @@ The adapter writes the descriptor. The engine reads it.
   "status": "suspended",           // active | suspended | ready | completed
   "reason": "user",                // user | crash | budget | error
   "suspended_at": 1733234400.0,
-  "current_wave": 1,
+  "current_phase": 1,
   "nodes": { "w1": "recorded", "w3": "running" },
   "resume_plan": {
-    "record_wave": 1,       // run record first
+    "record_phase": 1,       // run record first
     "resume": ["w3"],       // edits already in the campaign worktree
     "respawn": ["w4"],      // no attributable changes
     "verify": ["w3"],       // re-verify from cache after recording
@@ -172,12 +172,12 @@ The descriptor does not duplicate the engine's full per-node state. The
 `nodes` map records the status at suspend time, so resume can compare it with
 the plane. A node entry is a status string, or a small object with `status`,
 `attempt`, `record`, and `commit`. There is no per-node worktree or branch:
-every node in a wave shares the campaign worktree. Each campaign has its own
+every node in a phase shares the campaign worktree. Each campaign has its own
 descriptor file, keyed by the work branch.
 
 A successful `deliver` writes `completed` at once, so a crash after the pull
-request cannot leave a `suspended` descriptor. When every wave finished but
-delivery did not happen, `session_shutdown` writes `ready`, because no wave
+request cannot leave a `suspended` descriptor. When every phase finished but
+delivery did not happen, `session_shutdown` writes `ready`, because no phase
 remains to continue. As a backstop, `session_start` re-derives the plan from the
 engine before it offers or injects a resume. If the plane shows no remaining
 work, it rewrites the descriptor to `ready` and stays silent.
@@ -185,8 +185,8 @@ work, it rewrites the descriptor to `ready` and stays silent.
 ## 7. Node states and reconciliation
 
 The node states are `pending`, `running`, `recorded`, and `failed`. A recorded
-node satisfies a dependency; pass or fail lives in the wave verdict (the
-`verdicts` row with `source='wave:<n>'`), not on the node.
+node satisfies a dependency; pass or fail lives in the phase verdict (the
+`verdicts` row with `source='phase:<n>'`), not on the node.
 
 On resume, reconcile from plane evidence, which wins over the descriptor:
 
@@ -204,7 +204,7 @@ not land. That node is `recorded` in the descriptor, but its record is
 still `recorded`, because the check result lives in the `verdicts` table and never
 changes the record row. A status-only rule would wrongly re-run that node.
 
-## 8. Wave-scoped continuation
+## 8. Phase-scoped continuation
 
 The campaign worktree persists across a suspend. A `running` node is a node whose
 worker the suspension interrupted before `record`. On resume the coordinator:
@@ -215,8 +215,8 @@ worker the suspension interrupted before `record`. On resume the coordinator:
    (the runner returns `cached`, so no check re-runs);
 3. re-spawns a node that produced no attributable changes.
 
-`_record_wave_commits` diffs against `HEAD`, so a later record cannot
-re-attribute an earlier wave.
+`_record_phase_commits` diffs against `HEAD`, so a later record cannot
+re-attribute an earlier phase.
 
 A continuation worker starts in the same campaign worktree. Its prompt holds the
 node goal and acceptance, `git status --porcelain`, `git diff --stat`, and the

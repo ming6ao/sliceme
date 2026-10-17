@@ -18,7 +18,7 @@ import {
 const ENGINE = ["python3", "/opt/sliceme/bin/sliceme"];
 
 assert.equal(CAMPAIGN_RESOURCE, "sliceme.campaign");
-assert.deepEqual([...CAMPAIGN_RESOURCE_FIELDS].sort(), ["campaign", "nodeCap", "waveCap"]);
+assert.deepEqual([...CAMPAIGN_RESOURCE_FIELDS].sort(), ["campaign", "nodeCap", "phaseCap"]);
 assert.ok(CAMPAIGN_TOKEN.test("feat.x"));
 assert.ok(!CAMPAIGN_TOKEN.test("feat/x"));
 assert.ok(!CAMPAIGN_TOKEN.test(""));
@@ -44,7 +44,7 @@ assert.equal(
 
 // A full resolution exposes the four grants and a script that uses the state
 // commands.
-const resolved = resolveCampaignResource({ campaign: "feat.x", waveCap: 3, nodeCap: 9 }, ENGINE);
+const resolved = resolveCampaignResource({ campaign: "feat.x", phaseCap: 3, nodeCap: 9 }, ENGINE);
 assert.ok(!("error" in resolved), JSON.stringify(resolved));
 const expectedKeys = ["status"];
 for (let index = 0; index < 3; index++) {
@@ -73,17 +73,17 @@ for (const key of ["status", "ready-0", "record-0", "check-0"]) {
 	);
 }
 assert.ok(resolved.script.includes('"sliceme-worker"'));
-assert.ok(resolved.script.includes('"ready-" + waves'));
-assert.ok(resolved.script.includes('"record-" + waves'));
-assert.ok(resolved.script.includes('"check-" + waves'));
+assert.ok(resolved.script.includes('"ready-" + phases'));
+assert.ok(resolved.script.includes('"record-" + phases'));
+assert.ok(resolved.script.includes('"check-" + phases'));
 assert.ok(resolved.script.includes('"reviewer"'));
-assert.ok(resolved.script.includes("const WAVE_CAP = 3;"));
+assert.ok(resolved.script.includes("const PHASE_CAP = 3;"));
 assert.ok(resolved.script.includes("const NODE_CAP = 9;"));
 
-// An omitted bound falls back to the bounded default (64 waves / 256 nodes).
+// An omitted bound falls back to the bounded default (64 phases / 256 nodes).
 const defaulted = resolveCampaignResource({}, ENGINE);
 assert.ok(!("error" in defaulted));
-assert.ok(defaulted.script.includes("const WAVE_CAP = 64;"));
+assert.ok(defaulted.script.includes("const PHASE_CAP = 64;"));
 assert.ok(defaulted.script.includes("const NODE_CAP = 256;"));
 
 // Unknown fields are rejected.
@@ -97,8 +97,8 @@ for (const campaign of ["feat/x", "", "a b", "x".repeat(129)]) {
 }
 
 // The caps are bounded.
-for (const waveCap of [0, 65, 1.5, "3"]) {
-	assert.ok("error" in resolveCampaignResource({ waveCap }, ENGINE), String(waveCap));
+for (const phaseCap of [0, 65, 1.5, "3"]) {
+	assert.ok("error" in resolveCampaignResource({ phaseCap }, ENGINE), String(phaseCap));
 }
 for (const nodeCap of [0, 257, 1.5, "3"]) {
 	assert.ok("error" in resolveCampaignResource({ nodeCap }, ENGINE), String(nodeCap));

@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 from sliceme import campaign
-from sliceme.ownership import merge_same_own_nodes, plan_dag_waves, validate_dag
+from sliceme.ownership import merge_same_own_nodes, plan_dag_phases, validate_dag
 from sliceme.service import Service
 from sliceme.util import write_json
 
@@ -29,7 +29,6 @@ def node(nid, owns, depends_on=None, **extra):
         "owns": owns,
         "depends_on": depends_on or [],
         "acceptance": [f"cmd {nid}"],
-        "gpu": "none",
     }
     base.update(extra)
     return base
@@ -128,7 +127,6 @@ class MergeTests(unittest.TestCase):
                     label="build",
                     goal="add the target",
                     acceptance=["build", "shared"],
-                    gpu="none",
                 ),
                 node(
                     "b",
@@ -137,7 +135,6 @@ class MergeTests(unittest.TestCase):
                     label="implement",
                     goal="write the source",
                     acceptance=["shared", "test"],
-                    gpu="T2",
                 ),
             ]
         )
@@ -147,7 +144,6 @@ class MergeTests(unittest.TestCase):
         self.assertIn("[a] add the target", survivor["goal"])
         self.assertIn("[b] write the source", survivor["goal"])
         self.assertEqual(survivor["acceptance"], ["build", "shared", "test"])
-        self.assertEqual(survivor["gpu"], "T2")
         self.assertEqual(survivor["owns"], ["src/x"])
         self.assertEqual(survivor["depends_on"], [])
         self.assertEqual(survivor["merged_from"], ["b"])
@@ -160,8 +156,8 @@ class MergeTests(unittest.TestCase):
         ]
         merged, _ = merge_same_own_nodes(nodes)
         validate_dag(merged)
-        waves = plan_dag_waves(merged)
-        self.assertEqual([w.members for w in waves], [["a"], ["z"]])
+        phases = plan_dag_phases(merged)
+        self.assertEqual([w.members for w in phases], [["a"], ["z"]])
 
     def test_ancestor_owns_does_not_merge(self):
         merged, merge_map = merge_same_own_nodes(
@@ -191,11 +187,11 @@ def cpu_backend_dag():
 
 
 class CpuBackendCase(unittest.TestCase):
-    def test_campaign_chain_loses_four_nodes_and_four_waves(self):
+    def test_campaign_chain_loses_four_nodes_and_four_phases(self):
         original = cpu_backend_dag()
-        before = plan_dag_waves(original)
+        before = plan_dag_phases(original)
         merged, mapping = merge_same_own_nodes(original)
-        after = plan_dag_waves(merged)
+        after = plan_dag_phases(merged)
         self.assertEqual(len(before), 13)
         self.assertEqual(len(original), 13)
         self.assertEqual(len(merged), 9)
@@ -253,8 +249,8 @@ class NormalizeDagTest(unittest.TestCase):
         self.assertEqual(result["merged"], {"b": "a"})
         self.assertEqual(result["before_nodes"], 2)
         self.assertEqual(result["after_nodes"], 1)
-        self.assertEqual(result["before_waves"], 2)
-        self.assertEqual(result["after_waves"], 1)
+        self.assertEqual(result["before_phases"], 2)
+        self.assertEqual(result["after_phases"], 1)
         on_disk = campaign.load_dag(self.root, "feat/x")
         self.assertEqual(ids(on_disk["nodes"]), ["a"])
 
@@ -262,7 +258,7 @@ class NormalizeDagTest(unittest.TestCase):
         self.write_dag([node("a", ["src/x"]), node("b", ["src/x"], ["a"])])
         status = self.svc.status()
         self.assertEqual(status["dag_merge"]["merged"], {"b": "a"})
-        self.assertEqual([w["members"] for w in status["dag_waves"]], [["a"]])
+        self.assertEqual([w["members"] for w in status["dag_phases"]], [["a"]])
         on_disk = campaign.load_dag(self.root, "feat/x")
         self.assertEqual(ids(on_disk["nodes"]), ["a"])
 

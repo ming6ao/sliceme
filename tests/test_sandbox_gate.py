@@ -1,8 +1,8 @@
 """Project sandbox manifests and the coordinator's sandbox gate.
 
 Phase 2 pins: manifest discovery/validation, fail-closed gating when a campaign
-requires a sandbox, GPU runner requirements, digest pinning (a manifest change
-invalidates cached verdicts), setup-before-acceptance, and command wrapping.
+requires a sandbox, digest pinning (a manifest change invalidates cached
+verdicts), setup-before-acceptance, and command wrapping.
 """
 
 import json
@@ -12,9 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from sliceme import sandbox as sandbox_mod
 from sliceme.sandbox import (
     Sandbox,
     discover_sandbox,
@@ -171,20 +169,14 @@ class GateTests(SandboxGateCase):
         self.assertFalse(info["ok"])
         self.assertIn("not found", info["error"])
 
-    def test_gpu_job_requires_a_runner(self):
-        self.write_manifest(self.manifest())
-        with mock.patch.object(sandbox_mod, "default_gpu_runner", return_value=None):
-            with self.assertRaises(SlicemeError) as ctx:
-                self.runner.require_sandbox(gpu_required=True)
-        self.assertIn("GPU", str(ctx.exception))
-
-    def test_gpu_command_in_manifest_satisfies_the_gate(self):
+    def test_a_removed_gpu_key_is_rejected(self):
         self.write_manifest(
-            self.manifest(gpu={"command": ["sh", "tools/sandbox.sh", "--tier", "{tier}"]})
+            self.manifest(gpu={"command": ["sh", "tools/sandbox.sh"]})
         )
-        with mock.patch.object(sandbox_mod, "default_gpu_runner", return_value=None):
-            profile = self.runner.require_sandbox(gpu_required=True)
-        self.assertEqual(profile.gpu_command[0], "sh")
+        self.set_policy(require_sandbox=True)
+        info = self.svc.sandbox_info()
+        self.assertFalse(info["ok"])
+        self.assertIn("GPU", info["error"])
 
 
 class ExecutionTests(SandboxGateCase):
@@ -220,16 +212,6 @@ class WrappingTests(unittest.TestCase):
             wrap_command("pytest -q", sandbox),
             "sh tools/run.sh /bin/sh -lc 'pytest -q'",
         )
-
-    def test_gpu_runner_wraps_outside_the_sandbox(self):
-        sandbox = Sandbox(
-            command=("sh", "s.sh"),
-            gpu_command=("mygpu", "--tier", "{tier}", "--"),
-        )
-        wrapped = wrap_command("python t.py", sandbox, tier="T1")
-        self.assertTrue(wrapped.startswith("mygpu --tier T1 -- "))
-        self.assertIn("sh s.sh /bin/sh -lc", wrapped)
-        self.assertIn("python t.py", wrapped)
 
     def test_none_is_unchanged(self):
         self.assertEqual(wrap_command("echo hi", Sandbox()), "echo hi")

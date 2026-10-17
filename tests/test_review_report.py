@@ -57,16 +57,16 @@ class ReportCase(unittest.TestCase):
         self.svc.close()
         self.tmp.cleanup()
 
-    def record_wave0(self):
+    def record_phase0(self):
         unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
         (Path(unit["worktree"]) / "src" / "b" / "y.py").write_text("b = 2\n")
-        return self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        return self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
 
 
 class ReportTests(ReportCase):
     def test_report_is_written_and_included_in_the_packet(self):
-        self.record_wave0()
+        self.record_phase0()
         result = self.svc.report(narrative="the human story")
         self.assertTrue(Path(result["path"]).is_file())
 
@@ -76,12 +76,12 @@ class ReportTests(ReportCase):
         self.assertEqual(snapshot["branch_key"], campaign.branch_key("feat/x"))
 
     def test_packet_drops_the_comment_lifecycle(self):
-        self.record_wave0()
+        self.record_phase0()
         snapshot = self.svc.review_snapshot()
         self.assertNotIn("comments", snapshot)
 
     def test_surface_dispatch_writes_the_report(self):
-        self.record_wave0()
+        self.record_phase0()
         result = surface.dispatch(
             self.svc,
             "report",
@@ -96,8 +96,8 @@ class ReportTests(ReportCase):
         # commit to w1, never to the empty marker.
         unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
-        self.svc.check_wave()
+        self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
+        self.svc.check_phase()
         committed = {
             str(r["node"]): r["head_commit"]
             for r in self.svc.store.list_records(campaign=self.svc.campaign_key())

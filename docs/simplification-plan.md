@@ -1,5 +1,9 @@
 # Sliceme simplification plan
 
+> **Superseded.** This is a historical plan. The current target design is
+> [directory-slices-plan.md](./directory-slices-plan.md). The GPU field is
+> removed.
+
 ## Purpose
 
 Sliceme gets smaller. This plan keeps two building blocks and one pi-subagents
@@ -55,7 +59,7 @@ sliceme-pi extension (TypeScript)
         |  runs.run   ->  pi-subagents children
         v
 sliceme-engine (Python)
-  - scheduler: owns algebra, waves, readiness, GPU isolation
+  - scheduler: owns algebra, phases, readiness, GPU isolation
   - workspace: git worktree, plane files, per-node commits
   - checks: one synchronous combined-tree runner plus a check cache
   - delivery: approval gate, push, pull request
@@ -71,7 +75,7 @@ The package keeps these internal modules.
 
 | Module group | Files | Responsibility |
 |---|---|---|
-| scheduler | `sliceme/ownership.py`, `sliceme/plan.py` | owns algebra, wave packing, GPU isolation, readiness, design parse |
+| scheduler | `sliceme/ownership.py`, `sliceme/plan.py` | owns algebra, phase packing, GPU isolation, readiness, design parse |
 | workspace | `sliceme/gitutil.py`, `sliceme/campaign.py` | git worktrees, plane files, per-node commits |
 | forge | `sliceme/pullrequest.py` | the `gh` client |
 | checks | `sliceme/verifier.py`, `sliceme/sandbox.py`, `sliceme/checks.py` | one synchronous combined-tree check runner plus a check cache |
@@ -81,7 +85,7 @@ The package keeps these internal modules.
 | sessions | `sliceme/campaign.py`, `sliceme/service.py` | suspend and resume |
 
 `checks.py` is a new small module. It replaces the executor queue. It runs one
-check set on a wave tree and returns the result. It does not hold a lease and it
+check set on a phase tree and returns the result. It does not hold a lease and it
 does not queue work.
 
 ### Engine verbs after the change
@@ -89,16 +93,16 @@ does not queue work.
 Keep these verbs.
 
 - `start`: create the plane and the campaign.
-- `status`: return campaign state, node state, `ready`, `dag_waves`, and
+- `status`: return campaign state, node state, `ready`, `dag_phases`, and
   `paused`. Keep the `--sessions` and `--resume` flags.
-- `ready`: return the ready node ids for the current wave, the current wave
+- `ready`: return the ready node ids for the current phase, the current phase
   index, and `paused`.
 - `plan`: parse the design and join the registry.
-- `wave --record --current`: commit the finished nodes of the current wave. The
-  `--current` flag is new. The engine reads the current wave index from its own
+- `phase --record --current`: commit the finished nodes of the current phase. The
+  `--current` flag is new. The engine reads the current phase index from its own
   state.
 - `check --current`: run the synchronous combined-tree checks for the current
-  wave. The `--current` flag is new.
+  phase. The `--current` flag is new.
 - `review --decision`: record one campaign approval.
 - `review --report`: render the deterministic report.
 - `deliver`: push the campaign branch and open the pull request.
@@ -113,12 +117,12 @@ Delete these verbs.
 
 ### Scheduler change for GPU serialization
 
-The current scheduler packs waves by dependency, wave size, and directory
+The current scheduler packs phases by dependency, phase size, and directory
 overlap. It ignores the `gpu` field. The loop would then start GPU nodes at the
 same time.
 
 The scheduler must treat a GPU node as a conflict with every other node. Then a
-GPU node lands in its own wave. One GPU node runs at a time. This gives the one
+GPU node lands in its own phase. One GPU node runs at a time. This gives the one
 bounded lane of owner decision 1 without a serialized broker.
 
 ### Persistent check cache
@@ -126,7 +130,7 @@ bounded lane of owner decision 1 without a serialized broker.
 Owner decision 4 needs the cache. Resume re-verifies a node from the cache
 instead of a full check. Delivery reads the check results as evidence.
 
-Keep a `checks` table in `store.py`. One row holds the fingerprint, the wave,
+Keep a `checks` table in `store.py`. One row holds the fingerprint, the phase,
 the commit, the status, and the results. The synchronous runner reads a row by
 fingerprint and writes a row after a check. The table replaces the old `jobs`
 table. The table holds a cache, not a queue.
@@ -139,7 +143,7 @@ The extension stays thin. It registers three things.
    Workers use it read-only. The coordinator uses it for interactive verbs.
 2. Agent definitions through `pi-subagents/agents`. Keep `sliceme-planner` and
    `sliceme-worker`. Delete `sliceme-addressing`. Delete `sliceme-verifier`.
-   The loop uses the builtin `reviewer` for wave review.
+   The loop uses the builtin `reviewer` for phase review.
 3. The trusted workflow resource `sliceme.campaign`.
 
 The extension resolves the absolute engine path once in `session_start`. It
@@ -149,7 +153,7 @@ closure.
 
 Delete the TypeScript orchestration code: `runSubagent`, `runTracked`,
 `spawnNodes`, `runWorker`, `verifyNodes`, `readyNodes`, `normalizeDir`,
-`ownsOverlap`, `ensureWaves`, `refreshWaves`, and `reconcileWaves`. Delete
+`ownsOverlap`, `ensurePhases`, `refreshPhases`, and `reconcilePhases`. Delete
 `unit.ts` and its action mirror with the lockstep test.
 
 Keep the session descriptor writer and the pause flag. The next section says
@@ -171,7 +175,7 @@ token or a boolean. The function rejects every other field.
 | Field | Type | Rule |
 |---|---|---|
 | `campaign` | string, optional | `[A-Za-z0-9._-]{1,128}` |
-| `waveCap` | integer, optional | 1 to 64 |
+| `phaseCap` | integer, optional | 1 to 64 |
 | `nodeCap` | integer, optional | 1 to 256 |
 
 The `campaign` field is the only variable text in a command. The function
@@ -180,8 +184,8 @@ validates it against the strict pattern before it builds a command.
 ### Host authority constraint
 
 A host grant binds an exact key and command pair. The `resolve` call cannot know
-a node id or a wave index before the campaign runs. Therefore no granted command
-carries a node id or a wave index. The engine reads the current wave and the
+a node id or a phase index before the campaign runs. Therefore no granted command
+carries a node id or a phase index. The engine reads the current phase and the
 finished nodes from its own state.
 
 The `resolve` function uses the absolute engine path. It never uses a relative
@@ -195,9 +199,9 @@ Let `<engine>` be the absolute engine path captured in `session_start`. Let
 
 | Key | Command | Use |
 |---|---|---|
-| `status` | `<python> <engine> --json status --campaign <campaign>` | read campaign state, waves, and `paused` |
-| `ready` | `<python> <engine> --json ready --campaign <campaign>` | get the ready node ids and the current wave |
-| `record` | `<python> <engine> --json wave --record --current --campaign <campaign>` | commit the finished nodes |
+| `status` | `<python> <engine> --json status --campaign <campaign>` | read campaign state, phases, and `paused` |
+| `ready` | `<python> <engine> --json ready --campaign <campaign>` | get the ready node ids and the current phase |
+| `record` | `<python> <engine> --json phase --record --current --campaign <campaign>` | commit the finished nodes |
 | `check` | `<python> <engine> --json check --current --campaign <campaign>` | run the combined-tree checks |
 | `approve` | `<python> <engine> --json review --decision approve --campaign <campaign>` | record the campaign approval |
 | `deliver` | `<python> <engine> --json deliver --campaign <campaign>` | push and open the pull request |
@@ -209,16 +213,16 @@ campaign token. It does not concatenate task text or free-form flags.
 
 The resource script runs this loop.
 
-1. Call `ready`. Read the ready node ids, the current wave, and `paused`.
+1. Call `ready`. Read the ready node ids, the current phase, and `paused`.
 2. If `paused` is true, stop the loop and return the paused state.
 3. If no node is ready, stop the loop.
 4. Call `runs.run` for each ready node with a stable key and the worker agent.
-5. Wait for the wave children with `runs.all`.
+5. Wait for the phase children with `runs.all`.
 6. Call `record` to commit the finished nodes.
-7. Call `check` for the wave evidence.
+7. Call `check` for the phase evidence.
 8. Call `runs.run` for one builtin `reviewer` child. Give the reviewer the
    recorded evidence from step 7.
-9. Stop the loop when the wave count reaches `waveCap` or the node count reaches
+9. Stop the loop when the phase count reaches `phaseCap` or the node count reaches
    `nodeCap`.
 10. Repeat from step 1.
 11. Return the campaign summary.
@@ -228,7 +232,7 @@ workflow sandbox has no file access, so all state arrives as JSON from the
 engine.
 
 The loop verifies after `record`, not before. A pi-subagents acceptance gate on
-the worker runs before `record`, so a gate would test the mixed wave worktree.
+the worker runs before `record`, so a gate would test the mixed phase worktree.
 The loop instead records the node commits first, then checks and reviews the
 recorded evidence.
 
@@ -254,14 +258,14 @@ resumed node does not re-run a full check.
 
 ## Verification after the change
 
-Per-wave verification moves to a pi-subagents `reviewer` child after `record`.
-Worker children carry no acceptance gate that depends on the wave.
+Per-phase verification moves to a pi-subagents `reviewer` child after `record`.
+Worker children carry no acceptance gate that depends on the phase.
 
 The engine keeps one synchronous combined-tree check. Delivery and simulation
 call this check. This check has no child, so a per-child gate cannot replace it.
 
 The GPU broker's serialization goes away; the host runner stays. The scheduler
-change above makes each GPU node a single-node wave.
+change above makes each GPU node a single-node phase.
 
 ## State changes
 
@@ -305,7 +309,7 @@ Keep the approval gate and one `review --decision` verb. Keep `review --report`.
 
 ## Lock and status change
 
-`_dispatch_wave` uses the executor lock today. Replace that lock with the
+`_dispatch_phase` uses the executor lock today. Replace that lock with the
 campaign lock, because checks are synchronous. The `status` response drops the
 `executor` field and returns `checks` counts.
 
@@ -339,7 +343,7 @@ Each stage keeps the tests green.
 2. Delete the browser review server, the security module, the web client, and
    the comment verbs. Keep `review --decision`, `review --report`, and the
    approval gate. Rewrite the delivery guard.
-3. Add `wave --record --current` and `check --current`. Add the `checks` table.
+3. Add `phase --record --current` and `check --current`. Add the `checks` table.
    Replace `executor.py` with `checks.py`. Delete the `jobs` and `attempts`
    tables.
 4. Add GPU isolation to `ownership.py`. A GPU node conflicts with every node.
@@ -355,9 +359,9 @@ Each stage keeps the tests green.
 
 ## Test plan
 
-- Keep the scheduler tests: `tests/test_scopes.py`, `tests/test_waves.py`,
+- Keep the scheduler tests: `tests/test_scopes.py`, `tests/test_phases.py`,
   `tests/test_merge.py`, `tests/test_plan.py`.
-- Add one GPU isolation test. Two GPU nodes must land in two waves.
+- Add one GPU isolation test. Two GPU nodes must land in two phases.
 - Keep the workspace tests: `tests/test_campaign.py`,
   `tests/test_pull_request.py`.
 - Keep the session tests: `tests/test_sessions.py`.
@@ -373,7 +377,7 @@ Each stage keeps the tests green.
   grant list small and reject every unexpected field.
 - A plane can hold more than one campaign. The optional `campaign` token selects
   one. Test the multi-campaign path.
-- The resource loop has a default bound. An omitted `waveCap` is 64 and an
+- The resource loop has a default bound. An omitted `phaseCap` is 64 and an
   omitted `nodeCap` is 256, so the loop always ends even when the caller
   supplies no cap.
 - Pi-subagents validates a literal agent name before launch. The extension must

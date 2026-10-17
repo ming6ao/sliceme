@@ -103,7 +103,7 @@ class CliTests(unittest.TestCase):
 
             out = run_cli(["--json", "simulate", "--no-checks"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIn("waves", json.loads(out.stdout))
+            self.assertIn("phases", json.loads(out.stdout))
 
     def test_start_ignores_state_subdirectories(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -150,7 +150,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(out.stdout.strip(), "feat--x")
 
-    def test_campaign_wave_record_approve_and_report(self):
+    def test_campaign_phase_record_approve_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
@@ -267,7 +267,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             status = json.loads(out.stdout)
             self.assertEqual(status["dag_merge"]["merged"], {"b": "a"})
-            self.assertEqual([w["members"] for w in status["dag_waves"]], [["a"]])
+            self.assertEqual([w["members"] for w in status["dag_phases"]], [["a"]])
             on_disk = campaign.load_dag(root, "feat/x")
             self.assertEqual([n["id"] for n in on_disk["nodes"]], ["a"])
 
@@ -382,7 +382,7 @@ class CliTests(unittest.TestCase):
                     ],
                 },
             )
-            # w1 has a record, so the DAG projection marks wave 0 done.
+            # w1 has a record, so the DAG projection marks phase 0 done.
             svc = Service(root)
             svc.store.create_record(
                 head_commit="0" * 40, summary=None, node="w1", campaign="feat--x"
@@ -396,7 +396,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("campaign:    cli", out.stdout)
             self.assertIn("  w0 w1 recorded", out.stdout)
             self.assertIn("  w1 w2 pending", out.stdout)
-            self.assertIn("wave 1 [pending]: w2", out.stdout)
+            self.assertIn("phase 1 [pending]: w2", out.stdout)
             self.assertNotIn("campaign_key:", out.stdout)
 
             # --verbose restores the full nested dump.
@@ -423,7 +423,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(lines[0], "campaign:    cli")
             self.assertIn("  w0 w1 recorded", lines)
             self.assertIn("  w1 w2 pending", lines)
-            self.assertIn("wave 1 [pending]: w2", lines)
+            self.assertIn("phase 1 [pending]: w2", lines)
 
             # --short still prints only the campaign name; it also wins over
             # --dense (both are explicit status views).
@@ -516,7 +516,7 @@ class CliTests(unittest.TestCase):
                 self.assertIn(marker, out.stdout)
                 # The dense summary's header line is the tell that the CLI took
                 # the lines branch instead of each mode's own dump.
-                self.assertNotIn("wave size:", out.stdout)
+                self.assertNotIn("phase size:", out.stdout)
 
     def test_cli_surface_matches_registry(self):
         """The CLI subcommands are exactly the registry (plus aliases)."""

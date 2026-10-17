@@ -1,7 +1,7 @@
-"""The one wave cursor (S0/S1).
+"""The one phase cursor (S0/S1).
 
 These pin the unified cursor from ``docs/terminology-and-simplification-plan.md``
-(S0/S1): ``ready``, ``record``, and ``check`` all read one position; a wave
+(S0/S1): ``ready``, ``record``, and ``check`` all read one position; a phase
 advances when a member records zero changes (an explicit empty marker); and a
 recorded node satisfies a dependency without a ``state.json`` writer.
 """
@@ -20,7 +20,7 @@ def run(*args, cwd):
     return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, check=True)
 
 
-class WaveCursorCase(unittest.TestCase):
+class PhaseCursorCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
 
     def setUp(self):
@@ -65,28 +65,28 @@ class WaveCursorCase(unittest.TestCase):
             ]
         )
         before = self.svc.ready()
-        self.assertEqual(before["wave"], 0)
+        self.assertEqual(before["phase"], 0)
         self.assertEqual(before["ready"], ["w1"])
-        self.assertEqual(self.svc._wave_cursor("feat/x").index, 0)
+        self.assertEqual(self.svc._phase_cursor("feat/x").index, 0)
 
         self.edit("src/a/x.py", "a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "change"})
+        self.svc.record_phase(0, messages={"w1": "change"})
 
-        # The recorded position names the wave check runs, not the next wave.
-        cursor = self.svc._wave_cursor("feat/x")
+        # The recorded position names the phase check runs, not the next phase.
+        cursor = self.svc._phase_cursor("feat/x")
         self.assertEqual(cursor.recorded_index, 0)
         self.assertEqual(cursor.index, 1)
-        checked = self.svc.check_wave()
-        self.assertEqual(checked["wave"], cursor.recorded_index)
+        checked = self.svc.check_phase()
+        self.assertEqual(checked["phase"], cursor.recorded_index)
         self.assertEqual(checked["status"], "passed")
 
         after = self.svc.ready()
-        self.assertEqual(after["wave"], cursor.index)
+        self.assertEqual(after["phase"], cursor.index)
         self.assertEqual(after["ready"], ["w2"])
 
-    def test_wave_advances_when_a_member_records_zero_changes(self):
-        # w1 and w2 share wave 0; w3 waits on w1 in wave 1.  w2 changes no file,
-        # so it records an explicit empty marker and wave 0 still completes.
+    def test_phase_advances_when_a_member_records_zero_changes(self):
+        # w1 and w2 share phase 0; w3 waits on w1 in phase 1.  w2 changes no file,
+        # so it records an explicit empty marker and phase 0 still completes.
         self.dag(
             [
                 {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
@@ -97,17 +97,17 @@ class WaveCursorCase(unittest.TestCase):
         self.assertEqual(self.svc.ready()["ready"], ["w1", "w2"])
 
         self.edit("src/a/x.py", "a = 2\n")
-        recorded = self.svc.record_wave(0, messages={"w1": "change", "w2": "change"})
+        recorded = self.svc.record_phase(0, messages={"w1": "change", "w2": "change"})
         self.assertEqual(recorded["empty"], ["w2"])
         self.assertEqual([c["node"] for c in recorded["records"]], ["w1"])
 
         after = self.svc.ready()
-        self.assertEqual(after["wave"], 1)
+        self.assertEqual(after["phase"], 1)
         self.assertEqual(after["ready"], ["w3"])
 
     def test_a_recorded_node_satisfies_a_dependency(self):
         # No state.json is written; w2 becomes ready only because w1's record
-        # finishes wave 0.
+        # finishes phase 0.
         self.dag(
             [
                 {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
@@ -116,7 +116,7 @@ class WaveCursorCase(unittest.TestCase):
         )
         self.assertEqual(self.svc.ready()["ready"], ["w1"])
         self.edit("src/a/x.py", "a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "change"})
+        self.svc.record_phase(0, messages={"w1": "change"})
         self.assertEqual(self.svc.ready()["ready"], ["w2"])
 
 

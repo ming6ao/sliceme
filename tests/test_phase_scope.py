@@ -1,8 +1,8 @@
-"""Shared wave worktrees and the single recorder.
+"""Shared phase worktrees and the single recorder.
 
-Phase 3 pins: one worktree/branch per wave, conformance-by-ownership across the
+Phase 3 pins: one worktree/branch per phase, conformance-by-ownership across the
 shared tree (per-node commits), rejection of unowned/ambiguous/cross-node
-changes, and integration of the wave branch as a unit.
+changes, and integration of the phase branch as a unit.
 """
 
 import json
@@ -23,7 +23,7 @@ def run(*args, cwd):
     return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, check=True)
 
 
-class WaveScopeCase(unittest.TestCase):
+class PhaseScopeCase(unittest.TestCase):
     checks = [{"name": "ok", "command": "true", "required": True}]
 
     nodes = [
@@ -58,7 +58,7 @@ class WaveScopeCase(unittest.TestCase):
         write_json(
             campaign.dag_path(self.root, "feat/x"),
             {
-                "campaign": "waves",
+                "campaign": "phases",
                 "feature_branch": "feat/x",
                 "base": "main",
                 "concurrency": 3,
@@ -83,85 +83,85 @@ class WaveScopeCase(unittest.TestCase):
         return self.svc.record_approval(action="approve", actor="test")
 
 
-class RecordTests(WaveScopeCase):
+class RecordTests(PhaseScopeCase):
     def test_shared_worktree_records_per_node_commits(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.assertEqual(unit["name"], "campaign")
         worktree = unit["worktree"]
         self.edit(worktree, "src/a/x.py", "a = 2\n")
         self.edit(worktree, "src/b/y.py", "b = 2\n")
 
-        result = self.svc.record_wave(0, messages={"w1": "add a", "w2": "add b"})
+        result = self.svc.record_phase(0, messages={"w1": "add a", "w2": "add b"})
         nodes = [c["node"] for c in result["records"]]
         self.assertEqual(nodes, ["w1", "w2"])
         self.assertTrue(all(c["campaign"] == "feat--x" for c in result["records"]))
         # One commit per node on the shared campaign branch.  The subject is the
-        # human description, never a wave prefix.
+        # human description, never a phase prefix.
         log = run("git", "log", "--format=%s", f"main..{unit['branch']}", cwd=self.root)
         subjects = log.stdout.splitlines()
         self.assertIn("add a", subjects)
         self.assertIn("add b", subjects)
-        self.assertNotIn("wave", log.stdout)
+        self.assertNotIn("phase", log.stdout)
         self.assertNotIn("w1:", log.stdout)
 
     def test_missing_description_is_rejected(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         message = str(ctx.exception)
         self.assertIn("w1", message)
         self.assertIn("no description", message)
 
     def test_path_outside_every_node_is_rejected(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "README.md", "# changed\n")
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         self.assertIn("conformance failed", str(ctx.exception))
         # The unfiltered record carries a machine-readable reason code too.
         self.assertEqual(ctx.exception.reason, "stray_path")
 
     def test_unfiltered_cross_node_rename_carries_the_reason_code(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         run("git", "mv", "src/a/x.py", "src/b/x.py", cwd=unit["worktree"])
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         self.assertIn("spans nodes", str(ctx.exception))
         self.assertEqual(ctx.exception.reason, "cross_node_rename")
 
     def test_missing_description_carries_the_reason_code(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         self.assertEqual(ctx.exception.reason, "missing_description")
 
     def test_cross_node_rename_is_rejected(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         worktree = Path(unit["worktree"])
         run("git", "mv", "src/a/x.py", "src/b/x.py", cwd=worktree)
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         self.assertIn("spans nodes", str(ctx.exception))
 
     def test_open_is_idempotent(self):
-        first = self.svc.create_wave_workspace(0)
-        second = self.svc.create_wave_workspace(0)
+        first = self.svc.create_phase_workspace(0)
+        second = self.svc.create_phase_workspace(0)
         self.assertEqual(first["id"], second["id"])
 
     def test_record_requires_a_workspace(self):
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         self.assertIn("no workspace", str(ctx.exception))
 
 
-class WaveIntegrationTests(WaveScopeCase):
+class PhaseIntegrationTests(PhaseScopeCase):
     def test_campaign_worktree_delivers_as_one_unit(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
         # Nothing lands on the delivery base until the pull request merges.
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
         self.approve()
@@ -176,9 +176,9 @@ class WaveIntegrationTests(WaveScopeCase):
         self.assertEqual(self.file_on("main", "src/b/y.py"), "b = 1\n")
 
     def test_deliver_is_idempotent(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test"})
+        self.svc.record_phase(0, messages={"w1": "test"})
         self.approve()
         first = self.svc.deliver()
         second = self.svc.deliver()
@@ -186,19 +186,19 @@ class WaveIntegrationTests(WaveScopeCase):
             first["pull_request"]["url"], second["pull_request"]["url"]
         )
 
-    def test_later_wave_reuses_the_same_worktree(self):
-        first = self.svc.create_wave_workspace(0)
+    def test_later_phase_reuses_the_same_worktree(self):
+        first = self.svc.create_phase_workspace(0)
         self.edit(first["worktree"], "src/a/x.py", "a = 2\n")
         self.edit(first["worktree"], "src/b/y.py", "b = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
 
-        # The next wave reuses the same worktree; the previous wave's files are
+        # The next phase reuses the same worktree; the previous phase's files are
         # still present, so no rebase or recreation is needed.
-        second = self.svc.create_wave_workspace(1)
+        second = self.svc.create_phase_workspace(1)
         self.assertEqual(second["id"], first["id"])
         self.assertEqual((Path(second["worktree"]) / "src/a/x.py").read_text(), "a = 2\n")
         self.edit(second["worktree"], "src/c/z.py", "c = 2\n")
-        self.svc.record_wave(1, messages={"w3": "test"})
+        self.svc.record_phase(1, messages={"w3": "test"})
 
         # Still nothing on the delivery base until the pull request merges.
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
@@ -221,10 +221,10 @@ class WaveIntegrationTests(WaveScopeCase):
         self.assertIn("campaign branch", str(ctx.exception))
 
     def test_deliver_conflict_leaves_the_base_untouched(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
         # Advance the delivery base with a conflicting change.
         base = self.svc.config["delivery_base"]
         run("git", "checkout", "-q", base, cwd=self.root)
@@ -250,9 +250,9 @@ class WaveIntegrationTests(WaveScopeCase):
         cfg["checks"] = [{"name": "needs-OK", "command": "test -f OK", "required": True}]
         config_path(self.root).write_text(json.dumps(cfg))
 
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test"})
+        self.svc.record_phase(0, messages={"w1": "test"})
         base = self.svc.config["delivery_base"]
         base_head = run("git", "rev-parse", base, cwd=self.root).stdout.strip()
 
@@ -265,16 +265,16 @@ class WaveIntegrationTests(WaveScopeCase):
         )
         self.assertEqual(self.file_on(base, "src/a/x.py"), "a = 1\n")
 
-    def test_report_lists_nodes_for_wave_scope(self):
-        unit = self.svc.create_wave_workspace(0)
+    def test_report_lists_nodes_for_phase_scope(self):
+        unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test"})
-        report = self.svc.report(narrative="wave work")
+        self.svc.record_phase(0, messages={"w1": "test"})
+        report = self.svc.report(narrative="phase work")
         self.assertEqual([row["node"] for row in report["skeleton"]["nodes"]], ["w1", "w2", "w3"])
-        self.assertIn("wave work", report["content"])
+        self.assertIn("phase work", report["content"])
 
 
-class WaveCliTests(WaveScopeCase):
+class PhaseCliTests(PhaseScopeCase):
     def run_cli(self, args):
         import os
         import sys
@@ -298,7 +298,7 @@ class WaveCliTests(WaveScopeCase):
         write_json(
             campaign.dag_path(self.root, "feat/x"),
             {
-                "campaign": "waves",
+                "campaign": "phases",
                 "feature_branch": "feat/x",
                 "base": "main",
                 "concurrency": 3,

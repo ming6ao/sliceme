@@ -1,4 +1,4 @@
-"""The deterministic evidence document after the last wave.
+"""The deterministic evidence document after the last phase.
 
 ``evidence`` writes ``.sliceme/<branch-key>.evidence.json`` (the complete
 evidence) and ``.sliceme/<branch-key>.evidence.md`` (the check output is
@@ -64,7 +64,7 @@ class EvidenceCase(unittest.TestCase):
     def record(self):
         unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "a.py").write_text("a = 2\n")
-        return self.svc.record_wave(0, messages={"w1": "change a"})
+        return self.svc.record_phase(0, messages={"w1": "change a"})
 
     def head(self):
         return self.svc.store.list_records()[0]["head_commit"]
@@ -72,7 +72,7 @@ class EvidenceCase(unittest.TestCase):
     def write_check(self, output):
         return self.svc.store.create_verdict(
             fingerprint="fp-evidence",
-            source="wave:0",
+            source="phase:0",
             commit_ref=self.head(),
             status="passed",
             commands=["true"],

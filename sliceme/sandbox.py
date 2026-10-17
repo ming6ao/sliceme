@@ -4,8 +4,8 @@ Two layers:
 
 * **Isolation profiles.**  A :class:`Sandbox` describes how a check command is
   isolated: a built-in mode (``none``/``bwrap``/``unshare``) or a project
-  ``command`` prefix, plus network/read-only/writable policy and an optional
-  GPU runner.  Its :meth:`Sandbox.digest` is folded into the verification
+  ``command`` prefix, plus network/read-only/writable policy.  Its
+  :meth:`Sandbox.digest` is folded into the verification
   fingerprint, so tightening isolation (or changing setup) invalidates a cached
   verdict.
 * **Project manifests.**  The target repository provides *how to run tests in
@@ -18,10 +18,6 @@ Resolution precedence: explicit ``--sandbox`` override > ``dag.json.sandbox`` >
 plane ``policy.sandbox`` > discovered project manifest > ``none``.  ``none`` is
 unsandboxed; a campaign that sets ``policy.require_sandbox`` or
 ``dag.json.sandbox_required`` fails closed when no profile exists.
-
-The GPU runner is **sliceme's**, not the target project's.  For a GPU check the
-runner composes ``gpu runner -> sandbox -> acceptance``: the project may
-override the runner through ``gpu.command`` in its manifest.
 """
 
 from __future__ import annotations
@@ -62,10 +58,6 @@ class Sandbox:
     command: tuple[str, ...] = ()
     #: Commands run once per snapshot before acceptance.
     setup: tuple[str, ...] = ()
-    #: GPU runner prefix with a ``{tier}`` placeholder.
-    gpu_command: tuple[str, ...] = ()
-    #: Tier -> timeout seconds.
-    gpu_tiers: tuple[tuple[str, int], ...] = ()
     #: Manifest path relative to the repository root, when discovered.
     manifest: str | None = None
 
@@ -77,8 +69,6 @@ class Sandbox:
             "writable": list(self.writable),
             "command": list(self.command),
             "setup": list(self.setup),
-            "gpu_command": list(self.gpu_command),
-            "gpu_tiers": {tier: int(seconds) for tier, seconds in self.gpu_tiers},
             "manifest": self.manifest,
         }
 
@@ -91,10 +81,6 @@ class Sandbox:
     def offline(self) -> bool:
         return not self.network
 
-    def gpu_tier_timeout(self, tier: str, default: int = 3600) -> int:
-        mapping = dict(self.gpu_tiers)
-        return int(mapping.get(tier, default))
-
     def digest(self) -> str:
         """Hash the isolation semantics and setup; drives fingerprint invalidation."""
         return sha256_json(
@@ -105,8 +91,6 @@ class Sandbox:
                 "writable": sorted(self.writable),
                 "command": list(self.command),
                 "setup": list(self.setup),
-                "gpu_command": list(self.gpu_command),
-                "gpu_tiers": {tier: int(seconds) for tier, seconds in sorted(self.gpu_tiers)},
             }
         )
 
@@ -134,19 +118,15 @@ def coerce_sandbox(raw: Any) -> Sandbox:
             )
         return Sandbox(mode=raw)
     if isinstance(raw, dict):
+        if "gpu" in raw or "gpu_command" in raw:
+            raise SlicemeError(
+                "sandbox sets a removed GPU field; Sliceme does not manage GPUs"
+            )
         mode = str(raw.get("mode") or "none")
         if mode not in SANDBOX_MODES:
             raise SlicemeError(
                 f"unknown sandbox mode: {mode!r} (want one of {', '.join(SANDBOX_MODES)})"
             )
-        gpu = raw.get("gpu") or {}
-        if not isinstance(gpu, dict):
-            raise SlicemeError("sandbox gpu must be an object")
-        gpu_command = _tuple_of_str(gpu.get("command") or raw.get("gpu_command"), "gpu.command")
-        tiers = gpu.get("tiers") or {}
-        if not isinstance(tiers, dict):
-            raise SlicemeError("sandbox gpu.tiers must be an object")
-        gpu_tiers = tuple(sorted((str(k), int(v)) for k, v in tiers.items()))
         writable = raw.get("writable") or ()
         if isinstance(writable, str):
             writable = (writable,)
@@ -157,8 +137,6 @@ def coerce_sandbox(raw: Any) -> Sandbox:
             writable=tuple(str(item) for item in writable),
             command=_tuple_of_str(raw.get("command"), "command"),
             setup=_tuple_of_str(raw.get("setup"), "setup"),
-            gpu_command=gpu_command,
-            gpu_tiers=gpu_tiers,
             manifest=str(raw["manifest"]) if raw.get("manifest") else None,
         )
     raise SlicemeError(f"invalid sandbox specification: {raw!r}")
@@ -253,18 +231,6 @@ def is_required(dag: dict[str, Any] | None, config: dict[str, Any] | None) -> bo
     return bool(policy.get("require_sandbox")) or bool((dag or {}).get("sandbox_required"))
 
 
-def default_gpu_runner() -> str | None:
-    """The bundled sliceme GPU runner, resolved by package path (never cwd-relative)."""
-    candidate = Path(__file__).resolve().parent.parent / "tools" / "gpu.sh"
-    if candidate.is_file():
-        return str(candidate)
-    return shutil.which("sliceme-gpu")
-
-
-# Deprecated alias kept for compatibility; read default_gpu_runner first.
-default_gpu_broker = default_gpu_runner
-
-
 def _validate_executable(token: str, root: Path | str | None, what: str) -> None:
     if not token:
         raise SlicemeError(f"{what} must not be empty")
@@ -281,21 +247,14 @@ def _validate_executable(token: str, root: Path | str | None, what: str) -> None
         )
 
 
-def validate_sandbox(
-    sandbox: Sandbox, root: Path | str | None = None, *, gpu_required: bool = False
-) -> None:
-    """Validate a resolved profile (command resolvable, GPU runner present).
+def validate_sandbox(sandbox: Sandbox, root: Path | str | None = None) -> None:
+    """Validate a resolved profile (command resolvable).
 
     Built-in backends are *not* required to be installed here; ``wrap_command``
     fails closed at run time if the binary is missing.
     """
     if sandbox.command:
         _validate_executable(sandbox.command[0], root, "sandbox command")
-    if gpu_required and not sandbox.gpu_command and not default_gpu_runner():
-        raise SlicemeError(
-            "a GPU job was requested but no GPU runner is configured; add "
-            "gpu.command to the sandbox manifest or install the sliceme GPU runner"
-        )
 
 
 def require_sandbox(
@@ -303,7 +262,6 @@ def require_sandbox(
     config: dict[str, Any] | None,
     *,
     root: Path | str | None = None,
-    gpu_required: bool = False,
     override: str | None = None,
 ) -> Sandbox:
     """Resolve and validate the gate; fail closed when a sandbox is required."""
@@ -313,7 +271,7 @@ def require_sandbox(
             "project sandbox not configured: add sliceme.sandbox.json (or set "
             "policy.sandbox); refusing to verify"
         )
-    validate_sandbox(sandbox, root, gpu_required=gpu_required)
+    validate_sandbox(sandbox, root)
     return sandbox
 
 
@@ -332,17 +290,13 @@ def wrap_command(
     sandbox: Sandbox,
     *,
     worktree: str | None = None,
-    tier: str = "none",
 ) -> str:
-    """Wrap a shell *command* in the sandbox (and GPU runner) prefix.
+    """Wrap a shell *command* in the sandbox prefix.
 
     ``none`` returns the command unchanged.  A requested backend that is not
     installed is a hard error (fail closed), never a silent downgrade.
     """
-    inner = _wrap_isolation(command, sandbox, worktree)
-    if tier and tier != "none":
-        inner = _wrap_gpu(inner, sandbox, tier)
-    return inner
+    return _wrap_isolation(command, sandbox, worktree)
 
 
 def _wrap_isolation(command: str, sandbox: Sandbox, worktree: str | None) -> str:
@@ -359,23 +313,6 @@ def _wrap_isolation(command: str, sandbox: Sandbox, worktree: str | None) -> str
     if sandbox.mode == "bwrap":
         return _wrap_bwrap(command, sandbox, worktree)
     return _wrap_unshare(command, sandbox)
-
-
-def _wrap_gpu(inner: str, sandbox: Sandbox, tier: str) -> str:
-    # The GPU runner runs *outside* the sandbox: it needs the host lock and
-    # nvidia-smi, then hands the sandbox-wrapped command to the device.
-    prefix = list(sandbox.gpu_command)
-    if not prefix:
-        runner = default_gpu_runner()
-        if not runner:
-            raise SlicemeError(
-                "GPU job requested but no GPU runner is configured; add "
-                "gpu.command to the sandbox manifest"
-            )
-        prefix = [runner, "--tier", "{tier}", "--"]
-    prefix = [part.replace("{tier}", tier) for part in prefix]
-    parts = [*prefix, "/bin/sh", "-lc", inner]
-    return " ".join(shlex.quote(part) for part in parts)
 
 
 def _wrap_bwrap(command: str, sandbox: Sandbox, worktree: str | None) -> str:
@@ -417,8 +354,6 @@ __all__ = [
     "Sandbox",
     "backend_available",
     "coerce_sandbox",
-    "default_gpu_broker",
-    "default_gpu_runner",
     "discover_sandbox",
     "find_manifest",
     "is_required",

@@ -368,7 +368,7 @@ def _changed_entries(
 ) -> list[tuple[str, str, str | None]]:
     """Staged changes as ``(status, path, old_path)``, rename-aware.
 
-    With no *base* the diff is against ``HEAD`` (the last recorded wave).
+    With no *base* the diff is against ``HEAD`` (the last recorded phase).
     """
     args = ["diff", "--cached", "--name-status", "-M"]
     if base:

@@ -6,10 +6,10 @@
     "output": "architecture.html",
     "quality_profile": "showcase",
     "views": [
-      { "id": "campaign-loop", "label": "Campaign loop", "focus": ["request", "coordinator", "subagents", "surface", "service"], "note": "A design becomes a DAG; the coordinator spawns waves of one-shot subagents through the engine verbs." },
+      { "id": "campaign-loop", "label": "Campaign loop", "focus": ["request", "coordinator", "subagents", "surface", "service"], "note": "A design becomes a DAG; the coordinator spawns phases of one-shot subagents through the engine verbs." },
       { "id": "engine-core", "label": "Engine core", "focus": ["surface", "service", "store", "integrate"], "note": "One action registry dispatches to the service, which owns plane state and landing." },
-      { "id": "verification", "label": "Check path", "focus": ["service", "checks", "sandbox"], "note": "One synchronous runner checks the recorded wave tree and caches the verdict." },
-      { "id": "landing", "label": "Approved delivery", "focus": ["service", "integrate", "git"], "note": "After every wave and user approval, Sliceme pushes the campaign branch and opens a pull request against the delivery base (the default branch)." }
+      { "id": "verification", "label": "Check path", "focus": ["service", "checks", "sandbox"], "note": "One synchronous runner checks the recorded phase tree and caches the verdict." },
+      { "id": "landing", "label": "Approved delivery", "focus": ["service", "integrate", "git"], "note": "After every phase and user approval, Sliceme pushes the campaign branch and opens a pull request against the default branch." }
     ]
   },
   "components": [
@@ -18,10 +18,10 @@
     { "id": "subagents", "type": "backend", "label": "Subagents", "sublabel": "one-shot children", "pos": [1080, 200], "size": [210, 64], "tag": "planner · worker · reviewer" },
     { "id": "surface", "type": "backend", "label": "Action surface", "sublabel": "single source of truth", "pos": [520, 380], "size": [190, 64], "tag": "surface.py" },
     { "id": "service", "type": "backend", "label": "Service layer", "sublabel": "single owner of state", "pos": [520, 560], "size": [190, 64], "tag": "service.py" },
-    { "id": "store", "type": "database", "label": "SQLite plane", "sublabel": "campaigns · candidates · checks", "pos": [520, 760], "size": [190, 64], "tag": "state.db · WAL" },
+    { "id": "store", "type": "database", "label": "SQLite plane", "sublabel": "campaigns · records · verdicts", "pos": [520, 760], "size": [190, 64], "tag": "state.db · WAL" },
     { "id": "integrate", "type": "backend", "label": "Delivery", "sublabel": "target guard · pull request", "pos": [150, 560], "size": [180, 64], "tag": "integrate.py" },
     { "id": "checks", "type": "backend", "label": "Check runner", "sublabel": "one synchronous run + cache", "pos": [900, 560], "size": [180, 64], "tag": "checks.py" },
-    { "id": "sandbox", "type": "security", "label": "Sandbox", "sublabel": "isolation + GPU runner", "pos": [900, 760], "size": [180, 64], "tag": "sandbox.py · gpu.sh" },
+    { "id": "sandbox", "type": "security", "label": "Sandbox", "sublabel": "isolation profiles", "pos": [900, 760], "size": [180, 64], "tag": "sandbox.py" },
     { "id": "git", "type": "external", "label": "Git", "sublabel": "commits and worktrees", "pos": [150, 760], "size": [180, 64], "tag": "worktrees · branches" }
   ],
   "boundaries": [
@@ -39,9 +39,9 @@
     { "id": "merge", "from": "integrate", "to": "git", "label": "push branch", "labelDy": 88 }
   ],
   "cards": [
-    { "dot": "cyan", "title": "Plan to waves", "items": ["Planner writes dag.json from the design", "owns + depends_on derive the wave schedule", "concurrency caps each wave; overlapping subtrees serialize"] },
+    { "dot": "cyan", "title": "Plan to phases", "items": ["Planner writes dag.json from the design", "dir + depends_on derive the phase schedule", "concurrency caps each phase; overlapping subtrees serialize"] },
     { "dot": "emerald", "title": "One engine, many adapters", "items": ["surface.py is the single action registry", "The CLI and the pi tools derive from it", "Service owns plane state; adapters only render"] },
-    { "dot": "amber", "title": "One check runner", "items": ["One synchronous run over the recorded wave tree", "Fingerprint dedupe serves an unchanged verdict", "A GPU node lands in a wave of its own"] },
-    { "dot": "rose", "title": "Approved delivery", "items": ["One campaign worktree accumulates every wave", "No target change until all waves are done", "deliver opens one pull request, refuses main/master"] }
+    { "dot": "amber", "title": "One check runner", "items": ["One synchronous run over the recorded phase tree", "Fingerprint dedupe serves an unchanged verdict", "A stricter sandbox is a new fingerprint"] },
+    { "dot": "rose", "title": "Approved delivery", "items": ["One campaign worktree accumulates every phase", "No target change until all phases are done", "deliver opens one pull request, refuses main/master"] }
   ]
 }

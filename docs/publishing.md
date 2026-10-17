@@ -2,7 +2,7 @@
 
 Sliceme ships as **one pi package** (npm) and, secondarily, as a Python wheel.
 The npm tarball is the real distribution unit. It bundles the TypeScript pi
-extension, the `/sliceme` command, the GPU host runner, and the entire
+extension, the `/sliceme` command, and the entire
 dependency-free Python engine. So `pi install npm:sliceme` needs no `pip install`
 and no `sliceme` on `PATH`.
 
@@ -10,16 +10,13 @@ and no `sliceme` on `PATH`.
 
 | Artifact | Command | Contains |
 |---|---|---|
-| npm pi package (primary) | `npm pack` / `npm publish` | `integrations/pi/*` (the tool, the resource, and the agents), `docs/`, `tools/gpu.sh`, `bin/sliceme`, `sliceme/*.py`, `README.md`, `LICENSE` |
+| npm pi package (primary) | `npm pack` / `npm publish` | `integrations/pi/*` (the tool, the resource, and the agents), `docs/`, `bin/sliceme`, `sliceme/*.py`, `README.md`, `LICENSE` |
 | Python wheel (secondary) | `python3 -m build` | only the `sliceme` Python package (engine library); **no** `bin/`, `tools/`, or pi extension |
 
 The `files` array in `package.json` is an allow-list with negations; keep the
 `!sliceme/__pycache__` / `!sliceme/**/*.pyc` entries so bytecode is not packed.
 
-The Python wheel is engine-only by design (there is no `[project.scripts]`). A
-pip-installed engine resolves its GPU runner from the package tree. A wheel-only
-deployment must therefore provide `gpu.command` in a sandbox manifest, or put a
-`sliceme-gpu` runner on `PATH`.
+The Python wheel is engine-only by design (there is no `[project.scripts]`).
 
 ## Versioning
 

@@ -2,7 +2,7 @@
 """Build a fake Sliceme plane for engine inspection.
 
 The script creates a real git repository with a small project, a campaign
-worktree, three recorded waves, check evidence, review decisions, a report,
+worktree, three recorded phases, check evidence, review decisions, a report,
 and suspend/resume descriptors.  The result is a complete plane the engine can
 inspect with no campaign run.
 
@@ -297,7 +297,7 @@ def build_git_project(root: Path) -> None:
 
 
 def build_campaign(svc: Service) -> dict[str, str]:
-    """Record every wave and return a node -> commit map."""
+    """Record every phase and return a node -> commit map."""
     commits: dict[str, str] = {}
     messages = {
         "w1": "add token verification and migrations",
@@ -306,21 +306,21 @@ def build_campaign(svc: Service) -> dict[str, str]:
         "w4": "add the session resume flags",
         "w5": "document usage and configuration",
     }
-    for wave in range(3):
+    for phase in range(3):
         svc.create_campaign_workspace(base="main")
         members = (
-            [("w1", "w2"), ("w3", "w4"), ("w5",)][wave]
+            [("w1", "w2"), ("w3", "w4"), ("w5",)][phase]
         )
         for node in members:
             for rel, text in NODE_EDITS[node].items():
                 write_text(Path(svc.store.get_campaign(FEATURE_BRANCH)["worktree"]), rel, text)
-        result = svc.record_wave(wave, messages={node: messages[node] for node in members})
+        result = svc.record_phase(phase, messages={node: messages[node] for node in members})
         for record in result["records"]:
             commits[str(record["node"])] = str(record["head_commit"])
     return commits
 
 
-def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int]) -> None:
+def add_evidence(svc: Service, commits: dict[str, str], node_phase: dict[str, int]) -> None:
     """Insert one terminal check per commit, plus one superseded failure."""
     store = svc.store
     # A superseded failure for w2 first, so the later passing check is the newest
@@ -331,7 +331,7 @@ def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int
         commit_ref=commits["w2"],
         status="failed",
         commands=["pytest tests/test_smoke.py"],
-        wave=node_wave["w2"],
+        phase=node_phase["w2"],
         duration=1.0,
         exit_code=1,
         output="pytest tests/test_smoke.py\n1 failed in 0.11s\n",
@@ -344,7 +344,7 @@ def add_evidence(svc: Service, commits: dict[str, str], node_wave: dict[str, int
             commit_ref=commit,
             status=spec["status"],
             commands=list(spec["commands"]),
-            wave=node_wave[node],
+            phase=node_phase[node],
             duration=spec["duration"],
             exit_code=0 if spec["status"] == "passed" else 1,
             output=spec["output"],
@@ -381,8 +381,8 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
         "status": "ready",
         "reason": "user",
         "suspended_at": now() - 3600.0,
-        "current_wave": 2,
-        "waves": [
+        "current_phase": 2,
+        "phases": [
             {"index": 0, "members": ["w1", "w2"], "status": "done"},
             {"index": 1, "members": ["w3", "w4"], "status": "done"},
             {"index": 2, "members": ["w5"], "status": "done"},
@@ -397,7 +397,7 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
             for node in commits
         },
         "resume_plan": {
-            "record_wave": None,
+            "record_phase": None,
             "resume": [],
             "respawn": [],
             "verify": [],
@@ -420,8 +420,8 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
         "status": "suspended",
         "reason": "user",
         "suspended_at": now() - 600.0,
-        "current_wave": 1,
-        "waves": [
+        "current_phase": 1,
+        "phases": [
             {"index": 0, "members": ["n1", "n2"], "status": "done"},
             {"index": 1, "members": ["n3"], "status": "running"},
         ],
@@ -431,7 +431,7 @@ def write_session_descriptors(root: Path, config: dict, commits: dict[str, str])
             "n3": {"status": "paused", "attempt": 2, "record": None, "commit": None},
         },
         "resume_plan": {
-            "record_wave": 1,
+            "record_phase": 1,
             "resume": ["n3"],
             "respawn": [],
             "verify": ["n3"],
@@ -485,8 +485,8 @@ def main() -> int:
     svc = Service(root)
     try:
         commits = build_campaign(svc)
-        node_wave = {"w1": 0, "w2": 0, "w3": 1, "w4": 1, "w5": 2}
-        add_evidence(svc, commits, node_wave)
+        node_phase = {"w1": 0, "w2": 0, "w3": 1, "w4": 1, "w5": 2}
+        add_evidence(svc, commits, node_phase)
         add_review_data(svc, commits)
         svc.report(
             narrative=(

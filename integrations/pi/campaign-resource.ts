@@ -14,7 +14,7 @@ export const CAMPAIGN_RESOURCE_VERSION = 1;
 export const CAMPAIGN_TOKEN = /^[A-Za-z0-9._-]{1,128}$/;
 
 /** Keys accepted from `args`; every other field is rejected. */
-export const CAMPAIGN_RESOURCE_FIELDS = new Set(["campaign", "waveCap", "nodeCap"]);
+export const CAMPAIGN_RESOURCE_FIELDS = new Set(["campaign", "phaseCap", "nodeCap"]);
 
 export interface CampaignCommands {
 	status: string;
@@ -59,18 +59,18 @@ export function campaignCommands(engine: string[], campaign?: string): CampaignC
 
 /**
  * The authority grants for one campaign. The loop calls each host command
- * once per wave, and the runtime forbids a repeated key, so every iteration
+ * once per phase, and the runtime forbids a repeated key, so every iteration
  * gets its own keyed grant (`ready-0`, `record-0`, ...). The final `status`
- * call uses one key. `waveCap` bounds how many iterations exist.
+ * call uses one key. `phaseCap` bounds how many iterations exist.
  */
 export function campaignGrants(
 	engine: string[],
 	campaign: string | undefined,
-	waveCap: number,
+	phaseCap: number,
 ): CampaignHostGrant[] {
 	const commands = campaignCommands(engine, campaign);
 	const grants: CampaignHostGrant[] = [{ key: "status", command: commands.status }];
-	for (let index = 0; index < waveCap; index++) {
+	for (let index = 0; index < phaseCap; index++) {
 		grants.push({ key: `ready-${index}`, command: commands.ready });
 		grants.push({ key: `record-${index}`, command: commands.record });
 		grants.push({ key: `check-${index}`, command: commands.check });
@@ -89,23 +89,23 @@ export function campaignGrants(
  */
 export function buildCampaignScript(
 	commands: CampaignCommands,
-	waveCap: number,
+	phaseCap: number,
 	nodeCap: number,
 ): string {
 	const hostCall = (keyExpr: string, command: string) =>
 		`runs.host(${keyExpr}, { kind: "command", command: ${JSON.stringify(command)}, timeoutMs: HOST_TIMEOUT_MS })`;
 	return [
-		`const WAVE_CAP = ${waveCap};`,
+		`const PHASE_CAP = ${phaseCap};`,
 		`const NODE_CAP = ${nodeCap};`,
 		`const HOST_TIMEOUT_MS = 3600000;`,
-		`let waves = 0;`,
+		`let phases = 0;`,
 		`let nodes = 0;`,
 		`while (true) {`,
-		`  const readyRes = await ${hostCall('"ready-" + waves', commands.ready)};`,
+		`  const readyRes = await ${hostCall('"ready-" + phases', commands.ready)};`,
 		`  if (!readyRes.ok) throw new Error("sliceme ready failed: " + (readyRes.error || readyRes.stderr || readyRes.exitCode));`,
 		`  const ready = JSON.parse(readyRes.stdout);`,
 		`  if (ready.paused) {`,
-		`    return { state: "paused", wave: ready.wave === undefined ? null : ready.wave, waves: waves, nodes: nodes };`,
+		`    return { state: "paused", phase: ready.phase === undefined ? null : ready.phase, phases: phases, nodes: nodes };`,
 		`  }`,
 		`  const ids = Array.isArray(ready.ready) ? ready.ready : [];`,
 		`  if (ids.length === 0) break;`,
@@ -117,22 +117,22 @@ export function buildCampaignScript(
 		`    };`,
 		`  });`,
 		`  await runs.all(workers);`,
-		`  const recordRes = await ${hostCall('"record-" + waves', commands.record)};`,
+		`  const recordRes = await ${hostCall('"record-" + phases', commands.record)};`,
 		`  if (!recordRes.ok) throw new Error("sliceme record failed: " + (recordRes.error || recordRes.stderr || recordRes.exitCode));`,
-		`  const checkRes = await ${hostCall('"check-" + waves', commands.check)};`,
+		`  const checkRes = await ${hostCall('"check-" + phases', commands.check)};`,
 		`  if (!checkRes.ok) throw new Error("sliceme check failed: " + (checkRes.error || checkRes.stderr || checkRes.exitCode));`,
-		`  const reviewTask = "Review the recorded wave evidence for Sliceme wave " + (ready.wave === undefined ? "?" : ready.wave) + ".\\nRecorded: " + recordRes.stdout + "\\nChecks: " + checkRes.stdout + "\\nReport concrete findings, or state that the wave is clean. Do not edit files.";`,
-		`  await runs.run("review-" + (ready.wave === undefined ? waves : ready.wave), { agent: "reviewer", task: reviewTask });`,
-		`  waves += 1;`,
+		`  const reviewTask = "Review the recorded phase evidence for Sliceme phase " + (ready.phase === undefined ? "?" : ready.phase) + ".\\nRecorded: " + recordRes.stdout + "\\nChecks: " + checkRes.stdout + "\\nReport concrete findings, or state that the phase is clean. Do not edit files.";`,
+		`  await runs.run("review-" + (ready.phase === undefined ? phases : ready.phase), { agent: "reviewer", task: reviewTask });`,
+		`  phases += 1;`,
 		`  nodes += ids.length;`,
-		`  if ((WAVE_CAP > 0 && waves >= WAVE_CAP) || (NODE_CAP > 0 && nodes >= NODE_CAP)) {`,
-		`    return { state: "capped", waves: waves, nodes: nodes };`,
+		`  if ((PHASE_CAP > 0 && phases >= PHASE_CAP) || (NODE_CAP > 0 && nodes >= NODE_CAP)) {`,
+		`    return { state: "capped", phases: phases, nodes: nodes };`,
 		`  }`,
 		`}`,
 		`const statusRes = await ${hostCall('"status"', commands.status)};`,
 		`let summary = null;`,
 		`if (statusRes.ok) { try { summary = JSON.parse(statusRes.stdout); } catch (error) { summary = statusRes.stdout; } }`,
-		`return { state: "complete", waves: waves, nodes: nodes, status: summary };`,
+		`return { state: "complete", phases: phases, nodes: nodes, status: summary };`,
 	].join("\n");
 }
 
@@ -161,15 +161,15 @@ export function resolveCampaignResource(
 		}
 		campaign = args.campaign;
 	}
-	const waveCap = args.waveCap;
+	const phaseCap = args.phaseCap;
 	if (
-		waveCap !== undefined &&
-		(typeof waveCap !== "number" ||
-			!Number.isInteger(waveCap) ||
-			waveCap < 1 ||
-			waveCap > 64)
+		phaseCap !== undefined &&
+		(typeof phaseCap !== "number" ||
+			!Number.isInteger(phaseCap) ||
+			phaseCap < 1 ||
+			phaseCap > 64)
 	) {
-		return { error: `workflow '${CAMPAIGN_RESOURCE}' args.waveCap must be an integer from 1 to 64.` };
+		return { error: `workflow '${CAMPAIGN_RESOURCE}' args.phaseCap must be an integer from 1 to 64.` };
 	}
 	const nodeCap = args.nodeCap;
 	if (
@@ -179,13 +179,13 @@ export function resolveCampaignResource(
 		return { error: `workflow '${CAMPAIGN_RESOURCE}' args.nodeCap must be an integer from 1 to 256.` };
 	}
 	const commands = campaignCommands(engine, campaign);
-	const boundedWaveCap = typeof waveCap === "number" ? waveCap : 64;
+	const boundedPhaseCap = typeof phaseCap === "number" ? phaseCap : 64;
 	return {
 		script: buildCampaignScript(
 			commands,
-			boundedWaveCap,
+			boundedPhaseCap,
 			typeof nodeCap === "number" ? nodeCap : 256,
 		),
-		hostCommands: campaignGrants(engine, campaign, boundedWaveCap),
+		hostCommands: campaignGrants(engine, campaign, boundedPhaseCap),
 	};
 }

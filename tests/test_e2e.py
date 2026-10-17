@@ -3,7 +3,7 @@
 This pins the main-based campaign model.  ``start`` derives the campaign branch
 from the design name and records the delivery base.  ``open`` fetches the
 delivery base and creates the campaign worktree on the campaign branch.  The
-engine records and checks the wave, a human approves the campaign, the engine
+engine records and checks the phase, a human approves the campaign, the engine
 writes the evidence document, and ``deliver`` pushes the campaign branch and
 opens one pull request against the delivery base (``main``).
 
@@ -106,10 +106,10 @@ class EndToEndCase(unittest.TestCase):
         self.assertNotIn("base_fallback", unit)
         (Path(unit["worktree"]) / "src" / "api" / "app.py").write_text("value = 2\n")
 
-        recorded = svc.record_wave(0, messages={"w1": "add the endpoint"})
+        recorded = svc.record_phase(0, messages={"w1": "add the endpoint"})
         self.assertEqual([c["node"] for c in recorded["records"]], ["w1"])
 
-        check = svc.check_wave()
+        check = svc.check_phase()
         self.assertEqual(check["status"], "passed")
 
         svc.record_approval(action="approve", actor="reviewer")
@@ -156,7 +156,7 @@ class EndToEndCase(unittest.TestCase):
 
         unit = svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "api" / "app.py").write_text("value = 2\n")
-        svc.record_wave(0, messages={"w1": "add the endpoint"})
+        svc.record_phase(0, messages={"w1": "add the endpoint"})
         svc.record_approval(action="approve", actor="reviewer")
 
         result = svc.deliver()

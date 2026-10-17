@@ -1,6 +1,6 @@
 """Build one review snapshot: the accumulated commits and the report.
 
-The review unit is the campaign worktree.  Commits accumulate as waves land, so
+The review unit is the campaign worktree.  Commits accumulate as phases land, so
 a human can review and approve them before or after the campaign finishes.  One
 campaign-level approval covers the whole commit set; delivery proceeds only
 while the newest campaign decision is an unconsumed ``approve``.
@@ -234,7 +234,6 @@ def _evidence_map(service: "Service", hashes: set[str]) -> dict[str, dict[str, A
             "source": check.get("source"),
             "commands": check.get("commands"),
             "output": check.get("output"),
-            "gpu": check.get("gpu"),
             "created_at": check.get("finished_at") or check.get("created_at"),
             "diffstat": changes["diffstat"],
             "files": changes["files"],

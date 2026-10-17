@@ -11,9 +11,9 @@ from typing import Any, NamedTuple
 
 from .. import campaign, integrate
 from ..ownership import (
-    DEFAULT_WAVE_SIZE,
+    DEFAULT_PHASE_SIZE,
     merge_same_own_nodes,
-    plan_dag_waves,
+    plan_dag_phases,
     validate_dag,
 )
 from ..util import (
@@ -22,45 +22,40 @@ from ..util import (
 )
 
 
-class WaveCursor(NamedTuple):
-    """The one wave cursor that drives ``ready``, ``record``, and ``check``.
+class PhaseCursor(NamedTuple):
+    """The one phase cursor that drives ``ready``, ``record``, and ``check``.
 
-    ``index``/``members`` name the wave to work on: the first planned wave that
-    is not fully recorded, or the last wave when every wave is recorded.  A
+    ``index``/``members`` name the phase to work on: the first planned phase that
+    is not fully recorded, or the last phase when every phase is recorded.  A
     member that recorded zero changes still counts as recorded (an empty
-    record), so the cursor advances past a no-op wave instead of stalling.
+    record), so the cursor advances past a no-op phase instead of stalling.
 
-    ``recorded_index``/``recorded_members`` name the wave ``check`` runs: the
-    wave the newest record belongs to, scoped to the members with a real
-    commit.  ``record`` commits the current wave and ``check`` runs right after
-    it, so check reads the wave just recorded, not the next one.
-
-    ``recorded_planned_members`` is that wave's full planned membership.  The
-    GPU tier still reflects the wave when every member recorded empty, even
-    though the empty members contribute no acceptance command.
+    ``recorded_index``/``recorded_members`` name the phase ``check`` runs: the
+    phase the newest record belongs to, scoped to the members with a real
+    commit.  ``record`` commits the current phase and ``check`` runs right after
+    it, so check reads the phase just recorded, not the next one.
     """
 
     index: int | None
     members: list[str]
     recorded_index: int | None
     recorded_members: list[str]
-    recorded_planned_members: list[str]
 
 
 class StatusVerbs:
 
     def ready_nodes(self) -> list[str]:
-        """The ids of the current wave's nodes ready to spawn.
+        """The ids of the current phase's nodes ready to spawn.
 
-        A wave is the one scheduling gate: every dependency lives in an earlier
-        wave (``plan_dag_waves`` sets ``min_wave = max(wave(dep) + 1)``), so a
+        A phase is the one scheduling gate: every dependency lives in an earlier
+        phase (``plan_dag_phases`` sets ``min_phase = max(phase(dep) + 1)``), so a
         member is ready once its own status is neither finished nor running.
         A missing DAG has no ready nodes.
         """
         branch = self.config.get("work_branch")
         if not branch:
             return []
-        return self._ready_in_current_wave(branch)
+        return self._ready_in_current_phase(branch)
 
     def paused(self) -> bool:
         """True when the bound campaign's cooperative pause flag is set.
@@ -80,7 +75,7 @@ class StatusVerbs:
         """The node ids with a record, empty or not.
 
         A record (a committed node or an explicit empty marker) is the durable
-        evidence that a wave member finished, so the wave cursor advances.
+        evidence that a phase member finished, so the phase cursor advances.
         """
         return {
             str(record["node"])
@@ -92,7 +87,7 @@ class StatusVerbs:
         """The node ids with a real commit (a record that changed files).
 
         An explicit empty record is not a commit, so it never contributes its
-        acceptance commands to the wave check vector.
+        acceptance commands to the phase check vector.
         """
         return {
             str(record["node"])
@@ -115,14 +110,14 @@ class StatusVerbs:
         return found
 
     def _finished_nodes(self) -> set[str]:
-        """The node ids the wave cursor treats as done: the recorded nodes."""
+        """The node ids the phase cursor treats as done: the recorded nodes."""
         return set(self._recorded_nodes())
 
     def _node_states(self, branch: str) -> dict[str, Any]:
         """The per-node status for display: recorded nodes are ``recorded``.
 
         The node vocabulary is ``pending``, ``running``, ``recorded``, and
-        ``failed``.  The wave verdict carries pass/fail, so a recorded node is
+        ``failed``.  The phase verdict carries pass/fail, so a recorded node is
         ``recorded`` whether or not the combined-tree check has run.  A node the
         descriptor recorded as running stays running.
         """
@@ -135,71 +130,69 @@ class StatusVerbs:
             merged[node] = {**merged.get(node, {}), "status": "recorded"}
         return merged
 
-    def _wave_rows(self, branch: str) -> list[dict[str, Any]]:
-        """The wave projection for the ``status_summary`` reads.
+    def _phase_rows(self, branch: str) -> list[dict[str, Any]]:
+        """The phase projection for the ``status_summary`` reads.
 
-        The scheduler's DAG waves are projected, and a wave is ``done`` when
+        The scheduler's DAG phases are projected, and a phase is ``done`` when
         every member is finished, so the engine advances without a state file.
         """
-        planned, _error = self._dag_waves(branch)
+        planned, _error = self._dag_phases(branch)
         finished = self._finished_nodes()
         rows = []
         for entry in planned:
             members = [str(m) for m in entry.get("members") or []]
             status = "done" if members and set(members) <= finished else "pending"
             rows.append(
-                {"wave": int(entry.get("wave", 0)), "status": status, "members": members}
+                {"phase": int(entry.get("phase", 0)), "status": status, "members": members}
             )
         return rows
 
-    def _wave_cursor(self, branch: str) -> WaveCursor:
+    def _phase_cursor(self, branch: str) -> PhaseCursor:
         """The one cursor for ``ready``, ``record``, and ``check``.
 
         The DAG projection plus the records in SQLite derive both positions:
-        the wave to work on (first not fully recorded, else the last) and the
-        wave ``check`` runs (the wave of the newest record, scoped to the
-        members with a real commit).  See :class:`WaveCursor`.
+        the phase to work on (first not fully recorded, else the last) and the
+        phase ``check`` runs (the phase of the newest record, scoped to the
+        members with a real commit).  See :class:`PhaseCursor`.
         """
-        planned, _error = self._dag_waves(branch)
+        planned, _error = self._dag_phases(branch)
         finished = self._finished_nodes()
         committed = self._committed_nodes()
         index = next(
             (
-                int(entry.get("wave", 0))
+                int(entry.get("phase", 0))
                 for entry in planned
                 if not set(str(m) for m in entry.get("members") or []) <= finished
             ),
             None,
         )
         if index is None and planned:
-            index = int(planned[-1].get("wave", 0))
+            index = int(planned[-1].get("phase", 0))
         members = next(
             (
                 [str(m) for m in entry.get("members") or []]
                 for entry in planned
-                if int(entry.get("wave", 0)) == index
+                if int(entry.get("phase", 0)) == index
             ),
             [],
         )
-        recorded_index, recorded_members, recorded_planned = self._recorded_wave_of(
+        recorded_index, recorded_members = self._recorded_phase_of(
             planned, committed
         )
-        return WaveCursor(
-            index, members, recorded_index, recorded_members, recorded_planned
-        )
+        return PhaseCursor(index, members, recorded_index, recorded_members)
 
-    def _recorded_wave_of(
+    def _recorded_phase_of(
         self, planned: list[dict[str, Any]], committed: set[str]
-    ) -> tuple[int | None, list[str], list[str]]:
-        """The wave ``check`` runs: the wave of the newest record.
+    ) -> tuple[int | None, list[str]]:
+        """The phase ``check`` runs: the phase of the newest record.
 
         ``record`` commits the finished nodes, then ``check`` runs against that
-        same tree, so check names the wave the record just committed, not the
-        next wave ``ready`` offers.  The newest record selects the wave; the
-        wave's committed members form the acceptance vector, so an empty record
-        contributes nothing.  When that wave has no committed member at all the
+        same tree, so check names the phase the record just committed, not the
+        next phase ``ready`` offers.  The newest record selects the phase; the
+        phase's committed members form the acceptance vector, so an empty record
+        contributes nothing.  When that phase has no committed member at all the
         vector is empty.  The planned members are the fallback only when nothing
-        is recorded yet, and the first planned wave when the DAG has no records.
+        is recorded yet, and the first planned phase when the DAG has no records.
         """
         newest: str | None = None
         for record in self.store.list_records(campaign=self.campaign_key()):
@@ -210,17 +203,17 @@ class StatusVerbs:
             for entry in planned:
                 members = [str(m) for m in entry.get("members") or []]
                 if newest in members:
-                    wave_members = [m for m in members if m in committed]
-                    return int(entry.get("wave", 0)), wave_members, members
+                    phase_members = [m for m in members if m in committed]
+                    return int(entry.get("phase", 0)), phase_members
         if not planned:
-            return None, [], []
+            return None, []
         first = planned[0]
         first_members = [str(m) for m in first.get("members") or []]
-        return int(first.get("wave", 0)), first_members, first_members
+        return int(first.get("phase", 0)), first_members
 
-    def _ready_in_current_wave(self, branch: str) -> list[str]:
-        """The current wave's members that are neither finished nor running."""
-        cursor = self._wave_cursor(branch)
+    def _ready_in_current_phase(self, branch: str) -> list[str]:
+        """The current phase's members that are neither finished nor running."""
+        cursor = self._phase_cursor(branch)
         if cursor.index is None or not cursor.members:
             return []
         finished = self._finished_nodes()
@@ -233,23 +226,28 @@ class StatusVerbs:
         ]
 
     def ready(self) -> dict[str, Any]:
-        """The current wave's ready node ids, its index, and the pause flag.
+        """The current phase's ready node ids, its index, and the pause flag.
 
-        The wave is the one scheduling gate: a node is ready when it is a
-        member of the current wave and its own status is neither finished nor
-        running.  The result is scoped to the current wave, so a caller spawns
-        and records one wave per call.  A missing or malformed DAG reports no
+        The phase is the one scheduling gate: a node is ready when it is a
+        member of the current phase and its own status is neither finished nor
+        running.  The result is scoped to the current phase, so a caller spawns
+        and records one phase per call.  A missing or malformed DAG reports no
         ready nodes instead of crashing the read.
         """
         row = self.campaign
         if row is None:
-            return {"campaign": None, "ready": [], "wave": None, "paused": False}
+            return {"campaign": None, "ready": [], "phase": None, "paused": False}
         branch = str(row["work_branch"])
-        cursor = self._wave_cursor(branch)
+        # A malformed DAG must stop the loop, not report an empty phase.  The
+        # resource treats a failed verb as fatal, so the error reaches the user.
+        _planned, error = self._dag_phases(branch)
+        if error:
+            raise SlicemeError(error)
+        cursor = self._phase_cursor(branch)
         return {
             "campaign": row.get("name") or row["key"],
-            "ready": self._ready_in_current_wave(branch),
-            "wave": cursor.index,
+            "ready": self._ready_in_current_phase(branch),
+            "phase": cursor.index,
             "paused": self.paused(),
         }
 
@@ -272,13 +270,13 @@ class StatusVerbs:
             dag_merge = {"merged": {}, "error": str(exc)}
         units = [self._project_campaign(campaign)]
         records = self.store.list_records(campaign=key)
-        waves = integrate.plan_waves(
+        phases = integrate.plan_phases(
             self.store,
             self.root,
             self.config,
             [c for c in records if c["status"] in {"recorded", "pending"}],
         )
-        dag_waves, dag_waves_error = self._dag_waves(branch)
+        dag_phases, dag_phases_error = self._dag_phases(branch)
         return {
             "root": str(self.root),
             "work_branch": branch,
@@ -291,9 +289,9 @@ class StatusVerbs:
             "default_branch": self.config.get("default_branch") or integrate.found_default_branch(self.root),
             "units": units,
             "records": records,
-            "waves": [w.to_dict() for w in waves],
-            "dag_waves": dag_waves,
-            "dag_waves_error": dag_waves_error,
+            "phases": [w.to_dict() for w in phases],
+            "dag_phases": dag_phases,
+            "dag_phases_error": dag_phases_error,
             "ready": self.ready_nodes(),
             "paused": self.paused(),
             "dag_merge": dag_merge,
@@ -305,7 +303,7 @@ class StatusVerbs:
         """The compact, human-first status projection (docs/observability.md).
 
         Mirrors the pi coordinator's ``summarise``: a header, one line per node
-        in DAG order, and one line per wave.  The default human ``status``
+        in DAG order, and one line per phase.  The default human ``status``
         output; ``status --verbose`` still returns the full nested dump.  It
         never raises: a plane with no single campaign falls back to the plane
         summary.
@@ -327,12 +325,12 @@ class StatusVerbs:
         nodes = [n for n in (dag or {}).get("nodes") or [] if n.get("id")]
         node_ids = [str(n["id"]) for n in nodes]
 
-        # The current-wave projection: the scheduler's DAG waves with recorded
+        # The current-phase projection: the scheduler's DAG phases with recorded
         # nodes marked done.
-        dag_waves = self._wave_rows(branch) if branch else []
-        wave_of: dict[str, int] = {
-            member: entry["wave"]
-            for entry in dag_waves
+        dag_phases = self._phase_rows(branch) if branch else []
+        phase_of: dict[str, int] = {
+            member: entry["phase"]
+            for entry in dag_phases
             for member in entry["members"]
         }
 
@@ -340,37 +338,37 @@ class StatusVerbs:
         design = (dag or {}).get("design")
         base = (dag or {}).get("base") or self.config.get("base_branch")
         worktree = campaign_row.get("worktree")
-        wave_size = (dag or {}).get("concurrency")
-        if wave_size is None:
-            wave_size = "?"
+        phase_size = (dag or {}).get("concurrency")
+        if phase_size is None:
+            phase_size = "?"
 
         lines = [
             f"campaign:    {name}",
             f"work branch: {branch or '(unset)'}  worktree: {worktree or '(unset)'}  base: {base or '(unset)'}",
             f"design:      {design or '(unspecified)'}",
-            f"nodes:       {len(node_ids)}  wave size: {wave_size}",
+            f"nodes:       {len(node_ids)}  phase size: {phase_size}",
         ]
         node_rows: list[dict[str, Any]] = []
         for node in nodes:
             node_id = str(node["id"])
-            wave = wave_of.get(node_id)
-            if wave is None:
-                wave = "?"
+            phase = phase_of.get(node_id)
+            if phase is None:
+                phase = "?"
             status = campaign.node_status(status_state, node_id)
             label = node.get("label")
             suffix = f" — {label}" if label else ""
-            lines.append(f"  w{wave} {node_id} {status}{suffix}")
+            lines.append(f"  w{phase} {node_id} {status}{suffix}")
             node_rows.append(
                 {
                     "id": node_id,
-                    "wave": wave,
+                    "phase": phase,
                     "status": status,
                     "label": label,
                 }
             )
-        for entry in dag_waves:
+        for entry in dag_phases:
             lines.append(
-                f"wave {entry['wave']} [{entry['status']}]: {', '.join(entry['members'])}"
+                f"phase {entry['phase']} [{entry['status']}]: {', '.join(entry['members'])}"
             )
 
         return {
@@ -384,9 +382,9 @@ class StatusVerbs:
             "base": base,
             "design": design,
             "node_count": len(node_ids),
-            "wave_size": wave_size,
+            "phase_size": phase_size,
             "nodes": node_rows,
-            "dag_waves": dag_waves,
+            "dag_phases": dag_phases,
             "paused": self.paused(),
             "lines": lines,
         }
@@ -431,7 +429,7 @@ class StatusVerbs:
         }
 
     def normalize_dag(self) -> dict[str, Any]:
-        """Contract same-ownership DAG chains before the wave projection.
+        """Contract same-ownership DAG chains before the phase projection.
 
         This runs before every projection, so a campaign never schedules an
         un-normalized DAG.  A node with recorded progress stays separate.
@@ -455,10 +453,10 @@ class StatusVerbs:
             if nid in recorded or progressed:
                 node["no_merge"] = True
 
-        wave_size = int(dag.get("concurrency") or DEFAULT_WAVE_SIZE)
-        before_waves = plan_dag_waves(list(dag["nodes"]), wave_size=wave_size)
+        phase_size = int(dag.get("concurrency") or DEFAULT_PHASE_SIZE)
+        before_phases = plan_dag_phases(list(dag["nodes"]), phase_size=phase_size)
         merged_nodes, merge_map = merge_same_own_nodes(nodes)
-        after_waves = plan_dag_waves(merged_nodes, wave_size=wave_size)
+        after_phases = plan_dag_phases(merged_nodes, phase_size=phase_size)
         if merge_map:
             write_json(
                 campaign.dag_path(self.root, branch), {**dag, "nodes": merged_nodes}
@@ -468,15 +466,15 @@ class StatusVerbs:
             "merged": merge_map,
             "before_nodes": len(nodes),
             "after_nodes": len(merged_nodes),
-            "before_waves": len(before_waves),
-            "after_waves": len(after_waves),
-            "waves": [wave.to_dict() for wave in after_waves],
+            "before_phases": len(before_phases),
+            "after_phases": len(after_phases),
+            "phases": [phase.to_dict() for phase in after_phases],
         }
 
-    def _dag_waves(self, branch: str | None) -> tuple[list[dict[str, Any]], str | None]:
-        """Compute the scheduler's wave projection of the campaign DAG.
+    def _dag_phases(self, branch: str | None) -> tuple[list[dict[str, Any]], str | None]:
+        """Compute the scheduler's phase projection of the campaign DAG.
 
-        The DAG is the only authored schedule; waves are derived here from
+        The DAG is the only authored schedule; phases are derived here from
         ``owns``/``depends_on`` and the campaign's ``concurrency`` cap.  A
         malformed or cyclic DAG is reported rather than crashing ``status``.
         """
@@ -485,10 +483,10 @@ class StatusVerbs:
         dag = campaign.load_dag(self.root, branch)
         if not dag or not dag.get("nodes"):
             return [], None
-        wave_size = int(dag.get("concurrency") or DEFAULT_WAVE_SIZE)
+        phase_size = int(dag.get("concurrency") or DEFAULT_PHASE_SIZE)
         try:
             validate_dag(list(dag["nodes"]))
-            planned = plan_dag_waves(list(dag["nodes"]), wave_size=wave_size)
+            planned = plan_dag_phases(list(dag["nodes"]), phase_size=phase_size)
         except SlicemeError as exc:
             return [], str(exc)
         return [w.to_dict() for w in planned], None

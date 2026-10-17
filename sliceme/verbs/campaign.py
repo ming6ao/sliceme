@@ -1,4 +1,4 @@
-"""Campaign worktree, wave, and check verbs for the sliceme engine.
+"""Campaign worktree, phase, and check verbs for the sliceme engine.
 
 Internal module: :class:`sliceme.service.Service` composes this mixin and
 :func:`sliceme.surface.dispatch` stays the one verb facade.
@@ -13,11 +13,10 @@ from typing import Any
 from .. import campaign, gitutil, integrate, sandbox
 from ..gitutil import _changed_entries, _record_error
 from ..ownership import (
-    DEFAULT_WAVE_SIZE,
+    DEFAULT_PHASE_SIZE,
     node_owns,
     owners_of,
-    plan_dag_waves,
-    strongest_gpu_tier,
+    plan_dag_phases,
     validate_dag,
 )
 from ..store import Store
@@ -46,7 +45,7 @@ def _describe_violation(
     if old:
         return f"{status} {old} -> {path} spans nodes {old_owners}/{new_owners}"
     if not new_owners:
-        return f"{status} {path} is outside every wave node"
+        return f"{status} {path} is outside every phase node"
     return f"{status} {path} is claimed by {new_owners}"
 
 
@@ -55,9 +54,9 @@ class CampaignVerbs:
     def create_campaign_workspace(self, *, base: str | None = None) -> dict[str, Any]:
         """Create (or reuse) the campaign worktree for the bound campaign.
 
-        Every wave commits onto this one branch.  It is never recreated and
-        never rebased, so files written by an earlier wave are still present
-        when the next wave runs.
+        Every phase commits onto this one branch.  It is never recreated and
+        never rebased, so files written by an earlier phase are still present
+        when the next phase runs.
         """
         campaign_row = self.campaign
         if campaign_row is None:
@@ -160,13 +159,13 @@ class CampaignVerbs:
             )
         return self._writer_of(self.store.get_campaign(str(row["key"])))
 
-    def create_wave_workspace(
-        self, wave_index: int, *, base: str | None = None
+    def create_phase_workspace(
+        self, phase_index: int, *, base: str | None = None
     ) -> dict[str, Any]:
-        """Compatibility alias: every wave shares the one campaign worktree."""
+        """Compatibility alias: every phase shares the one campaign worktree."""
         return self.create_campaign_workspace(base=base)
 
-    def wave_unit(self, wave_index: int) -> dict[str, Any] | None:
+    def phase_unit(self, phase_index: int) -> dict[str, Any] | None:
         row = self.campaign
         if row is None:
             return None
@@ -186,22 +185,22 @@ class CampaignVerbs:
         recorded = fresh.get("worktree")
         return Path(recorded) if recorded else None
 
-    def record_wave(
+    def record_phase(
         self,
-        wave_index: int,
+        phase_index: int,
         *,
         messages: dict[str, str] | None = None,
         summary: str | None = None,
     ) -> dict[str, Any]:
-        """Record the current wave: conformance, then per-node commits.
+        """Record the current phase: conformance, then per-node commits.
 
-        Every changed path is attributed to exactly one same-wave node by its
+        Every changed path is attributed to exactly one same-phase node by its
         owned directories; each such node gets one commit and a record on the
-        campaign branch.  A wave member that changed no file records an
-        explicit empty marker so the wave still completes.  The commit subject
+        campaign branch.  A phase member that changed no file records an
+        explicit empty marker so the phase still completes.  The commit subject
         falls back to the DAG node ``label``.  A path owned by no node
         (``stray_path``) or by more than one (``ambiguous_path``) fails the
-        wave.  Every violation raises a :class:`SlicemeError` whose ``reason``
+        phase.  Every violation raises a :class:`SlicemeError` whose ``reason``
         attribute is a machine-readable code (``stray_path``,
         ``ambiguous_path``, ``cross_node_rename``, ``missing_description``);
         callers switch on the code, never the text.
@@ -209,32 +208,32 @@ class CampaignVerbs:
         branch = self.config.get("work_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
         if not dag or not dag.get("nodes"):
-            raise SlicemeError("record_wave needs a campaign DAG")
+            raise SlicemeError("record_phase needs a campaign DAG")
         validate_dag(list(dag["nodes"]))
-        wave_size = int(dag.get("concurrency") or DEFAULT_WAVE_SIZE)
-        waves = plan_dag_waves(list(dag["nodes"]), wave_size=wave_size)
-        wave = next((w for w in waves if w.index == int(wave_index)), None)
-        if wave is None:
-            raise SlicemeError(f"unknown wave: {wave_index}")
-        unit = self.wave_unit(wave_index)
+        phase_size = int(dag.get("concurrency") or DEFAULT_PHASE_SIZE)
+        phases = plan_dag_phases(list(dag["nodes"]), phase_size=phase_size)
+        phase = next((w for w in phases if w.index == int(phase_index)), None)
+        if phase is None:
+            raise SlicemeError(f"unknown phase: {phase_index}")
+        unit = self.phase_unit(phase_index)
         if unit is None or not unit.get("worktree"):
             raise SlicemeError(
-                f"wave {wave_index} has no workspace; run `sliceme open` first"
+                f"phase {phase_index} has no workspace; run `sliceme open` first"
             )
         by_id = {str(node["id"]): node for node in dag["nodes"]}
-        members = [by_id[node_id] for node_id in wave.members if node_id in by_id]
-        return self._record_wave_commits(
+        members = [by_id[node_id] for node_id in phase.members if node_id in by_id]
+        return self._record_phase_commits(
             unit,
-            int(wave_index),
+            int(phase_index),
             members,
             messages=messages,
             summary=summary,
         )
 
-    def _record_wave_commits(
+    def _record_phase_commits(
         self,
         unit: dict[str, Any],
-        wave_index: int,
+        phase_index: int,
         members: list[dict[str, Any]],
         *,
         messages: dict[str, str] | None,
@@ -242,11 +241,11 @@ class CampaignVerbs:
     ) -> dict[str, Any]:
         worktree = self.campaign_worktree() or Path(unit["worktree"])
         if not worktree.exists():
-            raise SlicemeError(f"wave worktree missing: {worktree}")
+            raise SlicemeError(f"phase worktree missing: {worktree}")
         gitutil.git(worktree, "add", "-A", check=False)
         # Diff against the current HEAD, not the fork point, so an earlier
-        # wave's committed changes are not re-attributed to this wave.  The
-        # campaign worktree accumulates commits across waves.
+        # phase's committed changes are not re-attributed to this phase.  The
+        # campaign worktree accumulates commits across phases.
         entries = _changed_entries(worktree)
         owners = {str(node["id"]): node_owns(node) for node in members}
         assignment: dict[str, list[str]] = {node_id: [] for node_id in owners}
@@ -283,8 +282,8 @@ class CampaignVerbs:
             reason, detail = violations[0]
             raise _record_error(
                 reason,
-                "wave conformance failed; every changed path must map to exactly one "
-                "wave node's owned directories: "
+                "phase conformance failed; every changed path must map to exactly one "
+                "phase node's owned directories: "
                 + "; ".join(detail for _, detail in violations[:10]),
             )
         messages = messages or {}
@@ -295,11 +294,11 @@ class CampaignVerbs:
             node_id = str(node["id"])
             paths = sorted(set(assignment.get(node_id) or []))
             if not paths:
-                # A wave member that changed no file records an explicit empty
-                # marker: the wave still completes, so the cursor advances
+                # A phase member that changed no file records an explicit empty
+                # marker: the phase still completes, so the cursor advances
                 # instead of returning the same member until the loop cap stops
                 # it.  The marker is not a commit, so it never contributes its
-                # acceptance commands to the wave check vector.
+                # acceptance commands to the phase check vector.
                 self.store.create_record(
                     head_commit=gitutil.head_commit(worktree),
                     summary=None,
@@ -309,7 +308,7 @@ class CampaignVerbs:
                 )
                 empties.append(node_id)
                 continue
-            # The subject is the human description, never a wave prefix.  A
+            # The subject is the human description, never a phase prefix.  A
             # node with changes must have its own description; Sliceme never
             # invents one.  Fall back to the DAG node ``label``, which the
             # planner authors, so the trusted resource records without a
@@ -345,7 +344,7 @@ class CampaignVerbs:
             )
         self.store.conn.commit()
         return {
-            "wave": int(wave_index),
+            "phase": int(phase_index),
             "unit": unit["name"],
             "branch": unit["branch"],
             "worktree": str(worktree),
@@ -375,54 +374,48 @@ class CampaignVerbs:
             self.root, self.store, self.config, dag=dag, campaign=self.campaign_key()
         )
 
-    def current_wave_index(self) -> int:
-        """The campaign's current wave index, read from the engine's own state."""
+    def current_phase_index(self) -> int:
+        """The campaign's current phase index, read from the engine's own state."""
         row = self.require_campaign()
-        index = self._wave_cursor(str(row["work_branch"])).index
+        index = self._phase_cursor(str(row["work_branch"])).index
         if index is None:
-            raise SlicemeError("no current wave in this campaign")
+            raise SlicemeError("no current phase in this campaign")
         return int(index)
 
-    def check_wave(self) -> dict[str, Any]:
-        """Run the trusted checks on the recorded wave's combined tree.
+    def check_phase(self) -> dict[str, Any]:
+        """Run the trusted checks on the recorded phase's combined tree.
 
-        The wave tree is the campaign worktree head after ``record``, so
-        the checks run over the recorded nodes together.  The recorded wave is
-        the planned wave that the newest recorded record belongs to, not the
-        next wave that ``ready`` offers.  A fingerprint that already has a
+        The phase tree is the campaign worktree head after ``record``, so
+        the checks run over the recorded nodes together.  The recorded phase is
+        the planned phase that the newest recorded record belongs to, not the
+        next phase that ``ready`` offers.  A fingerprint that already has a
         terminal verdict is served from the cache.  The check vector is the
-        plane's trusted checks plus the union of the wave members'
-        ``acceptance`` commands, and the wave's strongest GPU tier selects the
-        runner and its fail-closed gate.
+        plane's trusted checks plus the union of the phase members'
+        ``acceptance`` commands.
         """
         row = self.require_campaign()
         branch = str(row["work_branch"])
-        cursor = self._wave_cursor(branch)
+        cursor = self._phase_cursor(branch)
         index, members = cursor.recorded_index, cursor.recorded_members
         if index is None:
-            raise SlicemeError("no current wave in this campaign")
+            raise SlicemeError("no current phase in this campaign")
         dag = campaign.load_dag(self.root, branch) or {}
         by_id = {str(node["id"]): node for node in dag.get("nodes") or []}
         member_nodes = [by_id[m] for m in members if m in by_id]
-        # The acceptance vector is committed-only, but the GPU tier reflects the
-        # wave's full planned membership, so an all-empty wave keeps its tier.
-        planned_members = cursor.recorded_planned_members or members
-        planned_nodes = [by_id[m] for m in planned_members if m in by_id]
         source = str(self.config.get("work_branch") or branch)
         result = self.checks().run(
-            source=f"wave:{index}",
+            source=f"phase:{index}",
             commit=source,
-            checks=self._wave_checks(member_nodes),
-            gpu=strongest_gpu_tier(planned_nodes),
-            wave=index,
+            checks=self._phase_checks(member_nodes),
+            phase=index,
         )
-        return {"wave": index, "members": members, **result}
+        return {"phase": index, "members": members, **result}
 
-    def _wave_checks(self, member_nodes: list[dict[str, Any]]) -> list[Any]:
-        """The trusted checks plus the wave members' acceptance commands.
+    def _phase_checks(self, member_nodes: list[dict[str, Any]]) -> list[Any]:
+        """The trusted checks plus the phase members' acceptance commands.
 
         Order-preserving and de-duplicated by command text: the plane's checks
-        come first, then each node's ``acceptance`` commands in wave order.
+        come first, then each node's ``acceptance`` commands in phase order.
         """
         from ..verifier import acceptance_checks, checks_from_config
 
@@ -437,15 +430,13 @@ class CampaignVerbs:
                     acceptance.append(text)
         return specs + acceptance_checks(acceptance)
 
-    def sandbox_info(self, *, gpu_required: bool = False) -> dict[str, Any]:
+    def sandbox_info(self) -> dict[str, Any]:
         """Resolve and validate the project sandbox gate (never raises)."""
         branch = self.config.get("work_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
         required = sandbox.is_required(dag, self.config)
         try:
-            profile = sandbox.require_sandbox(
-                dag, self.config, root=self.root, gpu_required=gpu_required
-            )
+            profile = sandbox.require_sandbox(dag, self.config, root=self.root)
         except SlicemeError as exc:
             return {"ok": False, "required": required, "error": str(exc)}
         return {

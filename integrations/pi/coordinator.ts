@@ -254,7 +254,7 @@ function writeSessionDescriptor(
 		status: over.status ?? "suspended",
 		reason: over.reason ?? "user",
 		suspended_at: Date.now() / 1000,
-		current_wave: plan.current_wave ?? existing.current_wave ?? null,
+		current_phase: plan.current_phase ?? existing.current_phase ?? null,
 		nodes: plan.nodes ?? existing.nodes ?? {},
 		resume_plan: plan.resume_plan ?? existing.resume_plan ?? {},
 	};
@@ -280,17 +280,17 @@ function planHasWork(plan: any): boolean {
 		((rp[key] ?? []) as string[]).some((id) => !isFinishedStatus(nodes[id] ?? "pending")),
 	);
 	return (
-		pending || (rp.record_wave !== undefined && rp.record_wave !== null)
+		pending || (rp.record_phase !== undefined && rp.record_phase !== null)
 	);
 }
 
 /**
  * The shutdown descriptor status (`docs/sessions.md` §3).
  *
- * A delivered campaign is `completed`; a campaign with every wave finished but
+ * A delivered campaign is `completed`; a campaign with every phase finished but
  * no delivery is `ready`; anything else is `suspended`.  A recorded node is a
  * finished node, because only delivery remains.  Shutdown runs no subprocess,
- * so the last recorded descriptor supplies the wave progress.
+ * so the last recorded descriptor supplies the phase progress.
  */
 function shutdownStatus(ctx: ExtensionContext, branch: string): string {
 	const descriptor = readJson<any>(sessionPath(ctx.cwd, branch), undefined);
@@ -309,7 +309,7 @@ function resumePrompt(branch: string, descriptor: any, plan: any): string {
 	const done = values.filter(isFinishedStatus).length;
 	const lines = [
 		`Resume the suspended Sliceme campaign "${descriptor?.campaign ?? branch}".`,
-		`Progress: wave ${plan?.current_wave ?? "?"} (${done}/${values.length || "?"} nodes done).`,
+		`Progress: phase ${plan?.current_phase ?? "?"} (${done}/${values.length || "?"} nodes done).`,
 	];
 	for (const [node, status] of Object.entries(statuses)) {
 		lines.push(`- ${node}: ${status}`);
@@ -406,8 +406,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"Drive a Sliceme campaign through the engine: start (plane + campaign), plan " +
 			"(design split), status (campaign state), sessions (registered campaigns), resume " +
 			"(resume plan), simulate (combined-tree plan), gc (prune), doctor (health), ready " +
-			"(current-wave node ids and paused), open (create the campaign worktree), record " +
-			"(the current wave as per-node commits), check (combined-tree checks), approve (one " +
+			"(current-phase node ids and paused), open (create the campaign worktree), record " +
+			"(the current phase as per-node commits), check (combined-tree checks), approve (one " +
 			"campaign approval), report (the deterministic report), evidence (the deterministic " +
 			"evidence document), and deliver (push + pull request). The campaign loop runs in " +
 			"the sliceme.campaign workflow resource.",
@@ -417,7 +417,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"run `open` to create the campaign worktree from the base branch, and run " +
 				"the campaign loop through the `sliceme.campaign` workflow resource: call the " +
 				'subagent tool with workflow "sliceme.campaign" and async true.',
-			"The resource reads the current wave from the engine. Do not pass node ids or wave " +
+			"The resource reads the current phase from the engine. Do not pass node ids or phase " +
 				"indices to it; the engine reads its own state.",
 			"Workers are pure editors in the shared campaign worktree; they never run git and " +
 				"never run the test suite. The engine records per-node commits and runs one " +
@@ -430,7 +430,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"confirmation one time. On a confirmation run `approve` and " +
 				"then `deliver`; on a decline stop and keep the campaign for a later attempt.",
 			"A node is ready only once every dependency is done. Use `ready` for the ready node " +
-				"ids, the current wave, and `paused`.",
+				"ids, the current phase, and `paused`.",
 		],
 		// Inactive until `/sliceme` activates it, so a plain session never
 		// advertises the campaign.
@@ -563,7 +563,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (!ctx.hasUI) return;
 			const labels = sessions.map(
 				(s) =>
-					`${s.label ?? s.work_branch} — wave ${s.wave ?? "?"} ` +
+					`${s.label ?? s.work_branch} — phase ${s.phase ?? "?"} ` +
 					`${s.done}/${s.total} ${s.status}`,
 			);
 			const choice = await ctx.ui.select("Sliceme campaigns", labels);

@@ -179,7 +179,7 @@ class PiPackageTests(unittest.TestCase):
         resource = PI_RESOURCE.read_text(encoding="utf-8")
         self.assertIn("CAMPAIGN_TOKEN", resource)
         self.assertIn("CAMPAIGN_RESOURCE_FIELDS", resource)
-        self.assertIn('new Set(["campaign", "waveCap", "nodeCap"])', resource)
+        self.assertIn('new Set(["campaign", "phaseCap", "nodeCap"])', resource)
         for bound in ("1 to 64", "1 to 256"):
             self.assertIn(bound, resource, bound)
         self.assertIn("unsupported fields", resource)
@@ -207,7 +207,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertNotIn("sliceme-unit", worker)
 
     def test_orchestration_duplication_is_deleted(self):
-        # The TypeScript orchestration code and the readiness/wave duplication
+        # The TypeScript orchestration code and the readiness/phase duplication
         # are gone; pi-subagents owns child execution.
         source = PI_COORDINATOR.read_text(encoding="utf-8") + PI_COMMON.read_text(encoding="utf-8")
         for gone in (
@@ -219,9 +219,9 @@ class PiPackageTests(unittest.TestCase):
             "readyNodes",
             "normalizeDir",
             "ownsOverlap",
-            "ensureWaves",
-            "refreshWaves",
-            "reconcileWaves",
+            "ensurePhases",
+            "refreshPhases",
+            "reconcilePhases",
             "dagFingerprint",
             "spawnReviewServer",
             "addressingBatches",
@@ -316,7 +316,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("readJson<any>(controlPath", coordinator)
 
     def test_resume_prompt_reports_progress(self):
-        # Resuming explains the progress (open wave, per-node status) from the
+        # Resuming explains the progress (open phase, per-node status) from the
         # engine's resume plan.  A recorded node is finished, so a
         # recorded-but-undelivered campaign reports `ready`.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
@@ -328,7 +328,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn('status === "recorded"', coordinator)
         self.assertIn("statuses.every(isFinishedStatus)", coordinator)
         self.assertIn("values.filter(isFinishedStatus)", coordinator)
-        self.assertIn("Progress: wave", coordinator)
+        self.assertIn("Progress: phase", coordinator)
         self.assertIn("Resume plan:", coordinator)
         self.assertIn("resumePrompt(branch, descriptor, plan)", coordinator)
 

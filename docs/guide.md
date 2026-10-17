@@ -1,5 +1,10 @@
 # Sliceme guide
 
+> **Status.** This document describes the directory-slice design: one node per
+> directory. The engine change is tracked in
+> [directory-slices-plan.md](./directory-slices-plan.md). The GPU field is
+> removed.
+
 Sliceme *(slice the design into parallel agents)* coordinates parallel coding
 agents around one campaign. A campaign is a machine-readable DAG, plan-time
 **directory ownership**, git worktrees, and fingerprint-pinned delivery as a
@@ -20,8 +25,8 @@ order. Sliceme adds a deterministic layer over git:
 - it isolates the campaign in one git worktree, on a separate accumulation
   branch;
 - it assigns each DAG node disjoint **directories** at plan time;
-- it serializes overlapping directory subtrees into waves;
-- it checks each recorded wave against a content fingerprint;
+- it serializes overlapping directory subtrees into phases;
+- it checks each recorded phase against a content fingerprint;
 - it delivers the campaign as one pull request against the default branch.
 
 The model drafts the plan. The model never decides at run time whether a node
@@ -45,12 +50,13 @@ blocks another node.
 | **Work branch** | The branch `feat/<name>`. It is the campaign identity and the pull request head. |
 | **Base branch** | The branch the pull request lands on (the default branch, `main`). It is recorded once at `start`. |
 | **Coordinator** | The top-level pi session that owns the plan and launches the campaign resource. |
-| **Node** | One DAG unit of work with `owns`, `depends_on`, `acceptance`, `gpu`. |
+| **Slice** | One node, one directory. The slice is the scheduling unit, the worker unit, and the commit unit. |
+| **Node** | One directory slice with `dir`, `tasks`, `depends_on`, and `acceptance`. |
 | **Unit** | *(retired)* The campaign owns the one worktree and branch. |
 | **Ownership** | The repo-relative **directories** a node may change, compared by subtree overlap. |
 | **Conformance** | Check that every changed path lies inside the node's owned directories. |
 | **Record** | A committed node awaiting delivery. |
-| **Wave** | A derived batch of nodes with disjoint owned subtrees that may run concurrently; also the recording order. |
+| **Phase** | A derived batch of nodes with disjoint owned subtrees that may run concurrently; also the recording order. |
 | **Check runner** | The single synchronous combined-tree runner that runs one check set and caches the verdict. |
 | **Workflow resource** | `sliceme.campaign`, the trusted loop that pi-subagents runs. |
 | **Fingerprint** | Content hash of (tree, command vector, toolchain, policy, sandbox, checks, source) that pins a check result. |
@@ -61,11 +67,12 @@ blocks another node.
 Sliceme decides ownership at plan time. There is no runtime declare step, no
 lease, and no operation taxonomy.
 
-Every DAG node declares `owns`: repo-relative **directories**. A node must name
-the deepest directory that contains each path it will add, modify, or delete.
+Every DAG node declares `dir`: one repo-relative **directory**. A node must
+name the deepest directory that contains each path it will add, modify, or
+delete. A node is one directory slice.
 
 ```jsonc
-{ "id": "w1", "owns": ["src/api", "src/api/v1"], "depends_on": [] }
+{ "id": "src/api", "dir": "src/api", "tasks": ["add the parser"], "depends_on": [] }
 ```
 
 Normalization:
@@ -78,10 +85,15 @@ Normalization:
 
 Sliceme rejects a kind prefix (`dir:`, `file:`, `symbol:`, `api:`, `schema:`,
 `config:`, `migration:`, `infra:`, `test:`) when the coordinator projects the
-DAG. `owns` accepts repository-relative directories only. It also rejects an
-empty or blank `owns` entry. A plan that tries to own a single file, or that
-leaves a blank entry, fails loudly. A node that changes no file may omit `owns`,
-and an empty `owns` list stays valid.
+DAG. `dir` accepts one repository-relative directory only. It also rejects an
+empty or blank `dir`. A plan that tries to own a single file, or that leaves a
+blank entry, fails loudly. A node that changes no file may omit `dir`.
+
+**One node, one directory, one visit.** The planner splits a multi-directory
+node into one node per directory. The planner also merges two nodes that share a
+directory into one node, so every directory has exactly one visit. The engine
+rejects a plan that breaks either rule. See
+[directory-slices-plan.md](./directory-slices-plan.md).
 
 ### The conflict rule
 
@@ -98,41 +110,38 @@ src/api       vs src/service    -> ok       (siblings)
 src/models    vs src/model      -> ok       (no token similarity tier)
 ```
 
-One more rule applies to the GPU. A node whose `gpu` field is not `none`
-conflicts with **every** other node. A GPU node therefore lands in a wave of its
-own, and exactly one GPU node runs at a time.
-
-There is no fuzzy matching. A reader can explain the concurrency from the
-`owns` sets alone.
+There is no fuzzy matching. A reader can explain the concurrency from the `dir`
+values alone.
 
 ### Conformance: the runtime guarantee
 
-Sliceme enforces the guarantee when the coordinator records the wave:
+Sliceme enforces the guarantee when the coordinator records the phase:
 
 ```text
 changed = git diff --name-status HEAD   (in the campaign worktree)
-violations = [p for p in changed if p maps to no single wave node]
+owner(p) = the deepest `dir` that contains p, across all nodes
+violations = [p for p in changed if owner(p) is not a current-phase node]
 ```
 
 A violation raises an error and Sliceme creates no commit. The coordinator then
-widens the `owns` of the node or adds a `depends_on` edge, and respawns. This
-rule keeps a wave auditable without runtime locking.
+corrects the `dir` or adds a `depends_on` edge, and runs the node again. The
+deepest-owner rule keeps a phase auditable without runtime locking.
 
 ### Authoring guidance
 
-- Own the **deepest** directory that contains the work. A parent directory
-  serializes its whole subtree.
-- Keep same-wave `owns` disjoint.
-- Merge nodes that own the same directory and sit on one dependency chain into
-  one node. One node owns one directory and completes the whole cohesive
-  change. Set `no_merge` when a node must stay separate for its own gate.
+- Give each node the **deepest** directory that contains the work. A parent
+  directory serializes its whole subtree.
+- Keep same-phase directories disjoint.
+- Split a node that needs two directories into two nodes, one per directory.
+- Merge two nodes that would visit one directory into one node. Prefer the
+  interface-first order: settle the interface, then the caller.
 - Route shared build files (`BUILD`, `Cargo.toml`, lockfiles) to an explicit
   **aggregation node**. Every touched part depends on that node, and the node
   owns the shared directory. Use `.` for root files.
 - Express ordering that same-directory serialization does not give you with
   `depends_on`. Never rely on a runtime queue.
 
-## 4. The plan: `dag.json` and derived waves
+## 4. The plan: `dag.json` and derived phases
 
 `dag.json` is canonical. There is no `plan.md`. It lives under the
 git-excluded `.sliceme/` directory, and Sliceme never commits it.
@@ -150,12 +159,12 @@ agree on one branch.
   "design": "DESIGN.md",
   "concurrency": 4,
   "nodes": [
-    { "id": "w1", "label": "runtime-core",
+    { "id": "backends/cpu", "label": "runtime-core",
       "goal": "Tensor and the CPU reference backend for all of kernels.h",
-      "owns": ["backends/cpu", "src"],
+      "dir": "backends/cpu",
+      "tasks": ["add the tensor type", "add the CPU kernels"],
       "depends_on": [],
-      "acceptance": ["bazel test //... --test_tag_filters=-gpu"],
-      "gpu": "none" }
+      "acceptance": ["bazel test //..."] }
   ]
 }
 ```
@@ -165,27 +174,27 @@ agree on one branch.
 | `id` | Worker id; also the log suffix (`worker_<id>.log`). |
 | `label` | Human label for the report and dashboard. |
 | `goal` | The prompt seed handed to the worker. |
-| `owns` | Directories the node owns, at the deepest subdirectory that contains each path (`src/api`). Directory subtrees are the only conflict unit. |
+| `dir` | The one directory the node owns, at the deepest subdirectory that contains each path (`src/api`). Directory subtrees are the only conflict unit. |
+| `tasks` | The ordered work items inside the directory; the worker does them in order. |
 | `depends_on` | Node ids that must reach `recorded` before this node is `ready`. |
 | `acceptance` | Commands the check runner runs for this node. |
-| `gpu` | `none`, `T1`, or `T2`; a GPU node runs in a wave of its own. |
-| `concurrency` | Per-wave size cap. Defaults to 3 when absent. |
+| `concurrency` | Per-phase size cap. Defaults to 3 when absent. |
 
-**Phases never schedule; waves do, and Sliceme derives the waves.** A graph plus
+**Sliceme derives the phases from the DAG.** A graph plus
 the rules
 
 ```text
-wave(n)  :=  max(wave(d) + 1 for d in n.depends_on), then the earliest wave with
-             room (<= concurrency) and no directory-subtree conflict and no GPU node
-ready(n) :=  n is a member of the current wave, not recorded, not running
+phase(n)  :=  max(phase(d) + 1 for d in n.depends_on), then the earliest phase with
+             room (<= concurrency) and no directory-subtree conflict
+ready(n) :=  n is a member of the current phase, not recorded, not running
 ```
 
-are the whole scheduler. The wave is the one scheduling gate: every dependency
-lives in an earlier wave, so a wave's members start together and the engine
-records and checks one wave at a time. The wave also caps how many nodes run at
+are the whole scheduler. The phase is the one scheduling gate. Every dependency
+lives in an earlier phase. A phase's members start together, and the engine
+records and checks one phase at a time. The phase also caps how many nodes run at
 once. `done` means **checked and recorded** onto
-the campaign worktree. Every wave works in the same worktree, so a later wave
-already sees the files of the previous wave without a merge or a rebase. To
+the campaign worktree. Every phase works in the same worktree, so a later phase
+already sees the files of the previous phase without a merge or a rebase. To
 batch the pull request until the end therefore does not weaken `depends_on`.
 
 ## 5. Orchestration
@@ -203,9 +212,9 @@ COORDINATOR  (top-level pi session — the session the user sees)
  │  tool: sliceme (engine verbs only)
  ├── PLANNER       (sliceme-planner, reads the design, writes dag.json)
  └── sliceme.campaign workflow resource
-       ├── WORKER_*  (sliceme-worker, one per ready DAG node, in the campaign worktree)
-       │               edit owned dirs only -> stop  (never git, never GPU)
-       └── REVIEWER  (builtin reviewer, one per recorded wave)
+       ├── WORKER_*  (sliceme-worker, one per ready directory node, in the campaign worktree)
+       │               edit the owned directory only -> stop  (never git)
+       └── REVIEWER  (builtin reviewer, one per recorded phase)
                        reads the recorded evidence; never edits
 ```
 
@@ -225,23 +234,23 @@ field.
 | Field | Type | Rule |
 |---|---|---|
 | `campaign` | string, optional | `[A-Za-z0-9._-]{1,128}` |
-| `waveCap` | integer, optional | 1 to 64 |
+| `phaseCap` | integer, optional | 1 to 64 |
 | `nodeCap` | integer, optional | 1 to 256 |
 
 The `campaign` field is the only variable text in a command. `resolve` validates
 the field against the strict pattern before it builds a command.
 
 A host grant binds an exact key and command pair. The `resolve` call cannot know
-a node id or a wave index before the campaign runs. Therefore no granted command
-carries a node id or a wave index. The engine reads the current wave and the
+a node id or a phase index before the campaign runs. Therefore no granted command
+carries a node id or a phase index. The engine reads the current phase and the
 finished nodes from its own state. `resolve` uses the absolute engine path
 captured in `session_start`; a relative path fails, because the workflow `cwd`
 is the target repository.
 
 | Key | Command | Use |
 |---|---|---|
-| `status` | `<python> <engine> --json status <campaign>` | read campaign state, waves, and `paused` |
-| `ready` | `<python> <engine> --json ready <campaign>` | get the ready node ids and the current wave |
+| `status` | `<python> <engine> --json status <campaign>` | read campaign state, phases, and `paused` |
+| `ready` | `<python> <engine> --json ready <campaign>` | get the ready node ids and the current phase |
 | `record` | `<python> <engine> --json record <campaign>` | commit the finished nodes |
 | `check` | `<python> <engine> --json check <campaign>` | run the combined-tree checks |
 
@@ -252,20 +261,20 @@ the only gate.
 ### Lifecycle
 
 ```text
-sliceme start <design>      # derive the work branch; planner -> dag.json + waves
+sliceme start <design>      # derive the work branch; planner -> dag.json + phases
 sliceme open                # fetch main; create the worktree from origin/main
         │
         ▼
 resource loop
-  1. ready                 current-wave nodes whose dependencies reach done
+  1. ready                 current-phase nodes whose dependencies reach done
   2. paused?  -> stop      return the paused state
   3. no ready node? -> stop
   4. runs.run per node     one sliceme-worker per ready node
-  5. runs.all              wait for the wave children
+  5. runs.all              wait for the phase children
   6. record                per-node commits on the campaign worktree
   7. check                 the combined-tree checks (evidence)
   8. runs.run reviewer     one builtin reviewer reads the recorded evidence
-  9. caps?    -> stop      waveCap or nodeCap reached
+  9. caps?    -> stop      phaseCap or nodeCap reached
         │  repeat
         ▼
 evidence + report ──► user confirms ──► approve ──► deliver
@@ -277,23 +286,23 @@ evidence + report ──► user confirms ──► approve ──► deliver
    the work branch and the **base branch** (the default branch, `main`)
    for the campaign. The work branch is never `main`, `master`, or the
    repository default. The planner then writes `dag.json`, and the engine
-   projects it into waves.
-2. **`ready`** returns the current wave's members that are neither recorded nor
-   running, plus the wave index and `paused`. The wave is the gate, so the
-   engine records and checks one wave at a time.
+   projects it into phases.
+2. **`ready`** returns the current phase's members that are neither recorded nor
+   running, plus the phase index and `paused`. The phase is the gate, so the
+   engine records and checks one phase at a time.
 3. **The resource** starts one worker per ready node with the `sliceme-worker`
    agent. A worker is a one-shot pure editor in the one shared campaign
    worktree. Sliceme reuses the worktree, so it already contains every earlier
-   wave's files.
-4. **`record`** commits the current wave onto the campaign
+   phase's files.
+4. **`record`** commits the current phase onto the campaign
    branch, with one commit per node. Sliceme attributes the commit by owned
    directories. Nothing lands on the base branch.
 5. **`check`** runs the plane's trusted checks once over the recorded
-   wave tree. One synchronous runner writes one terminal row, and the cache
+   phase tree. One synchronous runner writes one terminal row, and the cache
    serves an unchanged fingerprint.
 6. **The reviewer** reads the recorded evidence of step 5 and reports findings.
    The reviewer never edits. The loop checks after `record`, because a
-   pi-subagents acceptance gate would test the mixed wave worktree.
+   pi-subagents acceptance gate would test the mixed phase worktree.
 7. **`evidence`** writes the deterministic evidence document (the commits, the
    checks, the diffs, and the worker logs). The coordinator runs it after the
    resource returns `complete`; the Markdown document is the pull request body.
@@ -304,19 +313,19 @@ evidence + report ──► user confirms ──► approve ──► deliver
    The coordinator asks the user to confirm one time.
 9. **`approve`** records the one campaign approval. The user
    makes the decision, and the coordinator records it with the engine tool.
-10. **`deliver`** runs after every wave completes and the user confirms. It runs
+10. **`deliver`** runs after every phase completes and the user confirms. It runs
     the trusted checks, pushes the work branch, and opens one pull request
     against the base branch (`main`). The work branch is never the default
     branch.
 
 The coordinator may invoke the planner again or edit `dag.json` after a
-failure. A coordinator-added `depends_on` edge or a widened `owns` changes the
-DAG projection, so the next `status` or `ready` reprojects the waves.
+failure. A coordinator-added `depends_on` edge or a corrected `dir` changes the
+DAG projection, so the next `status` or `ready` reprojects the phases.
 
 ### Cleanup
 
 Cleanup is destructive, so the agent cannot choose it without a flag. There is
-no per-wave cleanup: Sliceme never removes files between waves. The `deliver`
+no per-phase cleanup: Sliceme never removes files between phases. The `deliver`
 action takes `--cleanup worktrees`. That option removes the campaign worktree,
 drops the work branch, and clears scratch. It keeps the report and the
 `dag.json` record. `cleanup: all` also removes every other campaign file: the
@@ -332,7 +341,7 @@ and its branch.
 
 ### 6.1 The single check runner
 
-The engine has one check runner. It runs one check set over a wave tree and
+The engine has one check runner. It runs one check set over a phase tree and
 returns the result. It holds no lease and queues no work.
 
 ```text
@@ -348,23 +357,23 @@ Semantics:
 - **Dedupe by fingerprint.** A run whose `(tree, commands, toolchain, policy,
   sandbox, checks, source)` fingerprint already has a terminal verdict returns
   the cached row. The runner does not run the commands again.
-- **The wave tree.** The checks run over the recorded wave head, so they judge
+- **The phase tree.** The checks run over the recorded phase head, so they judge
   the nodes together. Delivery runs the same runner with `source=deliver`.
 - **Sandboxed.** Each run resolves the sandbox profile and wraps every command
   (see 6.2).
 - **No queue.** There is no `jobs` table, no lease, and no runner process. The
   recorder holds the campaign lock, so recording and checks never interleave.
 
-The `verdicts` table (`docs/database.md`) records the fingerprint, the wave, the
+The `verdicts` table (`docs/database.md`) records the fingerprint, the phase, the
 commit, the status, the results, and the timing.
 
 ### 6.2 Sandbox profiles and project manifests
 
 `sliceme/sandbox.py` defines a `Sandbox`: a built-in mode (`none`, `bwrap`,
 `unshare`) or a project `command` prefix. The profile also holds the network,
-read-only, and writable policy, the `setup` commands, and an optional `gpu`
-runner. Sliceme folds `Sandbox.digest()` into the check fingerprint, so a
-stricter isolation or a changed `setup` invalidates cached verdicts.
+read-only, and writable policy, and the `setup` commands. Sliceme folds
+`Sandbox.digest()` into the check fingerprint, so a stricter isolation or a
+changed `setup` invalidates cached verdicts.
 
 Resolution precedence: explicit `--sandbox`, then `dag.json.sandbox`, then
 `policy.sandbox`, then a discovered project manifest, then `none`. `none` is
@@ -382,8 +391,7 @@ tracked manifest (`sliceme.sandbox.json`, `.sliceme-sandbox.json`, or
   "network": false,
   "readonly_repo": true,
   "writable": ["/tmp", ".cache"],
-  "setup": ["tools/setup-deps.sh"],               // once per snapshot, before acceptance
-  "gpu": { "command": ["sliceme-gpu", "--tier", "{tier}", "--"] }
+  "setup": ["tools/setup-deps.sh"]                // once per snapshot, before acceptance
 }
 ```
 
@@ -392,28 +400,10 @@ The **planner** locates the manifest and records `"sandbox": {"path": ...}` in
 ships no manifest. The check runner resolves the gate before every run. It
 refuses to continue on failure.
 
-### 6.3 GPU isolation
+### 6.3 One campaign worktree for all phases
 
-The scheduler owns the GPU lane. The `ownership.py` projection makes a GPU node
-a conflict with every other node, so a GPU node lands in a wave of its own. One
-GPU node runs at a time. There is no separate serialized broker.
-
-`tools/gpu.sh` is the host runner of **Sliceme**: a host `flock`, a
-foreign-process gate, and a tiered timeout. Sliceme ships the runner with the
-package and invokes it by resolved path, not as `tools/gpu.sh` relative to the
-target. The check runner composes the runner outside the project sandbox for
-GPU jobs:
-
-```text
-check runner -> sliceme gpu runner (host lock) -> project sandbox -> acceptance
-```
-
-A project can override the GPU invocation through `gpu.command` in its manifest.
-
-### 6.4 One campaign worktree for all waves
-
-Same-wave nodes own **disjoint directory subtrees** and one GPU node runs alone,
-so they cannot author a file collision. All waves share **one campaign
+Same-phase nodes own **disjoint directory subtrees**, so they cannot author a
+file collision. All phases share **one campaign
 worktree** on a separate branch. The worktree is both the isolation unit and the
 accumulation unit:
 
@@ -421,34 +411,34 @@ accumulation unit:
 open                          -> ONE work branch feat/<name> + worktree from origin/main
 record                        -> conformance-by-ownership -> per-node commits
 check                         -> the one check runner over the combined tree
-(no merge per wave)           -> open N+1 in the same worktree
+(no merge per phase)           -> open N+1 in the same worktree
 evidence + report             -> the deterministic evidence and report
 approve                       -> one campaign approval, after the user confirms
 deliver                       -> push the work branch and open a pull request against main
 ```
 
-The recorder (`Service.record_wave`) stages the worktree and attributes every
-changed path to exactly one same-wave node by `owns`. It rejects an unowned,
+The recorder (`Service.record_phase`) stages the worktree and attributes every
+changed path to exactly one same-phase node by its `dir`. It rejects an unowned,
 ambiguous, or **cross-node rename** change. It then creates one commit and one
 recorded record per node on the work branch. The commit subject falls back
-to the DAG node `label`. A wave member that changed no file records an explicit
-empty marker, so the wave still completes. The recorder diffs against the
-current `HEAD`, so it never re-attributes a change from an earlier wave.
+to the DAG node `label`. A phase member that changed no file records an explicit
+empty marker, so the phase still completes. The recorder diffs against the
+current `HEAD`, so it never re-attributes a change from an earlier phase.
 
 Each failure carries a reason code (`stray_path`, `ambiguous_path`,
 `cross_node_rename`, or `missing_description`), so a caller switches on the code
 and never parses the message.
 
 The recorder holds the campaign lock, so it serializes with campaign creation
-and other records. Sliceme reuses the worktree, so a later wave already sees
-every earlier wave's files. Nothing lands on the base branch until a human
+and other records. Sliceme reuses the worktree, so a later phase already sees
+every earlier phase's files. Nothing lands on the base branch until a human
 merges the pull request that the single `deliver` step opens.
 
 Workers are pure editors. They never run `git add` or `git commit`, because the
 shared index is not safe for multiple processes. They never run the suite in
 the shared tree. The check runner snapshots the tree and runs the check set.
 
-### 6.5 Several campaigns in one plane
+### 6.4 Several campaigns in one plane
 
 A plane is one repository root with a `.sliceme/` directory. A plane holds the
 one SQLite database, the one delivery lock, and the default branch. Several
@@ -491,21 +481,21 @@ campaign. The workflow lives in the prompt guidelines of the tool and in
 | **Coordinator** | no | owns the plan (`dag.json`), starts the resource, records the approval, calls `deliver` once at the end, writes the evidence and the report |
 | **Planner** | no | reads the design, writes `dag.json` |
 | **Worker** | no (pure editor) | edit owned directories only, then stop; never git, never commit |
-| **Reviewer** | no (read-only) | the builtin reviewer judges the recorded wave evidence, never edits |
+| **Reviewer** | no (read-only) | the builtin reviewer judges the recorded phase evidence, never edits |
 
 The extension registers `sliceme-planner` and `sliceme-worker` through the
 pi-subagents runtime-agent registry. Each definition carries its `tools:`
 allowlist: the worker reads and edits files and runs shell commands, and the
 planner reads and writes files. The worker never gets the coordinator verbs. The
-resource launches the builtin `reviewer` for the wave review.
+resource launches the builtin `reviewer` for the phase review.
 
 ### Worker contract
 
 1. You edit the single shared campaign worktree, launched by the resource.
-2. Edit only files under the directories your DAG node owns. The wave recorder
+2. Edit only files under the directory your DAG node owns. The phase recorder
    enforces this rule: it rejects a changed path outside the owned directories.
 3. Do **not** run `git`, do **not** commit, and do **not** run the test suite.
-   Stop after the edits. The engine records the wave and runs the
+   Stop after the edits. The engine records the phase and runs the
    combined-tree checks.
 4. Never run `deliver`, `git merge`, or `git push`.
 
@@ -514,7 +504,7 @@ resource launches the builtin `reviewer` for the wave review.
 Start a campaign with `/sliceme [DESIGN.md]` in pi. Run `start`, `plan`, and
 `open`, then start the `sliceme.campaign` resource with `async: true`.
 The resource drives `ready`, `record`, and `check`
-for each wave. When it returns `complete`, run `evidence` and `report`,
+for each phase. When it returns `complete`, run `evidence` and `report`,
 show the summary and the pull request details to the user, and ask for
 confirmation one time. Stop at the human gates: an explicit suspension and the
 one confirmation before `deliver`.
@@ -525,10 +515,10 @@ one confirmation before `deliver`.
 |---|---|
 | Worker produces no record / fails the checks | The coordinator retries (bounded), splits the node, or stops. |
 | Reviewer reports a problem | The coordinator retries, splits the node, or stops, with the findings attached. |
-| A wave record changes a path outside every node's `owns` | The record is rejected; the coordinator widens `owns` or adds a `depends_on` edge and respawns. |
+| A phase record changes a path outside its node's `dir` | The record is rejected; the coordinator corrects the `dir` or adds a `depends_on` edge and runs the node again. |
 | Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; findings surface. Nothing is pushed. |
 | Orchestrator crash | The pi-subagents children are children of the coordinator, so a crash kills them. On resume, a node left `running` stays `running` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. Git and `state.db` win over the session descriptor. |
-| User suspends (`/suspend`) | The pause flag stops new work. The adapter aborts the in-flight turn, which stops the current child within seconds. The interrupted node stays `running`, and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree stays `running`, the wave is re-recorded, and unchanged records re-verify from the check cache. |
+| User suspends (`/suspend`) | The pause flag stops new work. The adapter aborts the in-flight turn, which stops the current child within seconds. The interrupted node stays `running`, and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree stays `running`, the phase is re-recorded, and unchanged records re-verify from the check cache. |
 
-Caps: `concurrency` (the wave size), the resource's `waveCap` and `nodeCap`
+Caps: `concurrency` (the phase size), the resource's `phaseCap` and `nodeCap`
 fields, and the per-command check timeout bound the cost of each campaign.

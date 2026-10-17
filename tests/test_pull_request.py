@@ -69,9 +69,9 @@ class PullRequestCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def record_one(self):
-        unit = self.svc.create_wave_workspace(0)
+        unit = self.svc.create_phase_workspace(0)
         (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
-        self.svc.record_wave(0, messages={"w1": "test"})
+        self.svc.record_phase(0, messages={"w1": "test"})
         return unit
 
     def approve(self):

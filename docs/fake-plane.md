@@ -9,11 +9,11 @@ browser review client, so the fixture targets the reduced review surface.
 ## What the script builds
 
 The script creates a small git repository. It also creates a campaign worktree
-and three waves. Each wave records commits on the work branch.
+and three phases. Each phase records commits on the work branch.
 
 The plane contains:
 
-- five commits across three waves;
+- five commits across three phases;
 - nine changed files;
 - check evidence for each commit;
 - campaign approvals;

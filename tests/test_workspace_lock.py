@@ -1,7 +1,7 @@
 """One workspace lock serializes campaign creation, record, and delivery.
 
 ``docs/terminology-and-simplification-plan.md`` S6: the campaign-creation,
-wave-record, and delivery paths all take the single ``workspace.lock``; there is
+phase-record, and delivery paths all take the single ``workspace.lock``; there is
 no separate delivery lock.
 """
 

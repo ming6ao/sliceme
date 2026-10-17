@@ -1,5 +1,10 @@
 # Sliceme reference
 
+> **Status.** This document describes the directory-slice design: one node per
+> directory. The engine change is tracked in
+> [directory-slices-plan.md](./directory-slices-plan.md). The GPU field is
+> removed.
+
 Action reference, module map, state layout, verification semantics, tests, and
 deliberate gaps. For the model and workflow, see [guide.md](./guide.md).
 
@@ -11,18 +16,18 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | Action | Purpose |
 |---|---|
 | `start` (alias `init`) | Bootstrap the plane and a campaign for the current directory (idempotent). |
-| `status` | The campaign state: records, waves, and checks. The default is the dense summary and `--verbose` is the full dump. |
+| `status` | The campaign state: records, phases, and checks. The default is the dense summary and `--verbose` is the full dump. |
 | `sessions` | List the registered campaigns from their session descriptors. |
 | `resume` | Reconcile a suspended campaign and return its resume plan. |
-| `simulate` | Plan the waves and verify the combined tree. |
+| `simulate` | Plan the phases and verify the combined tree. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
-| `ready` | The current-wave node ids, the wave index, and `paused`. |
+| `ready` | The current-phase node ids, the phase index, and `paused`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
 | `deliver` | Push the work branch and open the delivery pull request against the base branch after the confirmation. |
-| `check` | Run the synchronous combined-tree checks for the current wave. |
+| `check` | Run the synchronous combined-tree checks for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
-| `record` | Record the current wave: conformance + per-node commits. |
+| `record` | Record the current phase: conformance + per-node commits. |
 | `approve` | Record one campaign approval. |
 | `report` | Write the deterministic campaign report. |
 | `evidence` | Write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs. |
@@ -77,9 +82,9 @@ sliceme status [--unit U] [--short] [--dense] [--verbose] [--campaign REF]
 ```
 
 The default human output is the **dense summary**. It has a header, one line per
-node in DAG order, and one line per wave. The header shows `campaign`, the work
-branch, the worktree path, and `base`, plus `design`, node count, and wave size.
-A node line shows `w<wave> <id> <status>` plus the node label. A wave line shows
+node in DAG order, and one line per phase. The header shows `campaign`, the work
+branch, the worktree path, and `base`, plus `design`, node count, and phase size.
+A node line shows `w<phase> <id> <status>` plus the node label. A phase line shows
 the index, the status, and the member ids.
 
 `--dense` asks for it explicitly and `--verbose` prints the full nested dump
@@ -88,24 +93,24 @@ the summary as JSON (including `lines`). `--short` prints only the bound
 campaign's name (or key). `--unit U` shows one campaign's dashboard.
 
 The nested dump (`--verbose`, or `--json` without `--dense`) returns
-`dag_waves` (the scheduler's wave plan), `ready` (the ready node ids), `paused`,
+`dag_phases` (the scheduler's phase plan), `ready` (the ready node ids), `paused`,
 `checks` (check counts), and the campaign writer's columns (`node`, `log`,
 `record`, `verification`). The dense summary returns the header and the
-node/wave lines instead.
+node/phase lines instead.
 
 Every projection first **normalizes** `dag.json`. Sliceme contracts
-same-ownership nodes, then computes the waves. A campaign can never schedule an
-un-normalized DAG. Two nodes merge when they share an owned directory and one
+same-directory nodes, then computes the phases. A campaign can never schedule an
+un-normalized DAG. Two nodes merge when they share a directory and one
 depends on the other. The survivor is the node with the lowest topological
 index.
 
-The merged node owns the union of the directories, waits on the union of the
-external dependencies, and concatenates the goals and the acceptance commands.
-Sliceme rewrites an absorbed id in any `depends_on` to the survivor. It records
-the absorbed ids in `merged_from`. Sliceme protects a node that has a recorded
-record or a status other than `pending`. Sliceme reports the result as
-`dag_merge` (`merged`, `before_nodes`, `after_nodes`, `before_waves`,
-`after_waves`).
+The merged node owns the directory, waits on the union of the
+external dependencies, and concatenates the goals, the tasks, and the acceptance
+commands. Sliceme rewrites an absorbed id in any `depends_on` to the survivor. It
+records the absorbed ids in `merged_from`. Sliceme protects a node that has a
+recorded record or a status other than `pending`. Sliceme reports the result as
+`dag_merge` (`merged`, `before_nodes`, `after_nodes`, `before_phases`,
+`after_phases`).
 
 ### `sessions`
 
@@ -115,7 +120,7 @@ sliceme sessions
 
 List the registered campaigns from their descriptor files. This is the engine
 view that a second terminal uses. Each entry carries `work_branch`, `campaign`,
-`label`, `status`, `wave`, `done`, `total`, and `session_file`.
+`label`, `status`, `phase`, `done`, `total`, and `session_file`.
 
 ### `resume`
 
@@ -133,7 +138,7 @@ nothing. Git and the database win over the descriptor.
 sliceme simulate [--no-checks] [--campaign REF]
 ```
 
-Group recorded records into DAG waves, materialize each wave's combined tree,
+Group recorded records into DAG phases, materialize each phase's combined tree,
 and run the configured checks once over the combined result. `--no-checks`
 plans only. The simulation changes no record, no branch, and no base branch.
 
@@ -162,13 +167,13 @@ and one `ok` flag.
 sliceme ready [--campaign REF]
 ```
 
-Returns `campaign`, `ready` (the current-wave node ids that are neither
-recorded nor running), `wave` (the current wave index), and `paused`. The
-workflow resource polls this verb, so its fields are the loop contract. The wave
-is the one scheduling gate: every dependency lives in an earlier wave, so a node
-is ready once the engine reaches its wave and the node itself is neither
-recorded nor running. Sliceme scopes the result to the current wave, so a caller
-spawns and records one wave per call. A missing DAG reports no ready nodes.
+Returns `campaign`, `ready` (the current-phase node ids that are neither
+recorded nor running), `phase` (the current phase index), and `paused`. The
+workflow resource polls this verb, so its fields are the loop contract. The phase
+is the one scheduling gate. Every dependency lives in an earlier phase. A node
+is ready once the engine reaches its phase, and the node is neither
+recorded nor running. Sliceme scopes the result to the current phase, so a caller
+spawns and records one phase per call. A missing DAG reports no ready nodes.
 
 ### `plan`
 
@@ -234,13 +239,13 @@ the forge.
 sliceme check [--campaign REF]
 ```
 
-Run the plane's trusted checks once over the current wave's combined tree. The
-wave tree is the campaign worktree head after `record`, so the checks run
-over the recorded nodes together. The verb reports `wave`, `members`, and the
+Run the plane's trusted checks once over the current phase's combined tree. The
+phase tree is the campaign worktree head after `record`, so the checks run
+over the recorded nodes together. The verb reports `phase`, `members`, and the
 row (`fingerprint`, `status`, `duration`, `exit_code`, `output`, `results`,
 `cached`). The cache serves a fingerprint that already has a terminal verdict,
-so a resumed node reads the cache. The verb always acts on the current wave; the
-engine reads the wave index from its own state.
+so a resumed node reads the cache. The verb always acts on the current phase; the
+engine reads the phase index from its own state.
 
 ### `open`
 
@@ -252,7 +257,7 @@ Create (or reuse) the single **campaign worktree** and its branch
 (`work_branch`, for example `feat/<name>`), idempotently. It fetches the base
 branch and bases the worktree on `origin/<base_branch>`, then reports a fallback
 when the remote or the base is absent. Sliceme uses the same worktree for every
-wave and never recreates it between waves.
+phase and never recreates it between phases.
 
 ### `record`
 
@@ -260,19 +265,20 @@ wave and never recreates it between waves.
 sliceme record
 ```
 
-Record the current wave. Ownership syntax is a repository-relative directory
+Record the current phase. Ownership syntax is one repository-relative directory
 path; Sliceme also accepts a trailing slash. Sliceme rejects a kind prefix
-(`dir:`, `file:`, `symbol:`, …) and an empty or blank entry when it projects the
-DAG. A node that changes no file may omit `owns`. `record` stages the campaign worktree, enforces
-conformance-by-ownership for the wave, and creates one commit + recorded record
-per changed node. Sliceme rejects unowned, ambiguous, or cross-node-rename
-changes, and records an explicit empty marker for a member that changed no file.
-It diffs against the current `HEAD`, so it never re-attributes an earlier wave's
+(`dir:`, `file:`, `symbol:`, …) and an empty or blank directory when it projects
+the DAG. A node that changes no file may omit `dir`. `record` stages the
+campaign worktree, maps every changed path to the deepest `dir`, enforces
+conformance-by-ownership for the phase, and creates one commit + recorded record
+per changed node. Sliceme rejects a stray, ambiguous, or cross-node-rename
+change, and records an explicit empty marker for a member that changed no file.
+It diffs against the current `HEAD`, so it never re-attributes an earlier phase's
 committed changes.
 
 The commit subject falls back to the DAG node `label`. A node with changes and
-no `label` is an error. The subject never carries a wave prefix. The node and
-the wave stay in `state.db` and the DAG.
+no `label` is an error. The subject never carries a phase prefix. The node and
+the phase stay in `state.db` and the DAG.
 
 The recorder holds the campaign lock, so it serializes with campaign creation
 and other records. Checks are synchronous and run inside the caller, so they
@@ -331,8 +337,8 @@ The target repository provides how to run checks in isolation as a tracked
 manifest at the repo root: `sliceme.sandbox.json`, `.sliceme-sandbox.json`, or
 `tools/sliceme-sandbox.json` (never under `.sliceme/`, which is git-excluded).
 Schema: `version`, `command` (prefix receiving `/bin/sh -lc "<cmd>"`),
-`network`, `readonly_repo`, `writable`, `setup`, and `gpu`
-(`{command, tiers}`).
+`network`, `readonly_repo`, `writable`, and `setup`. Sliceme rejects the removed
+`gpu` key.
 
 Resolution: `--sandbox` > `dag.json.sandbox` > `policy.sandbox` > discovered
 manifest > `none`. The planner records `"sandbox": {"path": ...}` in `dag.json`.
@@ -351,7 +357,7 @@ recorded in `dag.json`, so Sliceme rejects a post-plan manifest change.
 | `sliceme/verbs/` | the verb groups: `bootstrap`, `campaign`, `status`, `review`, `delivery`, `sessions` |
 | `sliceme/store.py` | SQLite persistence (WAL) |
 | `sliceme/gitutil.py` | Git plumbing (`worktree`, `merge`, `merge-tree`, `commit`, `branch`, `push`, `changed_files`) |
-| `sliceme/ownership.py` | Directory ownership (normalization, `owns`, subtree conflicts), the DAG wave projection, GPU isolation, and the same-ownership merge |
+| `sliceme/ownership.py` | Directory ownership (normalization, `dir`, subtree conflicts), the DAG phase projection, and the same-directory merge |
 | `sliceme/plan.py` | the design's `sliceme-campaigns` split: parse and validate |
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
@@ -413,7 +419,7 @@ sandbox_digest, checks_digest, source)`:
   stricter sandbox invalidates a cached verdict;
 - `checks_digest`: the check-runner semantics version, so changing how checks run
   invalidates cached verdicts;
-- `source`: `plane`, `wave:<n>`, or `deliver`, so unrelated verdicts cannot
+- `source`: `plane`, `phase:<n>`, or `deliver`, so unrelated verdicts cannot
   collide.
 
 Checks run in a clean detached scratch worktree at the commit and, when a
@@ -436,9 +442,9 @@ npm test
 
 The suite covers these areas:
 
-- directory normalization and subtree conflicts, and the DAG wave projection;
-- GPU isolation: two GPU nodes land in two waves;
-- conformance-by-ownership at wave record time;
+- directory normalization and subtree conflicts, and the DAG phase projection;
+- the removed `gpu` field is rejected;
+- conformance-by-ownership at phase record time;
 - the combined-tree check runner and its cache;
 - campaign worktree recording and work-branch selection;
 - the campaign approval gate and the report;
@@ -449,15 +455,15 @@ The suite covers these areas:
 
 | File | Covers |
 |---|---|
-| `tests/test_scopes.py` | ownership normalization, `owns`, subtree conflicts |
-| `tests/test_waves.py` | DAG wave projection, dependency barriers, caps, GPU isolation, validation |
-| `tests/test_merge.py` | the same-ownership merge |
+| `tests/test_scopes.py` | ownership normalization, `dir`, subtree conflicts |
+| `tests/test_phases.py` | DAG phase projection, dependency barriers, caps, the removed `gpu` field, validation |
+| `tests/test_merge.py` | the same-directory merge |
 | `tests/test_plan.py` | the design's campaign split parse |
-| `tests/test_campaign.py` | plane bootstrap and campaign registration, wave recording, report, DAG/state layout |
+| `tests/test_campaign.py` | plane bootstrap and campaign registration, phase recording, report, DAG/state layout |
 | `tests/test_campaigns.py` | several campaigns in one plane, scoping, delivery isolation, migration |
 | `tests/test_checks.py` | the combined-tree runner, the check cache, sandbox profiles/wrapping, fingerprint invalidation |
-| `tests/test_sandbox_gate.py` | manifest discovery/validation, fail-closed gate, GPU runner, setup |
-| `tests/test_wave_scope.py` | campaign worktree reuse, conformance-by-ownership, per-node commits, delivery, default-branch refusal |
+| `tests/test_sandbox_gate.py` | manifest discovery/validation, fail-closed gate, the removed `gpu` key, setup |
+| `tests/test_phase_scope.py` | campaign worktree reuse, conformance-by-ownership, per-node commits, delivery, default-branch refusal |
 | `tests/test_target_branch.py` | the design-derived work branch, the `--feature-branch` override, the base branch, default-branch refusal |
 | `tests/test_open_campaign.py` | the worktree from `origin/main` and the local-base fallback |
 | `tests/test_evidence.py` | the evidence document: commits, checks, diffs, logs, and the bounded Markdown |
@@ -475,7 +481,7 @@ The suite covers these areas:
 
 - Symbol/AST extraction is not implemented; directory ownership and
   `git merge-tree` are the detectors. Dependency edges beyond
-  `owns`/`depends_on` are not inferred.
+  `dir`/`depends_on` are not inferred.
 - No long-lived daemon or unix socket: the CLI calls the SQLite service directly
   (WAL). There is no browser review client.
 - One campaign occupies one work branch; several campaigns can share a

@@ -3,20 +3,23 @@
 *Slice a design into parallel coding agents.*
 
 Sliceme turns a design document into a DAG of work. It runs the
-non-conflicting nodes in parallel. It checks each wave against a content
+non-conflicting nodes in parallel. It checks each phase against a content
 fingerprint. It delivers the result as a pull request against the default
 branch (`main`). Sliceme decides ownership at plan time, so parallel agents
 never author the same files.
 
-- **Plan-time ownership** — nodes own directories; overlapping subtrees go into
-  different waves.
-- **The wave is the scheduling gate** — the engine packs nodes into waves (no
-  directory-subtree overlap, capped by `concurrency`) and spawns one wave at a
+- **Plan-time ownership** — every node owns one directory, and every directory
+  has one node. Overlapping subtrees go into different phases.
+- **One worker per directory** — the planner splits a multi-directory change
+  into one node per directory, and merges two visits of one directory. One
+  subagent runs one directory slice.
+- **The phase is the scheduling gate** — the engine packs nodes into phases (no
+  directory-subtree overlap, capped by `concurrency`) and spawns one phase at a
   time; a recorded node satisfies its dependents' `depends_on`.
-- **One campaign worktree** — every wave commits onto the same git worktree
-  branch. Sliceme never recreates or rebases the branch between waves, and
+- **One campaign worktree** — every phase commits onto the same git worktree
+  branch. Sliceme never recreates or rebases the branch between phases, and
   files persist.
-- **One combined-tree check** — one synchronous runner checks the recorded wave
+- **One combined-tree check** — one synchronous runner checks the recorded phase
   tree and caches the verdict. A resumed node reads the cache.
 - **One human gate** — the user confirms the campaign one time. Sliceme then
   pushes the work branch and opens one pull request against the default
@@ -45,13 +48,13 @@ with `subagent({ workflow: "sliceme.campaign", async: true })`. The resource
 drives the engine verbs:
 
 ```text
-sliceme start DESIGN.md           derive the work branch; planner -> dag.json + waves
+sliceme start DESIGN.md           derive the work branch; planner -> dag.json + phases
 sliceme open                      fetch main; create the worktree from origin/main
-sliceme ready                     the current wave's ready node ids
-sliceme status                    waves, nodes, and paused
+sliceme ready                     the current phase's ready node ids
+sliceme status                    phases, nodes, and paused
 sliceme plan DESIGN.md            show the campaign split declared in the design
 sliceme record                    commit the finished nodes as per-node commits
-sliceme check                     run the combined-tree checks for the wave
+sliceme check                     run the combined-tree checks for the phase
 sliceme approve                   record the one campaign approval
 sliceme report                    write the deterministic campaign report
 sliceme evidence                  write the deterministic evidence document
@@ -61,6 +64,7 @@ sliceme deliver                   push the work branch and open a pull request a
 ## Docs
 
 - [Guide](./docs/guide.md) — model, ownership, orchestration, agent roles.
+- [Directory slices plan](./docs/directory-slices-plan.md) — the one-node-per-directory target design.
 - [Architecture](./docs/architecture.md) — layered parts, campaign lifecycle, and state (with diagrams).
 - [Reference](./docs/reference.md) — actions, modules, state, verification.
 - [Workflow](./docs/workflow.md) — the campaign loop, the resource, and the worker contract.

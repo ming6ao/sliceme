@@ -1,6 +1,6 @@
 """One synchronous combined-tree check runner plus a persistent cache.
 
-``checks.py`` replaces the executor queue.  A wave records its nodes as commits
+``checks.py`` replaces the executor queue.  A phase records its nodes as commits
 on the campaign worktree, then one check set runs over that combined tree in a
 scratch worktree.  The runner does not hold a lease and does not queue work: it
 runs one check set and returns the row.
@@ -59,15 +59,12 @@ class CheckRunner:
         self.campaign = campaign
 
     # -- configuration --------------------------------------------------
-    def require_sandbox(
-        self, *, gpu_required: bool = False, override: str | None = None
-    ) -> Sandbox:
+    def require_sandbox(self, *, override: str | None = None) -> Sandbox:
         """Resolve and validate the sandbox gate (fail closed when required)."""
         return _require_sandbox(
             self.dag,
             self.config,
             root=self.root,
-            gpu_required=gpu_required,
             override=override,
         )
 
@@ -81,8 +78,7 @@ class CheckRunner:
         checks: list[CheckSpec] | None = None,
         only: list[str] | None = None,
         sandbox: str | None = None,
-        gpu: str = "none",
-        wave: int | None = None,
+        phase: int | None = None,
         timeout: int = 3600,
     ) -> dict[str, Any]:
         """Run one check set at *commit*, or return the cached terminal row.
@@ -95,13 +91,13 @@ class CheckRunner:
         a terminal verdict for the fingerprint already existed.
         """
         if not source:
-            raise SlicemeError("check requires a source (e.g. wave:0, deliver)")
+            raise SlicemeError("check requires a source (e.g. phase:0, deliver)")
         if not commit:
             raise SlicemeError("check requires a commit")
         if checks is None and not commands:
             raise SlicemeError("check requires at least one check")
         commit_sha = gitutil.rev_parse(self.root, commit)
-        profile = self.require_sandbox(gpu_required=(gpu != "none"), override=sandbox)
+        profile = self.require_sandbox(override=sandbox)
         resolved = (
             list(checks)
             if checks is not None
@@ -142,12 +138,11 @@ class CheckRunner:
             "commit_ref": commit_sha,
             "commands": [c.command for c in selected],
             "checks": check_specs,
-            "wave": wave,
+            "phase": phase,
             "campaign": self.campaign,
             "tree": fingerprint.tree,
             "sandbox": profile.to_dict(),
             "sandbox_digest": profile.digest(),
-            "gpu": gpu,
         }
         # One synchronous run.  Any failure becomes an error verdict, so a bad
         # command never leaves the row half written.
@@ -158,7 +153,6 @@ class CheckRunner:
                 commit_sha,
                 checks=selected,
                 sandbox=profile,
-                tier=gpu,
             )
             row.update(
                 status=status,

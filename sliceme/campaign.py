@@ -184,9 +184,8 @@ __all__ = [
 def _verification_line(verification: dict[str, Any]) -> str:
     source = verification.get("source") or "plane"
     status = verification.get("status")
-    gpu = verification.get("gpu") or "-"
     fingerprint = (verification.get("fingerprint") or "")[:12]
-    return f"{source}: {status} (fp {fingerprint}, gpu {gpu})"
+    return f"{source}: {status} (fp {fingerprint})"
 
 
 def _commands_text(commands: Any) -> str:
@@ -275,7 +274,6 @@ def _check_evidence(check: dict[str, Any] | None) -> dict[str, Any] | None:
         "duration": check.get("duration"),
         "output": check.get("output"),
         "source": check.get("source"),
-        "gpu": check.get("gpu"),
         "created_at": check.get("finished_at") or check.get("created_at"),
     }
 

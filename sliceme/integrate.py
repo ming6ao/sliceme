@@ -20,8 +20,8 @@ acceptance commands run at the record commit, the verdict is recorded with
 source ``node:<id>``, and nothing is merged.
 
 This module also owns record integration ordering and simulation: recorded
-records are grouped into the campaign DAG's wave order, and ``simulate``
-materializes each wave's combined tree so the plane's trusted checks can run
+records are grouped into the campaign DAG's phase order, and ``simulate``
+materializes each phase's combined tree so the plane's trusted checks can run
 once over the combined result.
 """
 
@@ -33,20 +33,20 @@ from pathlib import Path
 from typing import Any
 
 from . import campaign, gitutil, pullrequest
-from .ownership import DEFAULT_WAVE_SIZE, plan_dag_waves, strongest_gpu_tier
+from .ownership import DEFAULT_PHASE_SIZE, plan_dag_phases
 from .store import Store
 from .util import SlicemeError, scratch_dir
 from .verifier import CheckResult, checks_from_config, run_checks
 
 __all__ = [
     "DeliveryResult",
-    "Wave",
+    "Phase",
     "base_branch_of",
     "deliver_pull_request",
     "delivery_base_of",
     "found_default_branch",
     "is_default_branch",
-    "plan_waves",
+    "plan_phases",
     "simulate",
     "target_branch_of",
     "work_branch_of",
@@ -228,23 +228,6 @@ def _delivery_checks(
     return CheckRunner(root, store, config, dag=dag, campaign=campaign_key)
 
 
-def _delivery_gpu(
-    store: Store, root: Path, config: dict[str, Any], campaign_key: str | None
-) -> str:
-    """The strongest GPU tier among the campaign's recorded nodes."""
-    branch = config.get("work_branch")
-    dag = campaign.load_dag(root, branch) if branch else None
-    by_id = {str(node["id"]): node for node in (dag or {}).get("nodes") or []}
-    member_nodes = [
-        by_id[str(record["node"])]
-        for record in store.list_records(
-            statuses=["recorded"], campaign=campaign_key
-        )
-        if record.get("node") and str(record["node"]) in by_id
-    ]
-    return strongest_gpu_tier(member_nodes)
-
-
 def deliver_pull_request(
     store: Store,
     root: Path,
@@ -256,7 +239,7 @@ def deliver_pull_request(
 ) -> list[DeliveryResult]:
     """Push the campaign worktree branch and open the delivery pull request.
 
-    Called once, after every wave is recorded and every commit is approved.
+    Called once, after every phase is recorded and every commit is approved.
     The pull request head is the campaign worktree branch.  The pull request
     base is the delivery base (the repository default branch).  The campaign
     branch is never the default branch: there is no override.
@@ -313,7 +296,6 @@ def deliver_pull_request(
                 source="deliver",
                 commit=source_head,
                 checks=specs,
-                gpu=_delivery_gpu(store, root, config, campaign),
             )
             checks = _check_results(row)
             if row["status"] != "passed":
@@ -354,7 +336,7 @@ def deliver_pull_request(
 # Candidate ordering and combined-tree simulation
 # ---------------------------------------------------------------------------
 @dataclass
-class Wave:
+class Phase:
     index: int
     records: list[dict[str, Any]] = field(default_factory=list)
     combined: str = ""
@@ -363,7 +345,7 @@ class Wave:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "wave": self.index,
+            "phase": self.index,
             "combined": self.combined,
             "members": [
                 {"record": c["id"], "node": c.get("node"), "commit": c.get("head_commit")}
@@ -374,52 +356,52 @@ class Wave:
         }
 
 
-def _wave_index_by_node(root: Path, config: dict[str, Any]) -> dict[str, int]:
-    """Map every DAG node id to its wave index (empty for a non-campaign plane)."""
+def _phase_index_by_node(root: Path, config: dict[str, Any]) -> dict[str, int]:
+    """Map every DAG node id to its phase index (empty for a non-campaign plane)."""
     branch = config.get("work_branch")
     dag = campaign.load_dag(root, branch) if branch else None
     if not dag or not dag.get("nodes"):
         return {}
-    wave_size = int(dag.get("concurrency") or DEFAULT_WAVE_SIZE)
-    planned = plan_dag_waves(list(dag["nodes"]), wave_size=wave_size)
+    phase_size = int(dag.get("concurrency") or DEFAULT_PHASE_SIZE)
+    planned = plan_dag_phases(list(dag["nodes"]), phase_size=phase_size)
     return {member: w.index for w in planned for member in w.members}
 
 
-def plan_waves(
+def plan_phases(
     store: Store,
     root: Path,
     config: dict[str, Any],
     records: list[dict[str, Any]],
-) -> list[Wave]:
-    """Group records into DAG waves, each internally priority-ordered."""
+) -> list[Phase]:
+    """Group records into DAG phases, each internally priority-ordered."""
     if not records:
         return []
-    wave_of = _wave_index_by_node(root, config)
-    fallback = (max(wave_of.values()) + 1) if wave_of else 0
+    phase_of = _phase_index_by_node(root, config)
+    fallback = (max(phase_of.values()) + 1) if phase_of else 0
 
     def key(record: dict[str, Any]) -> tuple[Any, ...]:
         node = str(record.get("node") or "")
         return (
-            wave_of.get(node, fallback),
+            phase_of.get(node, fallback),
             -int(record.get("priority") or 0),
             float(record.get("created_at") or 0.0),
             int(record["id"]),
         )
 
     ordered = sorted(records, key=key)
-    waves: list[Wave] = []
-    by_index: dict[int, Wave] = {}
+    phases: list[Phase] = []
+    by_index: dict[int, Phase] = {}
     for record in ordered:
         node = str(record.get("node") or "")
-        index = wave_of.get(node, fallback)
-        wave = by_index.get(index)
-        if wave is None:
-            wave = Wave(index=index)
-            by_index[index] = wave
-            waves.append(wave)
-        wave.records.append(record)
-    waves.sort(key=lambda w: w.index)
-    return waves
+        index = phase_of.get(node, fallback)
+        phase = by_index.get(index)
+        if phase is None:
+            phase = Phase(index=index)
+            by_index[index] = phase
+            phases.append(phase)
+        phase.records.append(record)
+    phases.sort(key=lambda w: w.index)
+    return phases
 
 
 def _synthetic_commit(root: Path, tree: str, parents: list[str], message: str) -> str:
@@ -430,12 +412,12 @@ def _synthetic_commit(root: Path, tree: str, parents: list[str], message: str) -
     return gitutil.git(root, *args, check=True).stdout.strip()
 
 
-def _merge_into_wave(root: Path, combined: str, branch: str) -> tuple[bool, str]:
+def _merge_into_phase(root: Path, combined: str, branch: str) -> tuple[bool, str]:
     outcome = gitutil.merge_tree(root, combined, branch)
     if not outcome.clean or not outcome.tree:
         return False, combined
     new_ref = _synthetic_commit(
-        root, outcome.tree, [combined, gitutil.rev_parse(root, branch)], "sliceme wave combine"
+        root, outcome.tree, [combined, gitutil.rev_parse(root, branch)], "sliceme phase combine"
     )
     return True, new_ref
 
@@ -452,39 +434,39 @@ def simulate(
     records = store.list_records(
         statuses=statuses or ["recorded", "pending"], campaign=campaign
     )
-    waves = plan_waves(store, root, config, records)
+    phases = plan_phases(store, root, config, records)
     base_ref = base_branch_of(config)
     scratch = scratch_dir(root)
-    for wave in waves:
+    for phase in phases:
         combined = gitutil.rev_parse(root, base_ref)
-        for record in wave.records:
-            ok, combined = _merge_into_wave(root, combined, record["head_commit"])
+        for record in phase.records:
+            ok, combined = _merge_into_phase(root, combined, record["head_commit"])
             if not ok:
                 combined = ""
                 break
-        wave.combined = combined
-        if not run_checks_flag or not wave.combined:
+        phase.combined = combined
+        if not run_checks_flag or not phase.combined:
             continue
-        path = scratch / f"wave-{wave.index}-{abs(hash(wave.combined)) % 10_000_000}"
+        path = scratch / f"phase-{phase.index}-{abs(hash(phase.combined)) % 10_000_000}"
         try:
-            gitutil.add_detached_worktree(root, path, wave.combined)
-            status, results, _duration = run_checks(root, config, wave.combined, worktree=path)
-            wave.check_status = status
-            wave.checks = results
+            gitutil.add_detached_worktree(root, path, phase.combined)
+            status, results, _duration = run_checks(root, config, phase.combined, worktree=path)
+            phase.check_status = status
+            phase.checks = results
         except SlicemeError:
-            wave.check_status = "error"
+            phase.check_status = "error"
         finally:
             gitutil.cleanup_worktree(root, path)
     return {
         "record_count": len(records),
-        "waves": [w.to_dict() for w in waves],
-        "overall": _overall_status(waves),
+        "phases": [w.to_dict() for w in phases],
+        "overall": _overall_status(phases),
     }
 
 
-def _overall_status(waves: list[Wave]) -> str:
-    for wave in waves:
-        if wave.check_status not in (None, "passed"):
+def _overall_status(phases: list[Phase]) -> str:
+    for phase in phases:
+        if phase.check_status not in (None, "passed"):
             return "failed"
     return "pass"
 

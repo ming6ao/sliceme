@@ -1,6 +1,12 @@
 # Sliceme terminology and simplification plan
 
-Status: proposal.
+> **Superseded.** This is a historical plan. The current target design is
+> [directory-slices-plan.md](./directory-slices-plan.md).
+>
+> **Naming note.** The word `phase` below means the retired node field. The
+> word `wave` was the old name for the scheduling unit, now called the phase.
+
+Status: proposal (historical).
 
 This document explains the current concepts of Sliceme. It proposes one smaller
 vocabulary and one smaller design. The plan keeps the behavior that works. The
@@ -12,9 +18,9 @@ assumes that model.
 
 ## 1. What the code does today
 
-Sliceme turns a design document into a graph of work. The engine derives waves
+Sliceme turns a design document into a graph of work. The engine derives phases
 from the graph. One workflow resource runs one worker per ready node. The engine
-records each wave as a set of commits.
+records each phase as a set of commits.
 
 The engine then checks the combined tree and writes one verdict. A human
 approves the campaign one time. The engine pushes the work branch and opens one
@@ -45,7 +51,7 @@ engine owns all state. The adapter parses arguments and renders results.
 | **Unit** | one row in `units`. It holds one worktree and one branch. Kinds: `worker` and `campaign`. |
 | **Node** | one item of work in the DAG. Fields: `id`, `label`, `goal`, `owns`, `depends_on`, `acceptance`, `gpu`, `phase`, `no_merge`. |
 | **Owns** | the repository-relative directories that one node may change. The engine compares directories by subtree. |
-| **Wave** | a derived batch of nodes with disjoint `owns`. It is also one record and check checkpoint. The engine derives the waves from the DAG. |
+| **Phase** | a derived batch of nodes with disjoint `owns`. It is also one record and check checkpoint. The engine derives the phases from the DAG. |
 | **Candidate** | one row in `candidates`. It is a node commit that waits for delivery. |
 | **Check** | one row in `checks`. It holds one terminal verdict for one fingerprint. |
 | **Fingerprint** | one hash of tree, commands, toolchain, policy, sandbox, check version, and source. |
@@ -83,11 +89,11 @@ protected branch is still `main`. That difference is the delivery guard.
 ```text
 start      create the plane and the campaign; derive the work branch
 plan       parse the design's campaign split
-wave --open    fetch the base branch; create the worktree from origin/<base>
+phase --open    fetch the base branch; create the worktree from origin/<base>
 loop
-  ready          ready nodes of the current wave
+  ready          ready nodes of the current phase
   runs.run       one worker per ready node
-  wave --record  one commit per node; enforce ownership conformance
+  phase --record  one commit per node; enforce ownership conformance
   check          one combined-tree verdict
   runs.run       one reviewer over the recorded evidence
 evidence   write the deterministic evidence document
@@ -109,9 +115,9 @@ deliver    push the work branch; open one pull request against the base branch
 4. **`candidate` is vague.** It means "a node commit". The code never counts
    candidates in a meaningful way.
 5. **`phase` is dead.** It is display-only. No rule reads it.
-6. **The wave is both a hint and a gate.** The docs say that readiness is the
-   gate and that the wave is a display hint. The code scopes `ready`, `record`,
-   and `check` to the current wave. The two statements contradict.
+6. **The phase is both a hint and a gate.** The docs say that readiness is the
+   gate and that the phase is a display hint. The code scopes `ready`, `record`,
+   and `check` to the current phase. The two statements contradict.
 7. **`check` carries too many meanings.** The word is a verb, a table, a
    runner, a config list, and a command.
 8. **`campaign` carries too many meanings.** The word is a row, a branch, a
@@ -120,7 +126,7 @@ deliver    push the work branch; open one pull request against the base branch
    non-directory kind. A bare directory path carries the same meaning.
 10. **`state.json` duplicates the database.** The engine never writes it. The
     reader merges two state sources. The merge adds code to `ready`, `status`,
-    and the wave projection.
+    and the phase projection.
 
 ## 4. Target vocabulary
 
@@ -158,7 +164,7 @@ Final engine names:
 - `campaign`: one work branch, one base branch, one design, one plan.
 - `plan`: the DAG and its campaign fields. `dag.json` stays the file name.
 - `node`, `owns`, `depends_on`, `acceptance`, `gpu`, `no_merge`.
-- `wave`: one derived batch of nodes with disjoint `owns`.
+- `phase`: one derived batch of nodes with disjoint `owns`.
 - `record`: one node commit. The table is `records`.
 - `verdict`: one check result. The table is `verdicts`.
 - `approval`: one campaign approval. The table is `approvals`.
@@ -173,8 +179,8 @@ Final verbs (one meaning each):
 | `status` | `status` |
 | `plan` | `plan` |
 | `ready` | `ready` |
-| `open` | `wave --open` |
-| `record` | `wave --record --current` |
+| `open` | `phase --open` |
+| `record` | `phase --record --current` |
 | `check` | `check --current` |
 | `approve` | `review --decision approve` |
 | `report` | `review --report` |
@@ -211,10 +217,10 @@ Do the renames in stages. Keep the test suite green after each stage.
 
 ### Stage 3: the verbs
 
-1. Split `wave` into `open` and `record`.
+1. Split `phase` into `open` and `record`.
 2. Split `review` into `approve` and `report`.
 3. Delete the `--current` flag. `check` and `record` always act on the current
-   wave.
+   phase.
 4. Update `surface.ACTIONS`, the `_HANDLERS` table, the CLI, and the adapter.
 5. Update the workflow resource grants and its tests.
 
@@ -226,12 +232,12 @@ Do the renames in stages. Keep the test suite green after each stage.
 
 ## 6. Structural simplifications
 
-### S0. Keep the wave, and define it once
+### S0. Keep the phase, and define it once
 
-The wave stays. It is the one scheduling concept after this plan. Delete the
-`wave` verb and the "display hint" language instead.
+The phase stays. It is the one scheduling concept after this plan. Delete the
+`phase` verb and the "display hint" language instead.
 
-A wave is one scheduling batch and its record and check checkpoint. A batch
+A phase is one scheduling batch and its record and check checkpoint. A batch
 obeys four rules:
 
 - every dependency finished;
@@ -239,7 +245,7 @@ obeys four rules:
 - the member count is at most `concurrency`;
 - at most one node needs a GPU.
 
-Delete the precomputed wave only if you accept runtime scheduling. The engine
+Delete the precomputed phase only if you accept runtime scheduling. The engine
 would then compute the batch in `ready` from current state. That moves the same
 three rules into the run path and breaks the plan-time rule in
 `docs/workflow.md` hard rule 4. The plan keeps the fixed projection.
@@ -248,39 +254,39 @@ Keep the noun. Delete the verb and the prose.
 
 | Item | Action |
 |---|---|
-| `wave` as a domain noun | keep; define it once |
-| `wave` verb | delete; split into `open` and `record` |
-| `wave --open` | delete the name; the worktree is per campaign |
-| "wave is a display hint" prose | delete from every document |
+| `phase` as a domain noun | keep; define it once |
+| `phase` verb | delete; split into `open` and `record` |
+| `phase --open` | delete the name; the worktree is per campaign |
+| "phase is a display hint" prose | delete from every document |
 | `phase` | delete; it is the dead term |
-| `_current_wave` / `_recorded_wave` | keep the concept; unify the two functions |
-| `checks.wave` column | keep; it names the checkpoint |
-| `concurrency` | keep; it is the wave size cap |
+| `_current_phase` / `_recorded_phase` | keep the concept; unify the two functions |
+| `checks.phase` column | keep; it names the checkpoint |
+| `concurrency` | keep; it is the phase size cap |
 
-### S1. Make the wave the one gate, and unify the wave cursor
+### S1. Make the phase the one gate, and unify the phase cursor
 
-The code scopes `ready`, `record`, and `check` to the current wave, but the docs
-claim that readiness is the gate and that the wave is a hint. Choose the wave.
+The code scopes `ready`, `record`, and `check` to the current phase, but the docs
+claim that readiness is the gate and that the phase is a hint. Choose the phase.
 Delete the "display hint" language from every document.
 
 The oracle review found that the plan under-specified this change. Two functions
-derive the cursor today: `_current_wave` in `sliceme/verbs/status.py` drives
-`ready` and `record`, and `_recorded_wave` in the same file drives `check`. The
+derive the cursor today: `_current_phase` in `sliceme/verbs/status.py` drives
+`ready` and `record`, and `_recorded_phase` in the same file drives `check`. The
 change must unify them into one cursor.
 
-The oracle also found a stall. A wave member that changes no file gets no commit,
-because `record_wave` skips an empty path list at `sliceme/verbs/campaign.py`
-line 334. `_wave_rows` marks a wave `done` only when every member has a recorded
-commit. `_current_wave` then never advances, so `ready` keeps returning that
+The oracle also found a stall. A phase member that changes no file gets no commit,
+because `record_phase` skips an empty path list at `sliceme/verbs/campaign.py`
+line 334. `_phase_rows` marks a phase `done` only when every member has a recorded
+commit. `_current_phase` then never advances, so `ready` keeps returning that
 member until the resource cap stops the loop.
 
-1. Unify `_current_wave` and `_recorded_wave` into one cursor.
-2. Advance the wave when a member records zero changes. Add an explicit
+1. Unify `_current_phase` and `_recorded_phase` into one cursor.
+2. Advance the phase when a member records zero changes. Add an explicit
    "recorded empty" marker for the member.
 3. Delete the readiness filter in `ready`, `_readiness_state`, and `readiness`.
-   A dependency cannot live in the same wave, because `plan_dag_waves` sets
-   `min_wave = max(wave(dep) + 1)`. The filter is therefore redundant inside
-   one wave.
+   A dependency cannot live in the same phase, because `plan_dag_phases` sets
+   `min_phase = max(phase(dep) + 1)`. The filter is therefore redundant inside
+   one phase.
 
 ### S2. Delete the `units` table
 
@@ -320,10 +326,10 @@ Each step keeps the test suite green.
 
 The workflow resource never passes these flags. The commit subject falls back to
 the node `label`. The `--only` path adds the `targeted`, `reporter`, and
-`wave_order` branches to `record_wave`.
+`phase_order` branches to `record_phase`.
 
 1. Delete the three flags from `surface.ACTIONS` and the adapter.
-2. Delete the scoped branch from `record_wave`.
+2. Delete the scoped branch from `record_phase`.
 3. Delete the `tests/test_cli.py` cases for `--only`.
 
 ### S4. Delete `state.json`
@@ -337,7 +343,7 @@ read the file, and six test files write it.
    descriptor. `sliceme/verbs/sessions.py` reads `entry.get("attempts")` today,
    so the `respawn` branch goes dead when the descriptor has no counter.
 2. Delete `state_path`, `load_state`, and every merge in `_readiness_state`,
-   `_wave_rows`, `_current_wave`, and `sliceme/verbs/sessions.py`.
+   `_phase_rows`, `_current_phase`, and `sliceme/verbs/sessions.py`.
 3. Rewrite the test files that write `state.json`:
    `tests/test_cli.py`, `tests/test_sessions.py`, `tests/test_status_summary.py`,
    `tests/test_campaign.py`, `tests/test_campaigns.py`, and
@@ -348,12 +354,12 @@ read the file, and six test files write it.
 ### S5. Collapse the node statuses
 
 The node statuses are `pending`, `running`, `recorded`, `done`, `failed`, and
-`paused`. The engine sets `done` when the wave check passes. The wave check is a
+`paused`. The engine sets `done` when the phase check passes. The phase check is a
 combined-tree check, so one node cannot pass alone.
 
 1. Keep `pending`, `running`, `recorded`, and `failed`.
 2. Let `recorded` satisfy a dependency.
-3. Move pass and fail to the wave verdict.
+3. Move pass and fail to the phase verdict.
 
 ### S6. Delete one lock file
 
@@ -386,7 +392,7 @@ code.
 
 Recommended order:
 
-1. S0, S1, S3, S5 (the wave decision, behavior, and dead flags).
+1. S0, S1, S3, S5 (the phase decision, behavior, and dead flags).
 2. S2a, S2b, S2c (the unit teardown).
 3. S4, S6 (the state model and the lock).
 4. Stage 1 and Stage 2 (branch and table names).
@@ -402,7 +408,7 @@ npm test
 Add these tests:
 
 - one test that one cursor drives `ready`, `record`, and `check`;
-- one test that a wave advances when a member records zero changes;
+- one test that a phase advances when a member records zero changes;
 - one test that a recorded node satisfies a dependency;
 - one test that one `workspace.lock` serializes record and delivery;
 - one test that the resource grants one verb per command.
@@ -412,7 +418,7 @@ Add these tests:
 1. **Is a `--base` override still in scope?** With `--base release`, the base
    branch is `release` and the protected branch is `main`. Keep the two names
    apart. This plan keeps them apart.
-2. **Must a wave advance when a member records zero changes?** If yes, the
+2. **Must a phase advance when a member records zero changes?** If yes, the
    cursor needs an explicit per-member marker. This plan adds one.
 3. **The `units` teardown is the break step.** Split it into S2a, S2b, and S2c,
    and run the tests after each step.
@@ -424,8 +430,8 @@ Add these tests:
    file.
 6. **The host grant list grows.** The explicit verbs add three keys to the
    resource. Keep every key fixed and reject unknown arguments.
-7. **The wave cursor must survive a crash.** The cursor already derives from the
+7. **The phase cursor must survive a crash.** The cursor already derives from the
    recorded commits. Test the rebuild path after S1 and S4.
-8. **The wave stays.** The plan keeps the wave as the one scheduling concept.
-   The plan deletes the `wave` verb and the "display hint" prose instead. See
+8. **The phase stays.** The plan keeps the phase as the one scheduling concept.
+   The plan deletes the `phase` verb and the "display hint" prose instead. See
    S0.

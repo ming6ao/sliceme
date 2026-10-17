@@ -174,7 +174,6 @@ def run_checks(
     only: list[str] | None = None,
     checks: list[CheckSpec] | None = None,
     sandbox: "Sandbox | None" = None,
-    tier: str = "none",
 ) -> tuple[str, list[CheckResult], float]:
     resolved = checks if checks is not None else checks_from_config(config)
     checks = select_checks(resolved, only)
@@ -194,7 +193,7 @@ def run_checks(
     results: list[CheckResult] = []
     started = time.time()
     try:
-        # Setup runs once per snapshot, before acceptance, and is never GPU-wrapped.
+        # Setup runs once per snapshot, before the acceptance checks.
         for check in setup_specs:
             result = _run_one(worktree, check, sandbox=sandbox)
             results.append(result)
@@ -202,7 +201,7 @@ def run_checks(
                 status = "error" if result.status == "error" else "failed"
                 return status, results, time.time() - started
         for check in checks:
-            results.append(_run_one(worktree, check, sandbox=sandbox, tier=tier))
+            results.append(_run_one(worktree, check, sandbox=sandbox))
     finally:
         if tmp_created:
             _cleanup_worktree(root, worktree)
@@ -221,11 +220,10 @@ def _run_one(
     check: CheckSpec,
     *,
     sandbox: "Sandbox | None" = None,
-    tier: str = "none",
 ) -> CheckResult:
     started = time.time()
     command = (
-        wrap_command(check.command, sandbox, worktree=str(worktree), tier=tier)
+        wrap_command(check.command, sandbox, worktree=str(worktree))
         if sandbox is not None
         else check.command
     )

@@ -7,7 +7,7 @@ These pin the session contract from ``docs/sessions.md``:
 * resume reconciles from git plus ``state.db`` (which win), never from a
   status-only rule that would re-run a verified-but-undelivered node;
 * a preserved campaign worktree maps an interrupted node to ``paused`` and
-  requests a wave record on resume;
+  requests a phase record on resume;
 * the pause control flag can be written and cleared;
 * the ``checks`` cache table is additive on an older plane.
 """
@@ -84,15 +84,15 @@ class SessionsCase(unittest.TestCase):
     def edit(self, worktree, rel, content):
         (Path(worktree) / rel).write_text(content)
 
-    def write_state(self, nodes, *, current_wave=0, branch="feat/x"):
+    def write_state(self, nodes, *, current_phase=0, branch="feat/x"):
         """Write the descriptor node map (the one place a node status lives)."""
         campaign.write_session(
             self.root,
             branch,
-            self.descriptor(branch, nodes=nodes, current_wave=current_wave),
+            self.descriptor(branch, nodes=nodes, current_phase=current_phase),
         )
 
-    def descriptor(self, branch="feat/x", nodes=None, current_wave=0, **over):
+    def descriptor(self, branch="feat/x", nodes=None, current_phase=0, **over):
         data = {
             "campaign": "sessions",
             "feature_branch": branch,
@@ -107,7 +107,7 @@ class SessionsCase(unittest.TestCase):
             "status": "suspended",
             "reason": "user",
             "suspended_at": 1733234400.0,
-            "current_wave": current_wave,
+            "current_phase": current_phase,
             "nodes": nodes or {},
         }
         data.update(over)
@@ -116,7 +116,7 @@ class SessionsCase(unittest.TestCase):
     def record_w1(self):
         unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
-        result = self.svc.record_wave(0, messages={"w1": "test"})
+        result = self.svc.record_phase(0, messages={"w1": "test"})
         return next(c for c in result["records"] if c["node"] == "w1")
 
     def approve(self):
@@ -149,7 +149,7 @@ class ResumePlanTests(SessionsCase):
 
         plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
-        self.assertEqual(plan["resume_plan"]["record_wave"], None)
+        self.assertEqual(plan["resume_plan"]["record_phase"], None)
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
         self.assertNotIn("w1", plan["resume_plan"]["verify"])
 
@@ -186,22 +186,22 @@ class ResumePlanTests(SessionsCase):
 
     def test_resume_reads_progress_from_sqlite_without_state(self):
         # No state file is written.  The recorded record alone marks w1
-        # recorded, and the cursor advances past wave 0 because its other
+        # recorded, and the cursor advances past phase 0 because its other
         # member (w2) recorded an empty marker.
         self.record_w1()
-        campaign.write_session(self.root, "feat/x", self.descriptor(current_wave=None))
+        campaign.write_session(self.root, "feat/x", self.descriptor(current_phase=None))
 
         plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertIn("w1", plan["resume_plan"]["verify"])
-        self.assertEqual(plan["current_wave"], 1)
+        self.assertEqual(plan["current_phase"], 1)
 
     def test_an_empty_marker_resumes_as_recorded(self):
         # w1 changes nothing, so its only record is an empty marker with no
         # commit.  A descriptor commit from an earlier attempt must not make the
         # empty marker borrow a sibling's head to look recorded.
         self.svc.create_campaign_workspace()
-        recorded = self.svc.record_wave(
+        recorded = self.svc.record_phase(
             0, messages={"w1": "no-op", "w2": "no-op"}
         )
         self.assertEqual(sorted(recorded["empty"]), ["w1", "w2"])
@@ -212,14 +212,14 @@ class ResumePlanTests(SessionsCase):
         self.assertIn("w1", plan["resume_plan"]["verify"])
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
 
-    def test_preserved_worktree_maps_to_running_and_records_the_wave(self):
+    def test_preserved_worktree_maps_to_running_and_records_the_phase(self):
         unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")  # uncommitted
         self.write_state({"w1": {"status": "running", "attempts": 1}})
 
         plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "running")
-        self.assertEqual(plan["resume_plan"]["record_wave"], 0)
+        self.assertEqual(plan["resume_plan"]["record_phase"], 0)
         self.assertIn("w1", plan["resume_plan"]["resume"])
 
     def test_missing_worktree_falls_back_to_a_fresh_spawn(self):
@@ -253,17 +253,17 @@ class ResumePlanTests(SessionsCase):
         self.write_state({"w1": {"status": "running", "attempts": 1}})
 
         before = self.svc.resume()
-        self.assertEqual(before["resume_plan"]["record_wave"], 0)
+        self.assertEqual(before["resume_plan"]["record_phase"], 0)
         self.assertIn("w1", before["resume_plan"]["resume"])
 
-        recorded = self.svc.record_wave(0, messages={"w1": "test"})
+        recorded = self.svc.record_phase(0, messages={"w1": "test"})
         record = next(c for c in recorded["records"] if c["node"] == "w1")
         self.write_state({"w1": {"status": "recorded", "commit": record["head_commit"]}})
 
         after = self.svc.resume()
         self.assertEqual(after["nodes"]["w1"], "recorded")
         self.assertIn("w1", after["resume_plan"]["verify"])
-        self.assertIsNone(after["resume_plan"]["record_wave"])
+        self.assertIsNone(after["resume_plan"]["record_phase"])
 
 
 class RegistryTests(SessionsCase):
@@ -388,6 +388,103 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("fingerprint", columns)
             self.assertIn("results", columns)
             self.assertIn("status", columns)
+            store.close()
+
+    def test_verdicts_wave_column_is_renamed_to_phase(self):
+        # A plane from before the wave rename keeps its rows and gains the new
+        # column name.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".sliceme").mkdir()
+            conn = sqlite3.connect(str(db_path(root)))
+            conn.execute(
+                "CREATE TABLE verdicts ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " fingerprint TEXT NOT NULL,"
+                " wave INTEGER,"
+                " campaign TEXT,"
+                " source TEXT NOT NULL,"
+                " commit_ref TEXT NOT NULL,"
+                " tree TEXT,"
+                " commands TEXT NOT NULL,"
+                " checks TEXT,"
+                " sandbox TEXT,"
+                " sandbox_digest TEXT,"
+                " status TEXT NOT NULL,"
+                " duration REAL,"
+                " exit_code INTEGER,"
+                " output TEXT,"
+                " results TEXT,"
+                " error TEXT,"
+                " created_at REAL NOT NULL,"
+                " finished_at REAL)"
+            )
+            conn.execute(
+                "INSERT INTO verdicts(fingerprint, wave, source, commit_ref,"
+                " commands, status, created_at)"
+                " VALUES('f', 2, 'phase:2', 'c', '[]', 'passed', 0)"
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(root)
+            columns = {
+                row[1] for row in store.conn.execute("PRAGMA table_info(verdicts)")
+            }
+            self.assertIn("phase", columns)
+            self.assertNotIn("wave", columns)
+            row = store.conn.execute("SELECT phase FROM verdicts").fetchone()
+            self.assertEqual(row[0], 2)
+            store.close()
+
+    def test_a_legacy_checks_table_is_copied_with_the_phase_column(self):
+        # The old ``checks`` table names the column ``wave``; the copy must read
+        # that name and write the new ``phase`` column.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".sliceme").mkdir()
+            conn = sqlite3.connect(str(db_path(root)))
+            conn.execute(
+                "CREATE TABLE checks ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " fingerprint TEXT NOT NULL,"
+                " wave INTEGER,"
+                " campaign TEXT,"
+                " source TEXT NOT NULL,"
+                " commit_ref TEXT NOT NULL,"
+                " tree TEXT,"
+                " commands TEXT NOT NULL,"
+                " checks TEXT,"
+                " sandbox TEXT,"
+                " sandbox_digest TEXT,"
+                " status TEXT NOT NULL,"
+                " duration REAL,"
+                " exit_code INTEGER,"
+                " output TEXT,"
+                " results TEXT,"
+                " error TEXT,"
+                " created_at REAL NOT NULL,"
+                " finished_at REAL)"
+            )
+            conn.execute(
+                "INSERT INTO checks(fingerprint, wave, source, commit_ref,"
+                " commands, status, created_at)"
+                " VALUES('f', 3, 'phase:3', 'c', '[]', 'passed', 0)"
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(root)
+            tables = {
+                row[0]
+                for row in store.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertNotIn("checks", tables)
+            row = store.conn.execute("SELECT phase, source FROM verdicts").fetchone()
+            self.assertEqual(row[0], 3)
+            self.assertEqual(row[1], "phase:3")
             store.close()
 
     def test_retired_tables_are_dropped_on_open(self):

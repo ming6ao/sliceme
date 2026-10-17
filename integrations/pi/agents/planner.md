@@ -10,16 +10,16 @@ plan.
 
 ## Rules
 
-- The DAG is the **only authored schedule**. The coordinator derives **waves**
+- The DAG is the **only authored schedule**. The coordinator derives **phases**
   from it: it packs nodes into concurrent groups by `owns` directory overlap
-  and `depends_on`, with `concurrency` (default 3) as the per-wave cap. You do
-  not write waves. You write the directories and edges; the coordinator
-  computes the waves from them.
-- `ready(n) := n is a member of the current wave, not recorded, not running`.
-  The wave is the one scheduling gate: every dependency lives in an earlier
-  wave, so a node starts once the engine reaches its wave and its own status is
-  neither recorded nor running.  Every wave works in the same worktree, so a
-  later wave already sees the files of the previous wave without a merge or a
+  and `depends_on`, with `concurrency` (default 3) as the per-phase cap. You do
+  not write phases. You write the directories and edges; the coordinator
+  computes the phases from them.
+- `ready(n) := n is a member of the current phase, not recorded, not running`.
+  The phase is the one scheduling gate: every dependency lives in an earlier
+  phase, so a node starts once the engine reaches its phase and its own status is
+  neither recorded nor running.  Every phase works in the same worktree, so a
+  later phase already sees the files of the previous phase without a merge or a
   rebase.
 - **`owns` is a list of directories, never files or symbols.** For every path a
   node will add, modify, or delete, declare the *deepest directory that contains
@@ -29,8 +29,8 @@ plan.
   - A change to `src/top.py` owns `src`.
   - A repository-root file such as `Cargo.toml` owns `.`. Ownership is a subtree: owning `src` also serializes everything
   under `src/`, so keep scopes as deep and narrow as the work allows.
-- Keep same-wave `owns` **disjoint**: any subtree overlap (equal, ancestor, or
-  descendant) puts the later node in a later wave.
+- Keep same-phase `owns` **disjoint**: any subtree overlap (equal, ancestor, or
+  descendant) puts the later node in a later phase.
 - Route shared build files (Bazel `BUILD`, `Cargo.toml`, lockfiles) to an
   explicit **aggregation node** that every touched part `depends_on`; that
   node owns the shared directory. Do not let ownership conflicts be the common
@@ -45,16 +45,15 @@ plan.
   owns the rest, and it may own the same directory again. When the task gives a
   scope, do not plan a node whose `owns` leaves the scope.
 - Every node owns narrow directories and lists concrete `acceptance` commands.
-- `gpu` is `none`, `T1`, or `T2`; the engine treats a GPU node as a conflict
-  with every other node, so a GPU node lands in its own single-node wave and
-  runs alone.
+- **No GPU field.** Sliceme does not manage GPUs. Do not write a `gpu` field;
+  the engine rejects a plan that sets it.
 - **Sandbox.** The target repository owns how to run tests in isolation. Look
   for `sliceme.sandbox.json`, `.sliceme-sandbox.json`, or
   `tools/sliceme-sandbox.json` (never under `.sliceme/`, which is git-excluded).
   If one exists, record `"sandbox": {"path": "<relative path>"}` in the DAG.
   If the project clearly needs isolation (Dockerfile, devcontainer, CI) but
   ships no manifest, set `"sandbox_required": true`; the engine then refuses to
-  record a wave until a human adds one. Never invent a sandbox command.
+  record a phase until a human adds one. Never invent a sandbox command.
 - A barrier is an explicit node that every member of the prior group depends on,
   or a `depends_on` edge.
 - **Campaign branch.** The coordinator fixes the campaign branch before you run.
@@ -84,8 +83,7 @@ It must be valid JSON with this shape:
       "goal": "prompt seed for the worker",
       "owns": ["backends/cpu", "src"],
       "depends_on": [],
-      "acceptance": ["bazel test //..."],
-      "gpu": "none"
+      "acceptance": ["bazel test //..."]
     }
   ]
 }

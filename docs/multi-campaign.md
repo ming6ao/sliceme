@@ -48,13 +48,13 @@ a work branch.
 
 The engine must support several campaigns in one plane at the same time.
 
-Each campaign must have its own work branch, worktree, DAG, waves, and
+Each campaign must have its own work branch, worktree, DAG, phases, and
 delivery gate. The campaigns must share one check runner and one database.
 
 ### 2.1 Constraints
 
-- Keep one synchronous check runner per plane. The GPU rule and one-node waves
-  protect the device.
+- Keep one synchronous check runner per plane. The directory conflict rule and
+  one-node phases protect a shared resource.
 - Keep the engine as the owner of state. Adapters stay thin.
 - Keep backward compatibility. An old plane must work as a one-campaign plane.
 - Keep the rule that a work branch is unique in one plane.
@@ -127,7 +127,7 @@ readers. `Service.campaign_config` is an alias for `Service.config`.
 ### 4.3 Lock
 
 - One `.sliceme/workspace.lock` serializes every git mutation: campaign
-  creation, wave recording, and delivery. It stops two creators from picking the
+  creation, phase recording, and delivery. It stops two creators from picking the
   same worktree path or branch name, and it serializes the git mutation of a
   record and a delivery.
 
@@ -192,8 +192,8 @@ hash is unique across campaigns.
   `self.plane_config`.
 - `create_campaign_workspace` derives the worktree path from the campaign,
   under `workspace.lock`.
-- `wave_unit`, `record_wave`, `normalize_dag`, `_dag_waves`, `_project_campaign`,
-  `status`, `resume`, `simulation`, `check_wave`, the review verbs, `deliver`,
+- `phase_unit`, `record_phase`, `normalize_dag`, `_dag_phases`, `_project_campaign`,
+  `status`, `resume`, `simulation`, `check_phase`, the review verbs, `deliver`,
   `report`, and `remove_campaign_artifacts` take or resolve a campaign.
 - `status` returns a plane summary when the caller names no campaign. The
   summary holds `default_branch` and a list of campaigns.
@@ -202,7 +202,7 @@ hash is unique across campaigns.
 ### 6.2 `sliceme/integrate.py`
 
 - `_mark_delivered` takes a campaign and marks only that campaign's records.
-- `deliver` and `plan_waves` receive the campaign config.
+- `deliver` and `plan_phases` receive the campaign config.
 - One pull request per campaign. The workspace lock serializes deliveries.
 
 ### 6.3 `sliceme/campaign.py`
@@ -259,7 +259,7 @@ Tests under `tests/`:
 
 - `test_campaigns.py`: two campaigns in one plane. The work branch,
   worktree, writer name, and DAG path differ.
-- Scoping: record a wave in each campaign. The `records` and `verdicts` rows do
+- Scoping: record a phase in each campaign. The `records` and `verdicts` rows do
   not mix.
 - Delivery isolation: deliver one campaign. The other campaign stays `recorded`
   and `working`.

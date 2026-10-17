@@ -1,14 +1,16 @@
 # Sliceme observability
 
 Status: implemented. This document describes what the engine reports about a
-campaign, and where child-run state lives.
+campaign, and where child-run state lives. See
+[directory-slices-plan.md](./directory-slices-plan.md) for the one-node-per-directory
+target design.
 
 ## 1. Purpose
 
 While a campaign runs, the coordinator and a second terminal answer these
 questions from the engine:
 
-1. How many waves and nodes exist, and which wave is current?
+1. How many phases and nodes exist, and which phase is current?
 2. Which nodes are ready, running, done, or failed?
 3. Is the campaign paused?
 4. How many checks passed, failed, or stopped with an error?
@@ -50,7 +52,7 @@ fingerprint already had a terminal row.
 ### 3.1 The dense summary
 
 The default human `sliceme status` output is the **dense summary**: a header,
-one line per node in DAG order, and one line per wave. Its node and wave lines
+one line per node in DAG order, and one line per phase. Its node and phase lines
 come from `dag.json`, git, the recorded records in `state.db`, and the
 session descriptor. The
 header shows the work branch, the worktree path, and `base` from the campaign
@@ -60,11 +62,11 @@ record and the plan, so a second terminal sees the same state.
 campaign:    dense
 work branch: feat/x  worktree: /repo/.worktrees/feat-x  base: main
 design:      DESIGN.md
-nodes:       2  wave size: 2
+nodes:       2  phase size: 2
   w0 w1 [build] done — parser
   w1 w2 [-] running
-wave 0 [done]: w1
-wave 1 [pending]: w2
+phase 0 [done]: w1
+phase 1 [pending]: w2
 ```
 
 `--dense` asks for it explicitly; `--verbose` prints the full nested dump. With
@@ -76,7 +78,7 @@ campaign falls back to a compact per-campaign plane list.
 
 `status --verbose` or `status --json` returns the nested view:
 
-- `dag_waves` (the scheduler's wave plan) and `dag_waves_error`;
+- `dag_phases` (the scheduler's phase plan) and `dag_phases_error`;
 - `ready` (the ready node ids) and `paused`;
 - `checks` (the terminal-check counts);
 - the campaign writer and `records` with their `node`, `log`, `record`,
@@ -87,13 +89,13 @@ campaign falls back to a compact per-campaign plane list.
 ### 3.3 The loop read
 
 `ready` returns the small object the workflow resource polls: `campaign`,
-`ready`, `wave`, and `paused`. The engine computes `paused` from the
+`ready`, `phase`, and `paused`. The engine computes `paused` from the
 `<branch-key>.control.json` pause flag, so the sandbox needs no file access.
 
 ## 4. The simulation
 
-`sliceme simulate` groups recorded records into DAG waves,
-materializes each wave's combined tree, and runs the configured checks once over
+`sliceme simulate` groups recorded records into DAG phases,
+materializes each phase's combined tree, and runs the configured checks once over
 the combined result. `--no-checks` plans only. The simulation is a dry run: it
 changes no record, no branch, and no base branch.
 
@@ -104,8 +106,8 @@ pi-subagents. pi-subagents owns the child status, the event stream, the tool
 scoping, and the run control. The engine receives only JSON from `runs.host`,
 so it never reads a child's live state.
 
-A wave with a stalled or failed child shows up as a node that never reaches
-`recorded`. The coordinator reads `ready` again after the wave children settle,
+A phase with a stalled or failed child shows up as a node that never reaches
+`recorded`. The coordinator reads `ready` again after the phase children settle,
 and the next `record` attributes the changes that exist.
 
 ## 6. Constraints

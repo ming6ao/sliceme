@@ -1,6 +1,13 @@
 # Main-based campaigns plan
 
-Status: proposed. Revised after an oracle review. This document describes a
+> **Superseded.** This is a historical plan. The current target design is
+> [directory-slices-plan.md](./directory-slices-plan.md). The GPU field is
+> removed.
+>
+> **Naming note.** The `Phase 1` to `Phase 7` headings below are plan stages,
+> not scheduling phases.
+
+Status: proposed (historical). Revised after an oracle review. This document describes a
 change to the Sliceme delivery model. It records the agreed decisions and the
 work plan.
 
@@ -14,7 +21,7 @@ these steps:
 3. Sliceme does not ask the user for a target feature branch.
 4. The coordinator derives the campaign branch from the design file name.
 5. The planner writes the plan, then Sliceme creates the worktree.
-6. After the last wave, Sliceme collects the evidence and writes a summary.
+6. After the last phase, Sliceme collects the evidence and writes a summary.
 7. The coordinator asks the user one time to open the pull request against
    `main`.
 
@@ -60,7 +67,7 @@ break these call sites.
 | `start` | Asks for a target feature branch. | Fetches `main`. Records the delivery base. |
 | plan | Writes `dag.json` for the chosen target. | Writes `dag.json` for the campaign branch. |
 | worktree | The target branch decides the name. | Sliceme creates it after the plan, from the campaign branch. |
-| waves | No change. | No change. |
+| phases | No change. | No change. |
 | end | A human approves the campaign. | The engine writes the evidence summary. |
 | delivery | The base is a feature branch. | The base is `main`. The user permits the pull request one time. |
 
@@ -79,7 +86,7 @@ The oracle review changed these points:
    the worktree branches become equal, the diff is empty and every report and
    evidence set is empty.
 4. **No `open` host grant.** The campaign token rejects `feat/x`. The
-   coordinator runs `sliceme wave --open` before the resource starts.
+   coordinator runs `sliceme phase --open` before the resource starts.
 5. **Worker logs.** The code builds worker log paths but no writer exists.
    Confirm the writer, or capture the subagent output instead.
 6. **Removed surface.** Remove the target question from the coordinator prompt,
@@ -145,7 +152,7 @@ The flow is:
 ```text
 sliceme start DESIGN.md          # plane; fetch main; record the campaign branch
 planner subagent                 # writes .sliceme/<branch-key>.dag.json
-sliceme wave --open              # fetch main; create the worktree from origin/main
+sliceme phase --open              # fetch main; create the worktree from origin/main
 subagent(workflow: "sliceme.campaign")
 ```
 
@@ -238,7 +245,7 @@ Update or add these tests:
 - `tests/test_pull_request.py`: assert that the head is the campaign branch and
   the base is `main`.
 - `tests/test_review_approval.py`: the gate is the permission.
-- `tests/test_campaigns.py`, `tests/test_plan.py`, `tests/test_wave_scope.py`,
+- `tests/test_campaigns.py`, `tests/test_plan.py`, `tests/test_phase_scope.py`,
   `tests/test_status_summary.py`, `tests/test_cli.py`,
   `tests/test_pi_package.py`
 - `tests/campaign_resource_test.mjs`, `tests/deliver_descriptor_test.mjs`

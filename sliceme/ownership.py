@@ -1,20 +1,21 @@
-"""Plan-time directory ownership and the DAG wave projection.
+"""Plan-time directory ownership and the DAG phase projection.
 
 Ownership is by **directory subtree**. A campaign node declares the deepest
 repo-relative directories that contain the paths it will touch; two nodes
 conflict when their owned directories overlap by subtree (equal, ancestor, or
 descendant). Files, symbols, APIs, and operations do not participate: the
-planner is the single author of ownership, and the wave projection here
+planner is the single author of ownership, and the phase projection here
 serializes overlapping nodes.
 
-Waves are the **scheduler** projection of ``dag.json``. The DAG remains the
-only authored schedule; a wave is a maximal set of nodes that may run
+Phases are the **scheduler** projection of ``dag.json``. The DAG remains the
+only authored schedule; a phase is a maximal set of nodes that may run
 concurrently (each in its own worktree) and do not conflict on any owned
-directory. A node is never placed earlier than ``max(wave(dep) + 1)``, so every
-dependency is integrated before its dependents start. The per-wave size is
-capped by ``concurrency`` (default 3). A node that needs a GPU runner
-(``gpu`` other than ``none``) conflicts with every other node, so it lands in a
-wave of its own and exactly one GPU node runs at a time.
+directory. A node is never placed earlier than ``max(phase(dep) + 1)``, so every
+dependency is integrated before its dependents start. The per-phase size is
+capped by ``concurrency`` (default 3).
+
+A node must not set the removed ``gpu`` field. Sliceme does not manage GPUs, so
+the engine rejects a plan that sets it.
 
 Canonical ownership form:
 
@@ -33,7 +34,7 @@ from typing import Any
 
 from .util import SlicemeError
 
-DEFAULT_WAVE_SIZE = 3
+DEFAULT_PHASE_SIZE = 3
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ def owns_conflict(a: list[str], b: list[str]) -> str | None:
     """Return a human reason when two owned directory sets overlap.
 
     Overlap is subtree overlap: equal directories, or one being an ancestor of
-    the other. ``None`` means the two sets may run in the same wave.
+    the other. ``None`` means the two sets may run in the same phase.
     """
     dirs_a = {normalize_dir(x) for x in a}
     dirs_b = {normalize_dir(y) for y in b}
@@ -109,22 +110,22 @@ def path_within_owns(path: str, owns: list[str]) -> bool:
 
 
 def owners_of(path: str, owners: dict[str, list[str]]) -> list[str]:
-    """The wave node ids whose owned directories contain *path*."""
+    """The phase node ids whose owned directories contain *path*."""
     return [node_id for node_id, owns in owners.items() if path_within_owns(path, owns)]
 
 
 # ---------------------------------------------------------------------------
-# DAG wave projection
+# DAG phase projection
 # ---------------------------------------------------------------------------
 @dataclass
-class DagWave:
+class DagPhase:
     index: int
     members: list[str] = field(default_factory=list)
     conflicts: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "wave": self.index,
+            "phase": self.index,
             "members": list(self.members),
             "conflicts": dict(self.conflicts),
         }
@@ -137,42 +138,27 @@ def _node_id(node: dict[str, Any]) -> str:
     return str(nid)
 
 
+def _reject_removed_fields(node: dict[str, Any]) -> None:
+    """Reject a node field that Sliceme no longer owns (``gpu``)."""
+    if "gpu" in node:
+        raise SlicemeError(
+            f"dag node '{_node_id(node)}' sets the removed 'gpu' field; "
+            "Sliceme does not manage GPUs"
+        )
+
+
 def node_owns(node: dict[str, Any]) -> list[str]:
     """Parse a node's ``owns`` into normalized directories (validates kinds)."""
     return parse_owns(node.get("owns") or [])
 
 
-#: The one GPU tier that does not need a runner. Any other value means the
-#: node needs a GPU, so the scheduler serializes it into a wave of its own.
-_NO_GPU = "none"
-
-
-def _gpu_tier(node: dict[str, Any]) -> str:
-    """The node's GPU tier; an unset or empty field means ``none``."""
-    return str(node.get("gpu") or _NO_GPU)
-
-
-def strongest_gpu_tier(nodes: list[dict[str, Any]]) -> str:
-    """The strongest ``gpu`` tier among *nodes* (``none`` < ``T1`` < ``T2``)."""
-    tiers = [_gpu_tier(node) for node in nodes]
-    return max(tiers, key=lambda tier: _GPU_RANK.get(tier, 0)) if tiers else _NO_GPU
-
-
 def _conflict_reason(a: dict[str, Any], b: dict[str, Any]) -> str | None:
-    """Return a human reason when nodes *a* and *b* must not share a wave.
+    """Return a human reason when nodes *a* and *b* must not share a phase.
 
     When *a* is compared against *b*, *b* is already placed and *a* is the
-    record moving later, so the message names the blocker (*b*).
-
-    A GPU node conflicts with every other node, so it lands in a wave of its
-    own and exactly one GPU node runs at a time. Directory ownership adds the
-    strict subtree conflict on top.
+    record moving later, so the message names the blocker (*b*). The conflict
+    is the strict subtree conflict on the owned directories.
     """
-    if _gpu_tier(a) != _NO_GPU or _gpu_tier(b) != _NO_GPU:
-        return (
-            f"GPU isolation: '{_node_id(a)}' and '{_node_id(b)}' cannot share a "
-            "wave (a GPU node runs alone)"
-        )
     owns_a = node_owns(a)
     if not owns_a:
         return None
@@ -191,6 +177,7 @@ def _topological_order(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for node in nodes:
+        _reject_removed_fields(node)
         nid = _node_id(node)
         if nid in by_id:
             raise SlicemeError(f"dag node id '{nid}' appears more than once")
@@ -236,74 +223,68 @@ def validate_dag(nodes: list[dict[str, Any]]) -> None:
         node_owns(node)  # raises on a non-directory owns spec
 
 
-def plan_dag_waves(
+def plan_dag_phases(
     nodes: list[dict[str, Any]],
     *,
-    wave_size: int = DEFAULT_WAVE_SIZE,
-) -> list[DagWave]:
-    """Pack DAG *nodes* into ordered waves.
+    phase_size: int = DEFAULT_PHASE_SIZE,
+) -> list[DagPhase]:
+    """Pack DAG *nodes* into ordered phases.
 
-    ``wave_size`` is the maximum number of nodes per wave (the campaign's
-    ``concurrency``, default 3).  A node is placed in the earliest wave that
+    ``phase_size`` is the maximum number of nodes per phase (the campaign's
+    ``concurrency``, default 3).  A node is placed in the earliest phase that
 
-    * is at least ``max(wave(dep) + 1)`` for every dependency,
-    * has room under ``wave_size``, and
+    * is at least ``max(phase(dep) + 1)`` for every dependency,
+    * has room under ``phase_size``, and
     * contains no node whose owned directories overlap (strict subtree rule).
-
-    A GPU node conflicts with every node, so it only ever lands in a wave alone.
     """
-    if wave_size < 1:
-        raise SlicemeError("wave_size (concurrency) must be >= 1")
+    if phase_size < 1:
+        raise SlicemeError("phase_size (concurrency) must be >= 1")
 
-    waves: list[DagWave] = []
-    wave_of: dict[str, int] = {}
+    phases: list[DagPhase] = []
+    phase_of: dict[str, int] = {}
     by_id = {_node_id(n): n for n in nodes}
 
     for node in _topological_order(nodes):
         nid = _node_id(node)
         node_owns(node)  # validate directory-only owns, even for lone nodes
-        min_wave = 0
+        min_phase = 0
         for dep in node.get("depends_on") or []:
-            min_wave = max(min_wave, wave_of[str(dep)] + 1)
+            min_phase = max(min_phase, phase_of[str(dep)] + 1)
 
         blocked_reason: str | None = None
         placed = False
-        for wave in waves:
-            if wave.index < min_wave:
+        for phase in phases:
+            if phase.index < min_phase:
                 continue
-            if len(wave.members) >= wave_size:
+            if len(phase.members) >= phase_size:
                 continue
             reason: str | None = None
-            for member_id in wave.members:
+            for member_id in phase.members:
                 reason = _conflict_reason(node, by_id[member_id])
                 if reason:
                     break
             if reason:
                 blocked_reason = reason
                 continue
-            wave.members.append(nid)
-            wave_of[nid] = wave.index
+            phase.members.append(nid)
+            phase_of[nid] = phase.index
             placed = True
             break
 
         if not placed:
-            wave = DagWave(index=len(waves))
-            wave.members.append(nid)
+            phase = DagPhase(index=len(phases))
+            phase.members.append(nid)
             if blocked_reason:
-                wave.conflicts[nid] = blocked_reason
-            waves.append(wave)
-            wave_of[nid] = wave.index
+                phase.conflicts[nid] = blocked_reason
+            phases.append(phase)
+            phase_of[nid] = phase.index
 
-    return waves
+    return phases
 
 
 # ---------------------------------------------------------------------------
 # DAG normalization: contract same-ownership chains
 # ---------------------------------------------------------------------------
-#: GPU tiers, weakest to strongest. A merged node needs the strongest tier.
-_GPU_RANK = {"none": 0, "T1": 1, "T2": 2}
-
-
 def _merged_node(by_id: dict[str, dict[str, Any]], members: list[str]) -> dict[str, Any]:
     """Assemble one survivor node from an ordered, non-empty group of ids."""
     survivor = members[0]
@@ -338,10 +319,6 @@ def _merged_node(by_id: dict[str, dict[str, Any]], members: list[str]) -> dict[s
                 for source in sources
                 for command in (source.get("acceptance") or [])
             )
-        ),
-        "gpu": max(
-            (str(source.get("gpu") or "none") for source in sources),
-            key=lambda tier: _GPU_RANK.get(tier, 0),
         ),
         "merged_from": members[1:],
     }
@@ -411,15 +388,14 @@ def merge_same_own_nodes(
 
 
 __all__ = [
-    "DEFAULT_WAVE_SIZE",
-    "DagWave",
+    "DEFAULT_PHASE_SIZE",
+    "DagPhase",
     "merge_same_own_nodes",
     "node_owns",
     "normalize_dir",
     "owns_conflict",
     "parse_owns",
     "path_within_owns",
-    "plan_dag_waves",
-    "strongest_gpu_tier",
+    "plan_dag_phases",
     "validate_dag",
 ]

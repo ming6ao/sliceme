@@ -65,7 +65,7 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="status",
-        summary="show the campaign state: units, records, waves, and checks",
+        summary="show the campaign state: units, records, phases, and checks",
         params=(
             Param("unit", "string", "show one unit instead of the summary"),
             Param("short", "boolean", "print only the current unit name"),
@@ -85,7 +85,7 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="simulate",
-        summary="plan the waves and verify the combined tree",
+        summary="plan the phases and verify the combined tree",
         params=(
             Param("no_checks", "boolean", "plan only, do not run the checks"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -101,7 +101,7 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="ready",
-        summary="current-wave nodes ready to spawn, the wave index, and paused",
+        summary="current-phase nodes ready to spawn, the phase index, and paused",
         params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
@@ -124,7 +124,7 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="check",
-        summary="run the synchronous combined-tree checks for the current wave",
+        summary="run the synchronous combined-tree checks for the current phase",
         params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
@@ -134,7 +134,7 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="record",
-        summary="record the current wave: conformance + per-node commits",
+        summary="record the current phase: conformance + per-node commits",
         params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
@@ -295,7 +295,7 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
 
 
 def _dispatch_check(service: "Service", p: dict[str, Any]) -> Any:
-    return service.check_wave()
+    return service.check_phase()
 
 
 def _dispatch_open(service: "Service", p: dict[str, Any]) -> Any:
@@ -303,12 +303,12 @@ def _dispatch_open(service: "Service", p: dict[str, Any]) -> Any:
 
 
 def _dispatch_record(service: "Service", p: dict[str, Any]) -> Any:
-    wave_index = service.current_wave_index()
+    phase_index = service.current_phase_index()
     # Serialize git mutation with campaign creation and delivery.
     from .service import workspace_lock
 
     with workspace_lock(service.root):
-        return service.record_wave(wave_index)
+        return service.record_phase(phase_index)
 
 
 def _dispatch_approve(service: "Service", p: dict[str, Any]) -> Any:

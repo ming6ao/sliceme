@@ -75,22 +75,22 @@ class ApprovalCase(unittest.TestCase):
     def edit(self, worktree, rel, content):
         (Path(worktree) / rel).write_text(content)
 
-    def record_wave0(self):
+    def record_phase0(self):
         unit = self.svc.create_campaign_workspace()
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.edit(unit["worktree"], "src/b/y.py", "b = 2\n")
-        return self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        return self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
 
 
 class ApprovalGateTests(ApprovalCase):
     def test_deliver_refuses_without_approval(self):
-        self.record_wave0()
+        self.record_phase0()
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
         self.assertEqual(ctx.exception.reason, "not_approved")
 
     def test_one_approval_covers_the_whole_campaign(self):
-        self.record_wave0()
+        self.record_phase0()
         commits = [c["hash"] for c in self.svc.review_snapshot()["commits"]]
         self.assertGreaterEqual(len(commits), 2)
         # The decision is campaign-level: it does not bind to one commit.
@@ -100,7 +100,7 @@ class ApprovalGateTests(ApprovalCase):
         self.assertEqual(self.svc.unapproved_commits(), [])
 
     def test_approve_admits_delivery_and_consumes_the_decision(self):
-        self.record_wave0()
+        self.record_phase0()
         self.svc.record_approval(action="approve", actor="test")
         delivered = self.svc.deliver()
         self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
@@ -111,7 +111,7 @@ class ApprovalGateTests(ApprovalCase):
         self.assertEqual(ctx.exception.reason, "not_approved")
 
     def test_override_admits_delivery_and_needs_a_note(self):
-        self.record_wave0()
+        self.record_phase0()
         with self.assertRaises(SlicemeError):
             self.svc.record_approval(action="override")
         self.svc.record_approval(action="override", note="accepted risk")
@@ -119,7 +119,7 @@ class ApprovalGateTests(ApprovalCase):
         self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
 
     def test_request_changes_needs_a_note_and_supersedes_an_approval(self):
-        self.record_wave0()
+        self.record_phase0()
         self.svc.record_approval(action="approve", actor="test")
         with self.assertRaises(SlicemeError):
             self.svc.record_approval(action="request_changes")
@@ -131,7 +131,7 @@ class ApprovalGateTests(ApprovalCase):
         self.assertEqual(ctx.exception.reason, "not_approved")
 
     def test_surface_dispatch_records_one_decision(self):
-        self.record_wave0()
+        self.record_phase0()
         decision = surface.dispatch(
             self.svc, "approve", {"actor": "test"}
         )

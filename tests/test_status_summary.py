@@ -2,7 +2,7 @@
 
 These tests pin :meth:`sliceme.service.Service.status_summary`, the dense
 summary that mirrors the pi coordinator's ``summarise``: a header, one line per
-node in DAG order, and one line per wave.  ``status --verbose`` keeps the old
+node in DAG order, and one line per phase.  ``status --verbose`` keeps the old
 nested dump, so the compact form is the default (docs/reference.md).
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from sliceme import campaign
 from sliceme.service import Service
-from sliceme.util import write_json
+from sliceme.util import SlicemeError, write_json
 
 
 class StatusSummaryCase(unittest.TestCase):
@@ -52,7 +52,7 @@ class StatusSummaryCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_summary_lines_match_the_reference_layout(self):
-        # The wave plan comes from the DAG; the node status comes from the
+        # The phase plan comes from the DAG; the node status comes from the
         # record (w1) and the session descriptor (w2 running).
         self.svc.store.create_record(
             head_commit="0" * 40, summary=None, node="w1", campaign="feat--x"
@@ -65,7 +65,7 @@ class StatusSummaryCase(unittest.TestCase):
         view = self.svc.status_summary()
         self.assertEqual(view["campaign"], "dense")
         self.assertEqual(view["node_count"], 2)
-        self.assertEqual(view["wave_size"], 2)
+        self.assertEqual(view["phase_size"], 2)
         self.assertEqual([n["id"] for n in view["nodes"]], ["w1", "w2"])
         self.assertEqual(view["lines"][0], "campaign:    dense")
         self.assertEqual(
@@ -73,16 +73,16 @@ class StatusSummaryCase(unittest.TestCase):
             "work branch: feat/x  worktree: (unset)  base: main",
         )
         self.assertEqual(view["lines"][2], "design:      DESIGN.md")
-        self.assertEqual(view["lines"][3], "nodes:       2  wave size: 2")
+        self.assertEqual(view["lines"][3], "nodes:       2  phase size: 2")
         self.assertEqual(view["lines"][4], "  w0 w1 recorded")
         self.assertEqual(view["lines"][5], "  w1 w2 running")
-        self.assertEqual(view["lines"][6], "wave 0 [done]: w1")
-        self.assertEqual(view["lines"][7], "wave 1 [pending]: w2")
+        self.assertEqual(view["lines"][6], "phase 0 [done]: w1")
+        self.assertEqual(view["lines"][7], "phase 1 [pending]: w2")
         self.assertEqual(
-            view["dag_waves"],
+            view["dag_phases"],
             [
-                {"wave": 0, "status": "done", "members": ["w1"]},
-                {"wave": 1, "status": "pending", "members": ["w2"]},
+                {"phase": 0, "status": "done", "members": ["w1"]},
+                {"phase": 1, "status": "pending", "members": ["w2"]},
             ],
         )
 
@@ -105,13 +105,33 @@ class StatusSummaryCase(unittest.TestCase):
         view = self.svc.status_summary()
         self.assertEqual(view["lines"][4], "  w0 w1 pending — the parser")
 
-    def test_waves_fall_back_to_the_dag_plan(self):
-        # No state.json waves yet: the engine's DAG projection fills the gap.
+    def test_phases_fall_back_to_the_dag_plan(self):
+        # No state.json phases yet: the engine's DAG projection fills the gap.
         view = self.svc.status_summary()
-        self.assertEqual([w["members"] for w in view["dag_waves"]], [["w1"], ["w2"]])
-        self.assertEqual([w["status"] for w in view["dag_waves"]], ["pending", "pending"])
+        self.assertEqual([w["members"] for w in view["dag_phases"]], [["w1"], ["w2"]])
+        self.assertEqual([w["status"] for w in view["dag_phases"]], ["pending", "pending"])
         self.assertEqual(view["lines"][4], "  w0 w1 pending")
-        self.assertEqual(view["lines"][6], "wave 0 [pending]: w1")
+        self.assertEqual(view["lines"][6], "phase 0 [pending]: w1")
+
+    def test_ready_rejects_the_removed_gpu_field(self):
+        write_json(
+            campaign.dag_path(self.root, "feat/x"),
+            {
+                "campaign": "dense",
+                "feature_branch": "feat/x",
+                "nodes": [
+                    {
+                        "id": "w1",
+                        "owns": ["src/a"],
+                        "depends_on": [],
+                        "gpu": "T1",
+                    }
+                ],
+            },
+        )
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.ready()
+        self.assertIn("gpu", str(ctx.exception))
 
     def test_missing_or_empty_dag_yields_a_header_only_summary(self):
         # A campaign with no DAG (missing file) never raises: it renders just
@@ -119,11 +139,11 @@ class StatusSummaryCase(unittest.TestCase):
         campaign.dag_path(self.root, "feat/x").unlink()
         view = self.svc.status_summary()
         self.assertEqual(view["node_count"], 0)
-        self.assertEqual(view["dag_waves"], [])
+        self.assertEqual(view["dag_phases"], [])
         self.assertEqual(len(view["lines"]), 4)
-        self.assertEqual(view["lines"][3], "nodes:       0  wave size: ?")
+        self.assertEqual(view["lines"][3], "nodes:       0  phase size: ?")
         self.assertFalse(any(line.startswith("  w") for line in view["lines"]))
-        self.assertFalse(any(line.startswith("wave ") for line in view["lines"]))
+        self.assertFalse(any(line.startswith("phase ") for line in view["lines"]))
 
         write_json(
             campaign.dag_path(self.root, "feat/x"),
@@ -131,7 +151,7 @@ class StatusSummaryCase(unittest.TestCase):
         )
         view = self.svc.status_summary()
         self.assertEqual(view["node_count"], 0)
-        self.assertEqual(view["dag_waves"], [])
+        self.assertEqual(view["dag_phases"], [])
         self.assertEqual(len(view["lines"]), 4)
 
     def test_plane_with_several_campaigns_summarizes_the_plane(self):

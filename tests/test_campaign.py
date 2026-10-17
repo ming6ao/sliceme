@@ -1,10 +1,10 @@
-"""Campaign orchestration core: the DAG, the wave recorder, and the report.
+"""Campaign orchestration core: the DAG, the phase recorder, and the report.
 
 These pin the campaign contract:
 * ``start`` records the campaign without creating a worktree;
-* ``record_wave`` commits each node's owned paths on the one campaign worktree;
+* ``record_phase`` commits each node's owned paths on the one campaign worktree;
 * ``report`` is a deterministic skeleton;
-* the DAG projects into waves with a concurrency cap.
+* the DAG projects into phases with a concurrency cap.
 """
 
 import json
@@ -65,13 +65,13 @@ class CampaignCase(unittest.TestCase):
             },
         )
 
-    def record(self, wave, edits):
+    def record(self, phase, edits):
         unit = self.svc.create_campaign_workspace()
         for rel, content in edits.items():
             (Path(unit["worktree"]) / rel).write_text(content)
         dag = campaign.load_dag(self.root, "feat/x")
         messages = {str(node["id"]): "test" for node in dag["nodes"]}
-        return self.svc.record_wave(wave, messages=messages)
+        return self.svc.record_phase(phase, messages=messages)
 
     def file_on(self, branch, rel):
         return run("git", "show", f"{branch}:{rel}", cwd=self.root).stdout
@@ -129,10 +129,10 @@ class BootstrapTests(CampaignCase):
             service.close()
 
 
-class RecordWaveTests(CampaignCase):
+class RecordPhaseTests(CampaignCase):
     def test_record_commits_each_node_on_the_campaign_branch(self):
         self.campaign_plane()
-        # Two nodes may not share a directory in one wave; give them disjoint
+        # Two nodes may not share a directory in one phase; give them disjoint
         # ownership.
         self.dag(
             [
@@ -144,7 +144,7 @@ class RecordWaveTests(CampaignCase):
         (Path(unit["worktree"]) / "src" / "a.py").write_text("a = 2\n")
         (Path(unit["worktree"]) / "docs").mkdir(exist_ok=True)
         (Path(unit["worktree"]) / "docs" / "readme.md").write_text("docs\n")
-        result = self.svc.record_wave(0, messages={"w1": "test", "w2": "test"})
+        result = self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
         self.assertEqual([c["node"] for c in result["records"]], ["w1", "w2"])
         # The delivery base is untouched until the pull request merges.
         self.assertEqual(self.file_on("main", "src/a.py"), "a = 1\n")
@@ -155,7 +155,7 @@ class RecordWaveTests(CampaignCase):
         unit = self.svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "README.md").write_text("# changed\n")
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.record_wave(0)
+            self.svc.record_phase(0)
         self.assertIn("conformance failed", str(ctx.exception))
 
 
@@ -189,7 +189,7 @@ class ReportTests(CampaignCase):
         status = self.svc.status()
         self.assertEqual(status["work_branch"], "feat/x")
         self.assertEqual(status["default_branch"], "main")
-        self.assertTrue(status["dag_waves"])
+        self.assertTrue(status["dag_phases"])
 
     def test_report_reads_the_campaign_state(self):
         # The report's per-node unit state is the campaign state, not a unit's.
@@ -204,8 +204,8 @@ class ReportTests(CampaignCase):
         )
 
 
-class DagWaveStatusTests(CampaignCase):
-    def test_status_projects_dag_waves_with_concurrency_cap(self):
+class DagPhaseStatusTests(CampaignCase):
+    def test_status_projects_dag_phases_with_concurrency_cap(self):
         self.campaign_plane()
         self.dag(
             [
@@ -216,12 +216,12 @@ class DagWaveStatusTests(CampaignCase):
             ]
         )
         status = self.svc.status()
-        self.assertIsNone(status["dag_waves_error"])
-        waves = status["dag_waves"]
-        self.assertTrue(all(len(w["members"]) <= 2 for w in waves))
-        assignment = {m: w["wave"] for w in waves for m in w["members"]}
-        # w2 conflicts with w1 and w3 depends on w1, so both land in wave 1,
-        # while w4 shares wave 0 with w1 within the concurrency cap.
+        self.assertIsNone(status["dag_phases_error"])
+        phases = status["dag_phases"]
+        self.assertTrue(all(len(w["members"]) <= 2 for w in phases))
+        assignment = {m: w["phase"] for w in phases for m in w["members"]}
+        # w2 conflicts with w1 and w3 depends on w1, so both land in phase 1,
+        # while w4 shares phase 0 with w1 within the concurrency cap.
         self.assertEqual(assignment, {"w1": 0, "w4": 0, "w2": 1, "w3": 1})
 
     def test_status_reports_a_cyclic_dag_without_crashing(self):
@@ -233,13 +233,13 @@ class DagWaveStatusTests(CampaignCase):
             ]
         )
         status = self.svc.status()
-        self.assertEqual(status["dag_waves"], [])
-        self.assertIn("cycle", status["dag_waves_error"])
+        self.assertEqual(status["dag_phases"], [])
+        self.assertIn("cycle", status["dag_phases_error"])
 
 
 class ReadinessGateTests(CampaignCase):
     def record_node(self, node):
-        """Insert a record so the wave cursor treats *node* as finished."""
+        """Insert a record so the phase cursor treats *node* as finished."""
         self.svc.store.create_record(
             head_commit="0" * 40, summary=None, node=node, campaign="feat--x"
         )
@@ -259,8 +259,8 @@ class ReadinessGateTests(CampaignCase):
                 {"id": "w3", "owns": ["c"], "depends_on": ["w1"]},
             ]
         )
-        # w1 is recorded, so the cursor advances past wave 0 and its dependents
-        # are ready; the wave is the one scheduling gate.
+        # w1 is recorded, so the cursor advances past phase 0 and its dependents
+        # are ready; the phase is the one scheduling gate.
         self.record_node("w1")
         self.assertEqual(self.svc.ready_nodes(), ["w2", "w3"])
         self.assertEqual(self.svc.status()["ready"], ["w2", "w3"])
@@ -274,8 +274,8 @@ class ReadinessGateTests(CampaignCase):
                 {"id": "w3", "owns": ["c"], "depends_on": []},
             ]
         )
-        # w1 is running and w3 is recorded, so nothing in wave 0 is ready; w2
-        # waits on w1 in the next wave.
+        # w1 is running and w3 is recorded, so nothing in phase 0 is ready; w2
+        # waits on w1 in the next phase.
         self.record_node("w3")
         self.write_descriptor({"w1": {"status": "running"}})
         self.assertEqual(self.svc.ready_nodes(), [])
@@ -336,10 +336,10 @@ class CampaignWorktreeTests(CampaignCase):
         self.assertEqual(row["worktree"], unit["worktree"])
 
 
-class CurrentWaveAdvanceTests(CampaignCase):
-    def test_ready_advances_past_a_recorded_wave(self):
-        # Nothing writes state.json, so the current wave is derived from the
-        # recorded records in SQLite.  Before the fix this stayed on wave 0.
+class CurrentPhaseAdvanceTests(CampaignCase):
+    def test_ready_advances_past_a_recorded_phase(self):
+        # Nothing writes state.json, so the current phase is derived from the
+        # recorded records in SQLite.  Before the fix this stayed on phase 0.
         self.campaign_plane()
         self.dag(
             [
@@ -348,16 +348,16 @@ class CurrentWaveAdvanceTests(CampaignCase):
             ]
         )
         before = self.svc.ready()
-        self.assertEqual(before["wave"], 0)
+        self.assertEqual(before["phase"], 0)
         self.assertEqual(before["ready"], ["w1"])
-        self.assertEqual(self.svc.current_wave_index(), 0)
+        self.assertEqual(self.svc.current_phase_index(), 0)
 
         self.record(0, {"src/a.py": "a = 2\n"})
 
         after = self.svc.ready()
-        self.assertEqual(after["wave"], 1)
+        self.assertEqual(after["phase"], 1)
         self.assertEqual(after["ready"], ["w2"])
-        self.assertEqual(self.svc.current_wave_index(), 1)
+        self.assertEqual(self.svc.current_phase_index(), 1)
 
 
 if __name__ == "__main__":

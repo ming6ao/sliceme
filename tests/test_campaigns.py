@@ -102,7 +102,7 @@ class MultiCampaignCase(unittest.TestCase):
             self.write_dag(branch)
             unit = svc.create_campaign_workspace(base="main")
             self.edit(unit["worktree"], "src/a/x.py", content_a)
-            return svc.record_wave(0, messages={"w1": "change a"})
+            return svc.record_phase(0, messages={"w1": "change a"})
         finally:
             svc.close()
 

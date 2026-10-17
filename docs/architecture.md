@@ -1,9 +1,11 @@
 # Sliceme architecture
 
-Status: current.
+Status: directory-slice target. The engine change is tracked in
+[directory-slices-plan.md](./directory-slices-plan.md). The GPU field is
+removed.
 
 This document describes the parts of Sliceme: the actors, the engine layers,
-the campaign lifecycle, the waves, checks, delivery, and state. It is a map for
+the campaign lifecycle, the phases, checks, delivery, and state. It is a map for
 contributors and operators. The normative details live in these documents:
 
 - [reference.md](./reference.md) — actions, modules, and state layout.
@@ -18,15 +20,15 @@ dark/light themes is at [architecture.html](./architecture.html). The source is
 ## 1. In one paragraph
 
 Sliceme turns a design document into a DAG of work. It packs non-conflicting
-nodes into waves. It runs one pure-editor worker subagent per node in a single
-campaign worktree. One synchronous check runner tests the recorded wave tree
+nodes into phases. It runs one pure-editor worker subagent per node in a single
+campaign worktree. One synchronous check runner tests the recorded phase tree
 against a content fingerprint. Sliceme then opens one pull request from the
 work branch onto the default branch after the user confirms.
 
 A pi coordinator session owns the campaign loop. The trusted `sliceme.campaign`
 workflow resource runs the loop, and pi-subagents owns child execution. A
 dependency-free Python engine owns state, isolation, and delivery. The DAG
-(`dag.json`) is the only authored schedule, and waves are a pure projection of
+(`dag.json`) is the only authored schedule, and phases are a pure projection of
 it.
 
 ## 2. Design principles and invariants
@@ -35,9 +37,9 @@ it.
 |---|---|
 | **One engine, many adapters.** | `sliceme/surface.py` is the single action registry. `sliceme/cli.py` is generated from it; the pi tool forwards to the CLI. A packaging test asserts that the tool forwards the engine verbs. |
 | **The engine owns state.** | `Service` is the only owner of plane state; adapters parse arguments and render results. The pi extension never writes the database or the DAG. |
-| **The DAG is the only schedule.** | Waves are derived from `owns` + `depends_on` + `concurrency` by `ownership.plan_dag_waves`. |
-| **Ownership is plan-time and directory-based.** | A node declares the deepest directories it will touch (`owns`). Subtree overlap serializes nodes into different waves. `record` enforces this at run time (plan conformance). |
-| **One check runner.** | All checks go through one synchronous runner, so shared resources (and the GPU) stay serialized. The GPU rule adds a single-node wave per GPU node. |
+| **The DAG is the only schedule.** | Phases are derived from `dir` + `depends_on` + `concurrency` by `ownership.plan_dag_phases`. |
+| **Ownership is plan-time and directory-based.** | A node declares one directory (`dir`), and one directory has one node. Subtree overlap serializes nodes into different phases. `record` enforces this at run time (plan conformance). |
+| **One check runner.** | All checks go through one synchronous runner, so shared resources stay serialized. |
 | **Verification is pinned to content.** | A verdict is valid only for an exact `(tree, command vector, toolchain, policy, sandbox, checks, source)` fingerprint. |
 | **Git and SQLite win over caches.** | Node statuses live in the adapter's session descriptor; git and `state.db` are authoritative. On conflict, git and `state.db` win. |
 | **Fail closed, fail lastingly.** | A missing sandbox gate or a default-branch work branch aborts before mutation; a failed check or a forge failure leaves the campaign working. |
@@ -56,7 +58,6 @@ flowchart LR
   AG --> REPO
   SL --> DB[(".sliceme/state.db<br/>SQLite WAL")]
   SL --> FS[(".sliceme/ files<br/>dag · state · report · descriptor")]
-  SL -.->|"GPU job"| GPU["GPU runner<br/>tools/gpu.sh"]
   PIUSER(["Human confirmation<br/>and promotion"]) -.-> REPO
 ```
 
@@ -86,11 +87,11 @@ flowchart TB
     direction TB
     SU["surface.py<br/>action registry · validation · dispatch"]
     SE["service.py + verbs/<br/>single owner of plane state"]
-    OW["ownership.py<br/>owns · subtree conflicts · GPU isolation · wave projection"]
+    OW["ownership.py<br/>dir · subtree conflicts · phase projection"]
     PL["plan.py<br/>the design's campaign split"]
     CA["campaign.py<br/>dag/state layout · report"]
     VE["verifier.py<br/>fingerprints · check runner"]
-    SB["sandbox.py<br/>isolation profiles · gate · GPU"]
+    SB["sandbox.py<br/>isolation profiles · gate"]
     CH["checks.py<br/>one synchronous combined-tree runner + cache"]
     IN["integrate.py<br/>work-branch guard · delivery · simulate"]
     GU["gitutil.py<br/>worktree · merge · merge-tree"]
@@ -121,7 +122,6 @@ flowchart TB
   STO --> STATE
   CA --> FILES
   GU --> GIT
-  SB -.->|"GPU job"| GPU["tools/gpu.sh"]
 ```
 
 The direction of dependency is always **downward**: surface → service → domain
@@ -138,7 +138,7 @@ adapter owns state.
 | `sliceme/verbs/` | The verb groups: bootstrap, campaign, status, review, delivery, sessions. |
 | `sliceme/store.py` | SQLite (WAL) persistence; additive migrations. |
 | `sliceme/gitutil.py` | Git plumbing: worktree, merge, merge-tree, branch, head, push. |
-| `sliceme/ownership.py` | Directory ownership, the DAG wave projection, GPU isolation, and the same-ownership merge. |
+| `sliceme/ownership.py` | Directory ownership, the DAG phase projection, and the same-directory merge. |
 | `sliceme/plan.py` | The design's `sliceme-campaigns` split: parse and validate. |
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner. |
 | `sliceme/sandbox.py` | Isolation profiles, project manifests, the gate, and command wrapping. |
@@ -172,18 +172,18 @@ flowchart LR
 | Action | Purpose |
 |---|---|
 | `start` (alias `init`) | Bootstrap the plane and a campaign for the current directory (idempotent). |
-| `status` | The campaign state: records, waves, and checks; `short`, `unit`, `verbose`. |
+| `status` | The campaign state: records, phases, and checks; `short`, `unit`, `verbose`. |
 | `sessions` | List the registered campaigns from their session descriptors. |
 | `resume` | Reconcile a suspended campaign and return its resume plan. |
-| `simulate` | Plan the waves and verify the combined tree. |
+| `simulate` | Plan the phases and verify the combined tree. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
-| `ready` | The current-wave ready node ids, the wave index, and `paused`. |
+| `ready` | The current-phase ready node ids, the phase index, and `paused`. |
 | `plan` | The design's campaign split joined with the registry state. |
 | `deliver` | Push the work branch and open the delivery pull request against the base branch after the confirmation. |
-| `check` | The one combined-tree check runner for the current wave. |
+| `check` | The one combined-tree check runner for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
-| `record` | Record the current wave: conformance + per-node commits. |
+| `record` | Record the current phase: conformance + per-node commits. |
 | `approve` | Record one campaign approval. |
 | `report` | Write the deterministic campaign report. |
 | `evidence` | The deterministic evidence document (commits, checks, diffs, logs). |
@@ -242,37 +242,36 @@ reads engine state through `runs.host` and launches children through `runs.run`.
 The workflow sandbox has no file access, so all state arrives as JSON from the
 engine.
 
-## 7. From DAG to waves
+## 7. From DAG to phases
 
-`dag.json` is canonical and is never committed. A wave is the largest set of
-nodes that may run concurrently without conflicting on owned directories. The
-planner authors coarse nodes; the engine then contracts any remaining
-same-ownership chain into one node.
+`dag.json` is canonical and is never committed. A phase is the largest set of
+nodes that may run concurrently without conflicting on their directories. The
+planner authors one node per directory; the engine then contracts any remaining
+same-directory pair into one node.
 
 ```mermaid
 flowchart TD
-  D["dag.json nodes"] --> MERGE["merge_same_own_nodes<br/>contract same-owns chains"]
-  MERGE --> VAL["validate_dag<br/>unique ids · known deps · acyclic · directory-only owns"]
+  D["dag.json nodes"] --> MERGE["merge_directory_nodes<br/>contract same-directory chains"]
+  MERGE --> VAL["validate_dag<br/>unique ids · known deps · acyclic · one directory per node"]
   VAL --> TOPO["Kahn topological order<br/>stable by declaration order"]
-  TOPO --> PICK{"earliest wave with:<br/>1. index at least max(wave(dep)+1)<br/>2. size under concurrency<br/>3. no subtree conflict<br/>4. no other GPU node"}
-  PICK -- "placed" --> WAVE["append node to wave"]
-  PICK -- "none fit" --> NEW["open a new wave"]
-  WAVE --> MORE{"more nodes?"}
+  TOPO --> PICK{"earliest phase with:<br/>1. index at least max(phase(dep)+1)<br/>2. size under concurrency<br/>3. no subtree conflict"}
+  PICK -- "placed" --> PHASE["append node to phase"]
+  PICK -- "none fit" --> NEW["open a new phase"]
+  PHASE --> MORE{"more nodes?"}
   NEW --> MORE
   MORE -- "yes" --> PICK
-  MORE -- "no" --> OUT["DagWave list<br/>index · members · conflicts"]
+  MORE -- "no" --> OUT["DagPhase list<br/>index · members · conflicts"]
 ```
 
 | Rule | Definition |
 |---|---|
-| `wave(n)` | `max(wave(d) + 1 for d in depends_on)`, then the earliest wave with room under `concurrency` and no directory-subtree conflict and no other GPU node. |
-| `ready(n)` | `n` is a member of the current wave and is neither recorded nor running. The wave is the one scheduling gate; every dependency lives in an earlier wave. |
-| `owns` conflict | Equal directories, or one an ancestor of the other. `src/api` overlaps `src` and `src/api/v2`. |
-| GPU rule | A node whose `gpu` field is not `none` conflicts with every node, so it lands in a wave of its own. |
+| `phase(n)` | `max(phase(d) + 1 for d in depends_on)`, then the earliest phase with room under `concurrency` and no directory-subtree conflict. |
+| `ready(n)` | `n` is a member of the current phase and is neither recorded nor running. The phase is the one scheduling gate; every dependency lives in an earlier phase. |
+| `dir` conflict | Equal directories, or one an ancestor of the other. `src/api` overlaps `src` and `src/api/v2`. |
 
-Every wave records onto the same campaign worktree. A later wave therefore sees
-the files of the previous wave without a merge or a rebase. Sliceme defers the
-pull request to the single `deliver` step. The engine projects the waves from
+Every phase records onto the same campaign worktree. A later phase therefore sees
+the files of the previous phase without a merge or a rebase. Sliceme defers the
+pull request to the single `deliver` step. The engine projects the phases from
 `dag.json` plus the recorded records in `state.db`; the adapter's session
 descriptor carries the per-node status.
 
@@ -283,13 +282,13 @@ inputs that produced it.
 
 ```mermaid
 flowchart LR
-  HEAD["recorded wave head"] --> TREE["git tree hash"]
+  HEAD["recorded phase head"] --> TREE["git tree hash"]
   CMDS["command vector<br/>plane checks"] --> CMDD["cmd_digest"]
   TOOL["git + python + lockfile hashes"] --> TOOLD["toolchain_digest"]
   POL["config policy block"] --> POLD["policy_digest"]
   SBX["resolved Sandbox profile"] --> SBXD["sandbox_digest"]
   CHV["CHECKS_VERSION"] --> CHD["checks_digest"]
-  SRC["source: plane · wave:n · deliver"] --> FP{{"sha256(...)"}}
+  SRC["source: plane · phase:n · deliver"] --> FP{{"sha256(...)"}}
 
   TREE --> FP
   CMDD --> FP
@@ -300,19 +299,19 @@ flowchart LR
   FP --> LOOKUP{"verdict for this<br/>fingerprint?"}
   LOOKUP -- "yes" --> REUSE["reuse the cached row<br/>(no commands run)"]
   LOOKUP -- "no" --> SCRATCH["detached scratch worktree<br/>at the commit"]
-  SCRATCH --> WRAP["wrap each command<br/>GPU runner -> sandbox -> acceptance"]
+  SCRATCH --> WRAP["wrap each command<br/>sandbox -> acceptance"]
   WRAP --> RECORD["write one terminal row"]
 ```
 
 Two paths share this primitive:
 
-1. **Wave path (`check`).** The runner checks the recorded wave head
-   with `source=wave:<n>`, and the reviewer judges the recorded evidence.
+1. **Phase path (`check`).** The runner checks the recorded phase head
+   with `source=phase:<n>`, and the reviewer judges the recorded evidence.
 2. **Delivery path (`deliver`).** The plane's trusted checks run on the campaign
    head with `source=deliver` before the push. Sliceme reuses a passed
    fingerprint.
 
-`source` is part of the identity, so a `wave:1` verdict can never collide with a
+`source` is part of the identity, so a `phase:1` verdict can never collide with a
 plane check. Sliceme folds in the sandbox digest and the checks version. A
 stricter sandbox or a change in how checks run therefore invalidates cached
 verdicts.
@@ -341,8 +340,8 @@ sequenceDiagram
   no lease.
 - `find_verdict` selects a terminal row for the fingerprint, so an unchanged check
   set never re-runs.
-- A GPU job composes as `GPU runner -> sandbox -> acceptance`. The scheduler is
-  the only GPU serialization: each GPU node has a wave of its own.
+- A check command composes as `sandbox -> acceptance`. A stricter sandbox is a
+  new fingerprint value.
 
 ## 9. Delivery
 
@@ -354,7 +353,7 @@ sequenceDiagram
   participant G as Git
   participant F as Forge (gh)
 
-  C->>E: deliver (when every wave is done and the user confirmed)
+  C->>E: deliver (when every phase is done and the user confirmed)
   E->>E: require a newest unconsumed approve for the campaign
   E->>E: refuse if the work branch is main, master, or the default branch
   E->>G: resolve the work branch (source)
@@ -424,7 +423,6 @@ erDiagram
     text commit_ref
     text fingerprint
     text status
-    text gpu
     real duration
   }
 ```
@@ -463,7 +461,7 @@ stateDiagram-v2
   pending --> running: the resource launches a worker (deps recorded)
   running --> recorded: record committed the node
   running --> failed: worker error or exit != 0
-  recorded --> failed: the wave check fails
+  recorded --> failed: the phase check fails
   failed --> running: re-spawn (bounded)
   recorded --> [*]
 ```
@@ -472,14 +470,14 @@ stateDiagram-v2
 |---|---|
 | Worker produces no record / fails the checks | The coordinator retries, splits the node, or stops. |
 | Reviewer reports a problem | The coordinator retries, splits the node, or stops. |
-| A wave record touches a path outside every node's `owns` | Plan conformance rejects it; the coordinator widens `owns` or adds a `depends_on` edge; waves reproject. |
+| A phase record touches a path outside every node's `dir` | Plan conformance rejects it; the coordinator corrects the `dir` or adds a `depends_on` edge; phases reproject. |
 | Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; structured findings return; nothing is pushed. |
 | Checks fail at `deliver` | Sliceme does not open the pull request; records stay undelivered. |
 | Default-branch work branch | Refused at `start` and at `deliver`; there is no override. |
 | Orchestrator crash | The children of the coordinator die. On resume, a `running` node stays `running` if the campaign worktree is present, else `pending`; a `recorded` node stays `recorded`. Sliceme reuses the campaign worktree. |
 | Concurrent spawns completing together | Coordinator state is a rebuildable cache; git and `state.db` are the source of truth. |
 
-Bounding knobs: `concurrency` (wave size), `waveCap` and `nodeCap` (the resource
+Bounding knobs: `concurrency` (phase size), `phaseCap` and `nodeCap` (the resource
 loop), per-command timeouts, and one synchronous runner.
 
 ## 12. Package and extension layout
@@ -495,7 +493,6 @@ sliceme/
     agents/{planner,worker}.md
   docs/                       # guide, reference, workflow, database, architecture, ...
   tests/                      # unittest suite plus the Node resource harness
-  tools/gpu.sh                # bundled GPU host runner
   package.json                # pi package manifest (extensions: coordinator.ts)
   pyproject.toml
 ```
@@ -515,7 +512,7 @@ resource and the engine own the campaign".
 | Layered components | flowchart | §4 |
 | Request path / action surface | flowchart | §5 |
 | Campaign lifecycle | sequence | §6 |
-| DAG → waves | flowchart | §7 |
+| DAG → phases | flowchart | §7 |
 | Fingerprint and the check runner | flowchart | §8 |
 | The one runner | sequence | §8 |
 | Integration and delivery | sequence | §9 |

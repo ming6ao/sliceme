@@ -15,7 +15,7 @@ In:
 
 - One campaign-level approval for the whole commit set.
 - Review of the accumulated campaign commits, at any time, before or after the
-  last wave.
+  last phase.
 - The generated report (`.sliceme/<branch-key>.report.md`), even though it is
   git-ignored, shown as a virtual file next to the diff.
 - The check evidence for each reviewed commit.
@@ -57,7 +57,7 @@ file, so the review surface adds no second store.
 
 ## 3. Review model
 
-- The review unit is the campaign worktree. Commits accumulate as waves land.
+- The review unit is the campaign worktree. Commits accumulate as phases land.
 - A review packet is the diff from the base branch to the campaign head
   (`target_tip...source_tip`), the commit list, the report, and the check
   evidence. The diff base is the base branch, not the work branch: the
@@ -109,11 +109,11 @@ on its own.
   or a failed forge call leaves the decision unconsumed, so a retry needs no new
   review.
 
-The coordinator prompts for confirmation one time, after the last wave. It
+The coordinator prompts for confirmation one time, after the last phase. It
 writes the evidence and the report, shows the evidence summary and the pull
 request details to the user, and asks for one confirmation. On a confirmation it
 records the approval and runs `deliver`; on a decline it stops and keeps the
-campaign for a later attempt. The confirmation is the only pause; suspension
+campaign for a later try. The confirmation is the only pause; suspension
 stays an explicit user command.
 
 ## 6. The report
@@ -130,10 +130,10 @@ request; the report stays reviewable next to it.
 
 ## 7. Delivery
 
-The coordinator triggers delivery after every wave completes and a human approves
+The coordinator triggers delivery after every phase completes and a human approves
 the campaign. The design orders delivery to avoid a race with the campaign loop:
 
-1. **Quiesce.** The resource records and checks one wave at a time, so no worker
+1. **Quiesce.** The resource records and checks one phase at a time, so no worker
    commits mid-delivery.
 2. **Lock.** Take the one workspace lock at `.sliceme/workspace.lock`.
 3. **Re-check the gate** under the lock and immediately before the push.
@@ -142,7 +142,7 @@ the campaign. The design orders delivery to avoid a race with the campaign loop:
 
 Preconditions, enforced in `Service`:
 
-- every wave reaches done, or an `override` decision records a note;
+- every phase reaches done, or an `override` decision records a note;
 - the campaign worktree has no uncommitted changes;
 - the base branch worktree is clean;
 - a human approved the campaign, or an override records a note;

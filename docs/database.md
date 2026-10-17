@@ -79,7 +79,7 @@ approvals  (standalone; keyed by branch_key)
   (the pull request base), one worktree, one DAG, and one confirmation gate.
   A plane holds one or more campaigns.
 - A **record** is a committed head the campaign offers for delivery. The
-  campaign worktree accumulates commits, so a later wave adds rows.
+  campaign worktree accumulates commits, so a later phase adds rows.
 - A **check** is one terminal check result. It carries its own fingerprint and
   result; the review evidence reads the newest terminal check for a commit.
 - A **review decision** is one campaign-level approval, rejection, or override.
@@ -104,16 +104,16 @@ All `*_at` columns are `REAL` epoch seconds from `util.now()` (`time.time()`).
 
 Indexes: `idx_records_status`, `idx_records_campaign`.
 
-Created by `Service._record_wave_commits`, one per wave member (`node` set): a
+Created by `Service._record_phase_commits`, one per phase member (`node` set): a
 commit record for each changed node and an empty marker for a member that
-changed no file. The campaign worktree accumulates commits, so a later wave adds
-rows and never rewrites an earlier wave's row. The campaign owns the branch and
+changed no file. The campaign worktree accumulates commits, so a later phase adds
+rows and never rewrites an earlier phase's row. The campaign owns the branch and
 the worktree, so the table duplicates neither.
 
 Updated by `integrate._mark_delivered`, which sets `status='delivered'` without
 rewriting `head_commit` (the node commit is provenance).
 
-Read by `Store.list_records` and `Store.get_record`, `integrate.plan_waves`,
+Read by `Store.list_records` and `Store.get_record`, `integrate.plan_phases`,
 `Service.status`, `packet.build_packet`, and `campaign.build_skeleton`.
 
 ### 5.2 `verdicts`
@@ -122,16 +122,15 @@ Read by `Store.list_records` and `Store.get_record`, `integrate.plan_waves`,
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `fingerprint` | TEXT NOT NULL | content fingerprint; the cache key |
-| `wave` | INTEGER | campaign wave |
+| `phase` | INTEGER | campaign phase |
 | `campaign` | TEXT | the owning campaign key |
-| `source` | TEXT NOT NULL | `wave:<n>` or `deliver` |
+| `source` | TEXT NOT NULL | `phase:<n>` or `deliver` |
 | `commit_ref` | TEXT NOT NULL | commit the checks run at |
 | `tree` | TEXT | git tree hash |
 | `commands` | TEXT NOT NULL | JSON command vector |
 | `checks` | TEXT | JSON list of `{name, command, required, timeout}` |
 | `sandbox` | TEXT | JSON sandbox profile |
 | `sandbox_digest` | TEXT | folded into the fingerprint |
-| `gpu` | TEXT NOT NULL DEFAULT `'none'` | `none`, `T1`, `T2` |
 | `status` | TEXT NOT NULL | `passed`, `failed`, or `error` |
 | `duration` | REAL | measured run time |
 | `exit_code` | INTEGER | first non-zero command exit |
@@ -211,20 +210,20 @@ records `pr_url` / `pr_number`.
    recorded work branch and base branch.
 2. **Worktree.** `open` creates the campaign worktree and branch and
    records the path on the campaign row (`campaigns.worktree`).
-3. **Wave record.** `record` runs conformance-by-ownership on
+3. **Phase record.** `record` runs conformance-by-ownership on
    the campaign worktree and inserts one `records` row per changed node with
    `status='recorded'`.
 4. **Check.** `check` calls the one runner. The runner inserts a
    `verdicts` row, or the cache serves a terminal fingerprint. `packet.build_packet`
    reads the newest terminal check per commit as evidence.
-5. **Delivery.** After every wave completes and the user confirms, `deliver`
+5. **Delivery.** After every phase completes and the user confirms, `deliver`
    pushes the work branch and opens a pull request against the delivery
    base, then `_mark_delivered` sets the campaign's records to `delivered` and the
    campaign state to `delivered`.
 6. **Review.** The human records one campaign decision through
    `approve`. The delivery gate reads the newest unconsumed row.
 7. **Status and report.** `Service.status` reads the campaign row, records,
-   waves, and check counts. `campaign.build_skeleton` reads the campaign row,
+   phases, and check counts. `campaign.build_skeleton` reads the campaign row,
    records, and the newest verdict per record for the report.
 8. **Cleanup.** `Service.gc` reads the campaign registry and removes the
    worktree and branch of campaigns in `landed`/`delivered`/`closed`, and prunes
@@ -236,7 +235,7 @@ records `pr_url` / `pr_number`.
 | Table | Writers | Readers |
 |---|---|---|
 | `campaigns` | `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`, `Store.create_campaign`, `Store.set_campaign_worktree`, `Service.deliver` | `Service.campaign`, `Service.status`, `plan`, the report and evidence, `gc` |
-| `records` | `Service._record_wave_commits`, `integrate._mark_delivered` | `Service.status`, `packet.build_packet`, `campaign.build_skeleton` |
+| `records` | `Service._record_phase_commits`, `integrate._mark_delivered` | `Service.status`, `packet.build_packet`, `campaign.build_skeleton` |
 | `verdicts` | `CheckRunner.run` | `Store.find_verdict/get_verdict/latest_verdict_for_commit/verdict_counts`, `packet._evidence_map` |
 | `approvals` | `Service.record_approval`, `consume_approvals` | `Service.campaign_approval`, `packet.build_packet`, `require_all_approved` |
 
@@ -247,7 +246,6 @@ records `pr_url` / `pr_number`.
 | `campaigns` | `state` | `working` (default), `delivered`, `closed` |
 | `records` | `status` | `recorded` (default), `pending`, `delivered`, `failed`, `blocked` |
 | `verdicts` | `status` | `passed`, `failed`, `error` |
-| `verdicts` | `gpu` | `none`, `T1`, `T2` |
 | `approvals` | `action` | `approve`, `request_changes`, `override` |
 
 ## 9. Concurrency and integrity

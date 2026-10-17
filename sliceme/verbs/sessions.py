@@ -48,10 +48,10 @@ class SessionVerbs:
         worktree_present = bool(worktree and worktree.exists())
         worktree_dirty = bool(worktree_present and not gitutil.is_clean(worktree))
 
-        current_wave = self._wave_cursor(branch).index
+        current_phase = self._phase_cursor(branch).index
 
         plan: dict[str, Any] = {
-            "record_wave": None,
+            "record_phase": None,
             "resume": [],
             "respawn": [],
             "verify": [],
@@ -85,7 +85,7 @@ class SessionVerbs:
             ):
                 plan["respawn"].append(node)
         if plan["resume"] or worktree_dirty:
-            plan["record_wave"] = current_wave
+            plan["record_phase"] = current_phase
 
         result = {
             "campaign": descriptor.get("campaign") or dag.get("campaign"),
@@ -94,7 +94,7 @@ class SessionVerbs:
             "worktree": str(worktree) if worktree else None,
             "worktree_present": worktree_present,
             "worktree_dirty": worktree_dirty,
-            "current_wave": current_wave,
+            "current_phase": current_phase,
             "nodes": statuses,
             "resume_plan": plan,
             "descriptor": descriptor or None,
@@ -186,7 +186,7 @@ class SessionVerbs:
                     "label": descriptor.get("label"),
                     "status": descriptor.get("status") or "suspended",
                     "reason": descriptor.get("reason"),
-                    "wave": descriptor.get("current_wave"),
+                    "phase": descriptor.get("current_phase"),
                     "done": done,
                     "total": total,
                     "suspended_at": descriptor.get("suspended_at"),
