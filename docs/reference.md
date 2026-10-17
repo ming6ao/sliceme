@@ -6,12 +6,17 @@ deliberate gaps. For the model and workflow, see [guide.md](./guide.md).
 ## 1. Actions
 
 The CLI and the pi `sliceme` tool derive from one action registry
-(`sliceme/surface.py`). The engine has eleven verbs:
+(`sliceme/surface.py`). The engine has sixteen verbs:
 
 | Action | Purpose |
 |---|---|
 | `start` (alias `init`) | Bootstrap the plane and a campaign for the current directory (idempotent). |
-| `status` | Campaigns, records, waves, checks, health, simulation; the default is the dense summary, `--verbose` is the full dump, and `--sessions`/`--resume` cover the campaign registry and the resume plan. |
+| `status` | The campaign state: records, waves, and checks. The default is the dense summary and `--verbose` is the full dump. |
+| `sessions` | List the registered campaigns from their session descriptors. |
+| `resume` | Reconcile a suspended campaign and return its resume plan. |
+| `simulate` | Plan the waves and verify the combined tree. |
+| `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
+| `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-wave node ids, the wave index, and `paused`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
 | `deliver` | Push the work branch and open the delivery pull request against the base branch after the confirmation. |
@@ -68,29 +73,19 @@ The programmatic plane-only helper is `Service.init_plane(root, ...)`.
 ### `status`
 
 ```bash
-sliceme status [--unit U] [--short] [--dense] [--verbose] [--simulate] [--no-checks]
-                 [--health] [--gc] [--sessions] [--resume [--plan-only]] [--campaign REF]
+sliceme status [--unit U] [--short] [--dense] [--verbose] [--campaign REF]
 ```
 
 The default human output is the **dense summary**. It has a header, one line per
-node in DAG order, and one line per wave. The header shows `campaign`,
-`target`/`worktree`/`base`, `design`, node count, and wave size. A node line
-shows `w<wave> <id> <status>` plus the node label. A wave line shows
+node in DAG order, and one line per wave. The header shows `campaign`, the work
+branch, the worktree path, and `base`, plus `design`, node count, and wave size.
+A node line shows `w<wave> <id> <status>` plus the node label. A wave line shows
 the index, the status, and the member ids.
 
 `--dense` asks for it explicitly and `--verbose` prints the full nested dump
 instead. With `--json` the default is the nested dump; `--dense --json` emits
 the summary as JSON (including `lines`). `--short` prints only the bound
-campaign's name (or key). `--health` checks git/config/db.
-
-`--gc` prunes worktrees, delivered-work branches, scratch, expired review
-rows, and the files of every campaign that has finished. It keeps the report.
-`--simulate` groups recorded records into DAG waves, materializes each
-wave's combined tree, and runs the configured checks once over the combined
-result; `--no-checks` plans only. `--sessions` lists registered campaigns from
-their descriptor files. `--resume` reconciles a suspended campaign from git plus
-`state.db` and returns its resume plan; `--plan-only` is a compatibility no-op,
-because the resume plan is a pure read.
+campaign's name (or key). `--unit U` shows one campaign's dashboard.
 
 The nested dump (`--verbose`, or `--json` without `--dense`) returns
 `dag_waves` (the scheduler's wave plan), `ready` (the ready node ids), `paused`,
@@ -111,6 +106,55 @@ the absorbed ids in `merged_from`. Sliceme protects a node that has a recorded
 record or a status other than `pending`. Sliceme reports the result as
 `dag_merge` (`merged`, `before_nodes`, `after_nodes`, `before_waves`,
 `after_waves`).
+
+### `sessions`
+
+```bash
+sliceme sessions
+```
+
+List the registered campaigns from their descriptor files. This is the engine
+view that a second terminal uses. Each entry carries `work_branch`, `campaign`,
+`label`, `status`, `wave`, `done`, `total`, and `session_file`.
+
+### `resume`
+
+```bash
+sliceme resume [--campaign REF]
+```
+
+Read `.sliceme/<branch-key>.session.json`, reconcile it with git plus
+`state.db`, and return the resume plan. The plan is a pure read: it writes
+nothing. Git and the database win over the descriptor.
+
+### `simulate`
+
+```bash
+sliceme simulate [--no-checks] [--campaign REF]
+```
+
+Group recorded records into DAG waves, materialize each wave's combined tree,
+and run the configured checks once over the combined result. `--no-checks`
+plans only. The simulation changes no record, no branch, and no base branch.
+
+### `gc`
+
+```bash
+sliceme gc
+```
+
+Prune worktrees, delivered-work branches, scratch, expired review rows, and the
+files of every campaign that has finished. It keeps the report and the evidence
+document.
+
+### `doctor`
+
+```bash
+sliceme doctor
+```
+
+Check git, `config.json`, and `state.db`. The result carries one `checks` list
+and one `ok` flag.
 
 ### `ready`
 
@@ -140,7 +184,7 @@ campaign is not delivered or closed.
 Use the plan to run one design as a sequence of campaigns. Each campaign has its
 own DAG and worktree, so a directory may repeat across entries. The engine keeps
 one owner per directory inside one campaign. See
-[multi-campaign.md](./multi-campaign.md) section 15.
+[multi-campaign.md](./multi-campaign.md) section 12.
 
 ### `deliver`
 
@@ -260,12 +304,11 @@ agent. The evidence is not a gate.
 ### `approve`
 
 ```bash
-sliceme approve [--all] [--commit SHA] [--note TEXT] [--actor A]
+sliceme approve [--note TEXT] [--actor A]
 ```
 
 Append one **campaign-level** approval (`commit_hash` is null). One approval
-covers the whole accumulated commit set. The `--all` and `--commit` flags stay
-for compatibility; they do not change the stored approval.
+covers the whole accumulated commit set.
 
 ### `report`
 
@@ -350,8 +393,8 @@ The adapter-written `.session.json` descriptor is the one place a node's status
 lives: its `nodes` map records `pending|running|recorded|failed` (and an
 `attempts` counter) at suspend time. There is no `state.json`. Git and
 `state.db` are authoritative. Only the pi adapter writes the descriptor and the
-`.control.json` pause flag; the engine reads them (`status --resume`,
-`status --sessions`, `ready`).
+`.control.json` pause flag; the engine reads them (`resume`, `sessions`,
+`ready`).
 
 SQLite tables: `campaigns`, `records`, `verdicts`, `approvals`.
 

@@ -300,8 +300,6 @@ class BootstrapVerbs:
                 "initialized": initialized,
                 "campaign": (row or {}).get("key"),
                 "work_branch": (row or {}).get("work_branch"),
-                # Retired mirror kept for one release.
-                "feature_branch": (row or {}).get("work_branch"),
                 "worktree": (row or {}).get("worktree"),
             }
         finally:

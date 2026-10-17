@@ -29,16 +29,14 @@ class ReviewVerbs:
         self,
         *,
         action: str,
-        commit: str | None = None,
-        all_commits: bool = False,
         actor: str | None = None,
         note: str | None = None,
     ) -> dict[str, Any]:
         """Append one campaign-level decision (``commit_hash`` is NULL).
 
-        One approval controls the whole campaign commit set, so ``approve``
-        and ``request_changes`` never bind to one commit.  ``override`` stays
-        a separate campaign-level decision that admits delivery.
+        One approval controls the whole campaign commit set, so a decision
+        never binds to one commit.  ``override`` stays a separate
+        campaign-level decision that admits delivery.
         """
         from ..review import packet
 
@@ -132,7 +130,7 @@ class ReviewVerbs:
             return decision
         listing = ", ".join(commit[:7] for commit in commits)
         error = SlicemeError(
-            f"not-approved: {listing} not approved; open `sliceme review`"
+            f"not-approved: {listing} not approved; run `sliceme approve`"
             " and approve the campaign"
         )
         error.reason = "not_approved"

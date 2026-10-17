@@ -49,10 +49,12 @@ sliceme start DESIGN.md           derive the work branch; planner -> dag.json + 
 sliceme open                      fetch main; create the worktree from origin/main
 sliceme ready                     the current wave's ready node ids
 sliceme status                    waves, nodes, and paused
+sliceme plan DESIGN.md            show the campaign split declared in the design
 sliceme record                    commit the finished nodes as per-node commits
 sliceme check                     run the combined-tree checks for the wave
-sliceme evidence                  write the deterministic evidence document
 sliceme approve                   record the one campaign approval
+sliceme report                    write the deterministic campaign report
+sliceme evidence                  write the deterministic evidence document
 sliceme deliver                   push the work branch and open a pull request against main
 ```
 

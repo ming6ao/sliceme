@@ -67,12 +67,13 @@ class StatusSummaryCase(unittest.TestCase):
         self.assertEqual(view["node_count"], 2)
         self.assertEqual(view["wave_size"], 2)
         self.assertEqual([n["id"] for n in view["nodes"]], ["w1", "w2"])
-        self.assertEqual(view["lines"][0], "campaign: dense")
+        self.assertEqual(view["lines"][0], "campaign:    dense")
         self.assertEqual(
-            view["lines"][1], "target:   feat/x  worktree: feat/x  base: main"
+            view["lines"][1],
+            "work branch: feat/x  worktree: (unset)  base: main",
         )
-        self.assertEqual(view["lines"][2], "design:   DESIGN.md")
-        self.assertEqual(view["lines"][3], "nodes:    2  wave size: 2")
+        self.assertEqual(view["lines"][2], "design:      DESIGN.md")
+        self.assertEqual(view["lines"][3], "nodes:       2  wave size: 2")
         self.assertEqual(view["lines"][4], "  w0 w1 recorded")
         self.assertEqual(view["lines"][5], "  w1 w2 running")
         self.assertEqual(view["lines"][6], "wave 0 [done]: w1")
@@ -120,7 +121,7 @@ class StatusSummaryCase(unittest.TestCase):
         self.assertEqual(view["node_count"], 0)
         self.assertEqual(view["dag_waves"], [])
         self.assertEqual(len(view["lines"]), 4)
-        self.assertEqual(view["lines"][3], "nodes:    0  wave size: ?")
+        self.assertEqual(view["lines"][3], "nodes:       0  wave size: ?")
         self.assertFalse(any(line.startswith("  w") for line in view["lines"]))
         self.assertFalse(any(line.startswith("wave ") for line in view["lines"]))
 

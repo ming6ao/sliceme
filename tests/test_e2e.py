@@ -112,7 +112,7 @@ class EndToEndCase(unittest.TestCase):
         check = svc.check_wave()
         self.assertEqual(check["status"], "passed")
 
-        svc.record_approval(action="approve", all_commits=True, actor="reviewer")
+        svc.record_approval(action="approve", actor="reviewer")
         evidence = svc.evidence(design="DESIGN.md")
         self.assertTrue(Path(evidence["path"]).is_file())
         self.assertTrue(Path(evidence["json_path"]).is_file())
@@ -157,7 +157,7 @@ class EndToEndCase(unittest.TestCase):
         unit = svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "api" / "app.py").write_text("value = 2\n")
         svc.record_wave(0, messages={"w1": "add the endpoint"})
-        svc.record_approval(action="approve", all_commits=True, actor="reviewer")
+        svc.record_approval(action="approve", actor="reviewer")
 
         result = svc.deliver()
         self.assertEqual(result["results"][0]["status"], "failed")

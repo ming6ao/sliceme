@@ -270,7 +270,7 @@ records `pr_url` / `pr_number`.
   descriptor; there is no `state.json`, and git plus the database win on
   conflict.
 - The suspend/resume descriptor `.sliceme/<branch-key>.session.json` is a file.
-  `status --sessions` and `status --resume` read it directly; there is no
+  `sessions` and `resume` read it directly; there is no
   `campaign_sessions` projection.
 - Child events, per-child progress, and run control belong to pi-subagents.
   Sliceme keeps no `events.jsonl`, no per-node heartbeat, and no `jobs` table.
@@ -282,7 +282,7 @@ records `pr_url` / `pr_number`.
 ## 11. Suspend/resume
 
 The suspend/resume descriptor is the pi adapter's file. The engine reads it in
-`status --resume` and `status --sessions` and keeps no database copy, so the
+`resume` and `sessions` and keeps no database copy, so the
 descriptor is the single source of truth. Resume reconciles from git plus
 `state.db`; the `verdicts` table serves the cached verification, so a resumed node
 does not re-run a full check.

@@ -52,9 +52,10 @@ COORDINATOR (this session)
   ancestor, or descendant) into different waves. It rejects an empty or blank
   `owns` entry, and a node that changes no file may omit `owns`. There is no
   runtime declare step and no lease.
-- A node starts once every dependency reaches `done`; the wave stays a display
-  hint. The node runs in the same worktree, so it already sees the files of the
-  previous wave.
+- A node starts once the engine reaches its wave and every dependency reaches
+  `done`. The wave is the scheduling gate: one wave records and checks before
+  the next wave starts. The node runs in the same worktree, so it already sees
+  the files of the previous wave.
 - Workers are **pure editors**: they edit only their owned directories, never
   run `git`, and never run the test suite. The resource runs
   `record` to create one commit per node and enforce
@@ -167,7 +168,12 @@ equals the default branch.
 | Action | Purpose |
 |---|---|
 | `start` | bootstrap the plane; `design` derives the work branch; `feature_branch` overrides it; `base` overrides the base branch |
-| `status` | records, waves, checks; `short`, `unit`, `simulate`, `health`, `gc`; `--sessions` lists registered campaigns; `--resume` reconciles a suspended campaign from git plus `state.db` |
+| `status` | the campaign state: records, waves, and checks; `short`, `unit`, `dense`, `verbose` |
+| `sessions` | list the registered campaigns from their session descriptors |
+| `resume` | reconcile a suspended campaign from git plus `state.db` and return its resume plan |
+| `simulate` | plan the waves and verify the combined tree; `no_checks` plans only |
+| `gc` | prune worktrees, delivered branches, scratch, and finished campaign files |
+| `doctor` | check git, `config.json`, and `state.db` health |
 | `ready` | the current-wave ready node ids, the wave index, and `paused` |
 | `plan` | the design's `sliceme-campaigns` split joined with the registry state, plus the next entry |
 | `deliver` | push the work branch and open the delivery pull request against the base branch (`main`); `source`, `cleanup`, `no_checks` |

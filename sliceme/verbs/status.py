@@ -288,7 +288,6 @@ class StatusVerbs:
             "campaign": campaign.get("name") or campaign["key"],
             "campaign_key": key,
             "worktree_branch": self.config.get("work_branch"),
-            "feature_branch": branch,
             "default_branch": self.config.get("default_branch") or integrate.found_default_branch(self.root),
             "units": units,
             "records": records,
@@ -339,17 +338,17 @@ class StatusVerbs:
 
         name = (dag or {}).get("campaign") or campaign_row.get("name") or "(unnamed)"
         design = (dag or {}).get("design")
-        base = (dag or {}).get("base")
-        worktree = self.config.get("work_branch")
+        base = (dag or {}).get("base") or self.config.get("base_branch")
+        worktree = campaign_row.get("worktree")
         wave_size = (dag or {}).get("concurrency")
         if wave_size is None:
             wave_size = "?"
 
         lines = [
-            f"campaign: {name}",
-            f"target:   {branch or '(unset)'}  worktree: {worktree or '(unset)'}  base: {base or '(unset)'}",
-            f"design:   {design or '(unspecified)'}",
-            f"nodes:    {len(node_ids)}  wave size: {wave_size}",
+            f"campaign:    {name}",
+            f"work branch: {branch or '(unset)'}  worktree: {worktree or '(unset)'}  base: {base or '(unset)'}",
+            f"design:      {design or '(unspecified)'}",
+            f"nodes:       {len(node_ids)}  wave size: {wave_size}",
         ]
         node_rows: list[dict[str, Any]] = []
         for node in nodes:
@@ -380,7 +379,8 @@ class StatusVerbs:
             "work_branch": branch,
             "base_branch": base,
             "target_branch": branch,
-            "worktree_branch": worktree,
+            "worktree_branch": branch,
+            "worktree": worktree,
             "base": base,
             "design": design,
             "node_count": len(node_ids),
@@ -398,8 +398,8 @@ class StatusVerbs:
         for row in plane["campaigns"]:
             lines.append(
                 f"  {row['key']} [{row['state']}] "
-                f"target: {row['work_branch'] or '(unset)'} "
-                f"worktree: {row['work_branch'] or '(unset)'}"
+                f"work branch: {row['work_branch'] or '(unset)'} "
+                f"worktree: {row['worktree'] or '(unset)'}"
             )
         return {**plane, "lines": lines}
 
@@ -415,6 +415,7 @@ class StatusVerbs:
                     "work_branch": row["work_branch"],
                     "target_branch": row["work_branch"],
                     "worktree_branch": row["work_branch"],
+                    "worktree": row.get("worktree"),
                     "unit_name": row["unit_name"],
                     "state": row["state"],
                     "records": len(records),

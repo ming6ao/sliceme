@@ -1,7 +1,7 @@
 # Sliceme session suspend and resume
 
-Status: implemented, with two future-work items open. The engine `status --resume` and
-`status --sessions` actions, the adapter descriptor and pause flag, the
+Status: implemented, with two future-work items open. The engine `resume` and
+`sessions` actions, the adapter descriptor and pause flag, the
 `/suspend` and `/campaigns` commands, and wave-scoped continuation all work.
 Budget auto-suspend and a paused-worktree prune policy remain future work. The
 descriptor file is the only registry: there is no `campaign_sessions` table.
@@ -113,7 +113,7 @@ guard before a switch) and `agent_settled` (a turn-boundary checkpoint).
 
 Suspension is a pi-session concern. There is deliberately no engine `suspend`
 action, because two rich writers in two languages for one file is a failure
-mode. A second terminal inspects campaigns with `sliceme status --sessions` and
+mode. A second terminal inspects campaigns with `sliceme sessions` and
 resumes by starting pi.
 
 The design uses no global index. Discovery reads the descriptor files.
@@ -125,14 +125,14 @@ The design uses no global index. Discovery reads the descriptor files.
 `sliceme/surface.py` owns these actions:
 
 ```text
-sliceme status --resume  [--plan-only]
-sliceme status --sessions
+sliceme resume
+sliceme sessions
 ```
 
-- `status --resume` reads `.sliceme/<branch-key>.session.json`, reconciles it
+- `resume` reads `.sliceme/<branch-key>.session.json`, reconciles it
   with git plus `state.db`, and returns the resume plan. The plan is a pure
-  read, so `--plan-only` is a compatibility no-op.
-- `status --sessions` is the engine view of the registered campaigns for a
+  read.
+- `sessions` is the engine view of the registered campaigns for a
   second terminal. It reads the descriptor files.
 
 The adapter writes the descriptor. The engine reads it.

@@ -324,7 +324,7 @@ drops the work branch, and clears scratch. It keeps the report and the
 
 Every cleanup level keeps the report and the evidence document.
 
-`status --gc` removes the files of every campaign that has finished. It keeps
+`sliceme gc` removes the files of every campaign that has finished. It keeps
 the reports. A closed campaign can hold unmerged work, so `gc` keeps its files
 and its branch.
 
@@ -528,7 +528,7 @@ one confirmation before `deliver`.
 | A wave record changes a path outside every node's `owns` | The record is rejected; the coordinator widens `owns` or adds a `depends_on` edge and respawns. |
 | Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; findings surface. Nothing is pushed. |
 | Orchestrator crash | The pi-subagents children are children of the coordinator, so a crash kills them. On resume, a node left `running` stays `running` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. Git and `state.db` win over the session descriptor. |
-| User suspends (`/suspend`) | The pause flag stops new work. The adapter aborts the in-flight turn, which stops the current child within seconds. The interrupted node stays `running`, and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme status --resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree stays `running`, the wave is re-recorded, and unchanged records re-verify from the check cache. |
+| User suspends (`/suspend`) | The pause flag stops new work. The adapter aborts the in-flight turn, which stops the current child within seconds. The interrupted node stays `running`, and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree stays `running`, the wave is re-recorded, and unchanged records re-verify from the check cache. |
 
 Caps: `concurrency` (the wave size), the resource's `waveCap` and `nodeCap`
 fields, and the per-command check timeout bound the cost of each campaign.

@@ -172,7 +172,12 @@ flowchart LR
 | Action | Purpose |
 |---|---|
 | `start` (alias `init`) | Bootstrap the plane and a campaign for the current directory (idempotent). |
-| `status` | Campaigns, records, waves, checks, health, simulation; `--sessions` and `--resume` cover the campaign registry and the resume plan. |
+| `status` | The campaign state: records, waves, and checks; `short`, `unit`, `verbose`. |
+| `sessions` | List the registered campaigns from their session descriptors. |
+| `resume` | Reconcile a suspended campaign and return its resume plan. |
+| `simulate` | Plan the waves and verify the combined tree. |
+| `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
+| `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-wave ready node ids, the wave index, and `paused`. |
 | `plan` | The design's campaign split joined with the registry state. |
 | `deliver` | Push the work branch and open the delivery pull request against the base branch after the confirmation. |

@@ -75,7 +75,7 @@ class PullRequestCase(unittest.TestCase):
         return unit
 
     def approve(self):
-        return self.svc.record_approval(action="approve", all_commits=True, actor="test")
+        return self.svc.record_approval(action="approve", actor="test")
 
     def campaign_row(self):
         return self.svc.store.get_campaign("feat/x")

@@ -201,7 +201,7 @@ class DeliveryIsolationTests(MultiCampaignCase):
         self.record("feat/y", "feat/y", content_a="a = 3\n")
         x = self.service("feat/x")
         try:
-            x.record_approval(action="approve", all_commits=True, actor="test")
+            x.record_approval(action="approve", actor="test")
             result = x.deliver()
             self.assertEqual([r["status"] for r in result["results"]], ["delivered"])
             self.assertTrue(result["pull_request"]["url"])

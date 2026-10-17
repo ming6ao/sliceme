@@ -321,7 +321,7 @@ class DeliveryCheckTests(ChecksCase):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "change"})
-        self.svc.record_approval(action="approve", all_commits=True, actor="test")
+        self.svc.record_approval(action="approve", actor="test")
         created = {"url": "https://example.test/pull/1", "number": 1}
         with mock.patch.object(integrate.pullrequest, "require"), mock.patch.object(
             integrate.pullrequest, "find", return_value=None
@@ -368,7 +368,7 @@ class DeliveryGpuTests(ChecksCase):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "change"})
-        self.svc.record_approval(action="approve", all_commits=True, actor="test")
+        self.svc.record_approval(action="approve", actor="test")
         with mock.patch(
             "sliceme.checks.CheckRunner.run",
             return_value={"status": "passed", "results": "[]"},
@@ -399,7 +399,7 @@ class FailingDeliveryCase(ChecksCase):
         worktree = self.workspace()
         (worktree / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_wave(0, messages={"w1": "change"})
-        self.svc.record_approval(action="approve", all_commits=True, actor="test")
+        self.svc.record_approval(action="approve", actor="test")
         with mock.patch.object(integrate.pullrequest, "require"):
             results = integrate.deliver_pull_request(
                 self.svc.store,

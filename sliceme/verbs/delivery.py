@@ -161,7 +161,7 @@ class DeliveryVerbs:
         """Prune worktrees, branches, scratch, and reviews.
 
         ``artifacts`` also removes the files of finished campaigns (the report
-        stays).  ``status --gc`` sets it; ``deliver --cleanup worktrees`` does
+        stays).  ``gc`` sets it; ``deliver --cleanup worktrees`` does
         not, so it keeps the dag and state records.
         """
         removed = []

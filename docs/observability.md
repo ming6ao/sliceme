@@ -53,14 +53,14 @@ The default human `sliceme status` output is the **dense summary**: a header,
 one line per node in DAG order, and one line per wave. Its node and wave lines
 come from `dag.json`, git, the recorded records in `state.db`, and the
 session descriptor. The
-header's `target`/`worktree` come from the campaign config, so a second terminal
-sees the same plan.
+header shows the work branch, the worktree path, and `base` from the campaign
+record and the plan, so a second terminal sees the same state.
 
 ```text
-campaign: dense
-target:   feat/x  worktree: feat/x  base: main
-design:   DESIGN.md
-nodes:    2  wave size: 2
+campaign:    dense
+work branch: feat/x  worktree: /repo/.worktrees/feat-x  base: main
+design:      DESIGN.md
+nodes:       2  wave size: 2
   w0 w1 [build] done — parser
   w1 w2 [-] running
 wave 0 [done]: w1
@@ -92,7 +92,7 @@ campaign falls back to a compact per-campaign plane list.
 
 ## 4. The simulation
 
-`sliceme status --simulate` groups recorded records into DAG waves,
+`sliceme simulate` groups recorded records into DAG waves,
 materializes each wave's combined tree, and runs the configured checks once over
 the combined result. `--no-checks` plans only. The simulation is a dry run: it
 changes no record, no branch, and no base branch.

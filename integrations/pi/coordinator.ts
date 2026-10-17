@@ -52,6 +52,11 @@ const PAUSE_TTL_SECONDS = 3600;
 const ENGINE_ACTIONS = [
 	"start",
 	"status",
+	"sessions",
+	"resume",
+	"simulate",
+	"gc",
+	"doctor",
 	"ready",
 	"plan",
 	"open",
@@ -76,26 +81,18 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 		"force",
 		"campaign",
 	],
-	status: [
-		"unit",
-		"short",
-		"dense",
-		"verbose",
-		"simulate",
-		"health",
-		"gc",
-		"no_checks",
-		"sessions",
-		"resume",
-		"plan_only",
-		"campaign",
-	],
+	status: ["unit", "short", "dense", "verbose", "campaign"],
+	sessions: [],
+	resume: ["campaign"],
+	simulate: ["no_checks", "campaign"],
+	gc: [],
+	doctor: [],
 	ready: ["campaign"],
 	plan: ["design", "campaign"],
 	open: ["campaign"],
 	record: ["campaign"],
 	check: ["campaign"],
-	approve: ["all", "commit", "note", "actor", "campaign"],
+	approve: ["note", "actor", "campaign"],
 	report: ["narrative", "design", "campaign"],
 	evidence: ["design", "campaign"],
 	deliver: ["source", "cleanup", "no_checks", "campaign"],
@@ -395,7 +392,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	async function fetchResumePlan(ctx: ExtensionContext, branch: string): Promise<any | null> {
 		try {
 			return (
-				await sliceme(ctx, ["status", "--resume", "--plan-only", "--campaign", branch])
+				await sliceme(ctx, ["resume", "--campaign", branch])
 			).json;
 		} catch {
 			return null;
@@ -407,11 +404,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		label: "Sliceme",
 		description:
 			"Drive a Sliceme campaign through the engine: start (plane + campaign), plan " +
-			"(design split), status, ready (current-wave node ids and paused), open (create the " +
-			"campaign worktree), record (the current wave as per-node commits), check " +
-			"(combined-tree checks), approve (one campaign approval), report (the deterministic " +
-			"report), evidence (the deterministic evidence document), and deliver (push + pull " +
-			"request). The campaign loop runs in the sliceme.campaign workflow resource.",
+			"(design split), status (campaign state), sessions (registered campaigns), resume " +
+			"(resume plan), simulate (combined-tree plan), gc (prune), doctor (health), ready " +
+			"(current-wave node ids and paused), open (create the campaign worktree), record " +
+			"(the current wave as per-node commits), check (combined-tree checks), approve (one " +
+			"campaign approval), report (the deterministic report), evidence (the deterministic " +
+			"evidence document), and deliver (push + pull request). The campaign loop runs in " +
+			"the sliceme.campaign workflow resource.",
 		promptSnippet: "Call the Sliceme engine (start → plan → resource loop → deliver)",
 		promptGuidelines: [
 			"Start a campaign with `start` and inspect the design split with `plan`. Then " +
@@ -455,28 +454,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			short: Type.Optional(Type.Boolean({ description: "status: print only the unit name" })),
 			dense: Type.Optional(Type.Boolean({ description: "status: print the compact summary" })),
 			verbose: Type.Optional(Type.Boolean({ description: "status: print the full dump" })),
-			simulate: Type.Optional(
-				Type.Boolean({ description: "status: plan waves and verify the combined tree" }),
-			),
-			health: Type.Optional(Type.Boolean({ description: "status: check git/plane health" })),
-			gc: Type.Optional(Type.Boolean({ description: "status: prune worktrees and branches" })),
 			no_checks: Type.Optional(
-				Type.Boolean({ description: "status/deliver: skip the trusted checks" }),
-			),
-			sessions: Type.Optional(
-				Type.Boolean({ description: "status: list registered campaigns" }),
-			),
-			resume: Type.Optional(
-				Type.Boolean({ description: "status: reconcile a suspended campaign" }),
-			),
-			plan_only: Type.Optional(
-				Type.Boolean({ description: "status --resume: compatibility no-op; resume writes nothing" }),
-			),
-			all: Type.Optional(
-				Type.Boolean({ description: "approve: approve the whole campaign commit set" }),
+				Type.Boolean({ description: "simulate/deliver: skip the trusted checks" }),
 			),
 			narrative: Type.Optional(Type.String({ description: "report: what-changed text" })),
-			commit: Type.Optional(Type.String({ description: "approve: commit to approve" })),
 			note: Type.Optional(Type.String({ description: "approve: approval note" })),
 			actor: Type.Optional(Type.String({ description: "approve: who recorded the approval" })),
 			source: Type.Optional(Type.String({ description: "deliver: worktree branch" })),
@@ -570,7 +551,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			let sessions: any[] = [];
 			try {
-				sessions = (await sliceme(ctx, ["status", "--sessions"])).json?.sessions ?? [];
+				sessions = (await sliceme(ctx, ["sessions"])).json?.sessions ?? [];
 			} catch (error) {
 				ctx.ui.notify(`sliceme: ${String((error as Error)?.message ?? error)}`, "error");
 				return;
@@ -582,7 +563,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (!ctx.hasUI) return;
 			const labels = sessions.map(
 				(s) =>
-					`${s.label ?? s.feature_branch} — wave ${s.wave ?? "?"} ` +
+					`${s.label ?? s.work_branch} — wave ${s.wave ?? "?"} ` +
 					`${s.done}/${s.total} ${s.status}`,
 			);
 			const choice = await ctx.ui.select("Sliceme campaigns", labels);

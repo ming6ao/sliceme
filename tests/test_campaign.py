@@ -91,7 +91,7 @@ class CampaignCase(unittest.TestCase):
 class BootstrapTests(CampaignCase):
     def test_start_records_the_campaign_without_a_worktree(self):
         result = Service.init(self.root, design="DESIGN.md")
-        self.assertEqual(result["feature_branch"], "feat/design")
+        self.assertEqual(result["work_branch"], "feat/design")
         self.assertIsNone(result["worktree"])
         service = Service(self.root)
         try:
@@ -187,7 +187,7 @@ class ReportTests(CampaignCase):
         self.dag([{"id": "w1", "owns": ["src"], "depends_on": []}])
         self.record(0, {"src/a.py": "a = 2\n"})
         status = self.svc.status()
-        self.assertEqual(status["feature_branch"], "feat/x")
+        self.assertEqual(status["work_branch"], "feat/x")
         self.assertEqual(status["default_branch"], "main")
         self.assertTrue(status["dag_waves"])
 

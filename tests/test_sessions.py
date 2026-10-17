@@ -120,7 +120,7 @@ class SessionsCase(unittest.TestCase):
         return next(c for c in result["records"] if c["node"] == "w1")
 
     def approve(self):
-        return self.svc.record_approval(action="approve", all_commits=True, actor="test")
+        return self.svc.record_approval(action="approve", actor="test")
 
 
 class DescriptorTests(SessionsCase):
@@ -147,7 +147,7 @@ class ResumePlanTests(SessionsCase):
         self.svc.store.conn.commit()
         self.write_state({"w1": {"status": "done", "commit": record["head_commit"]}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertEqual(plan["resume_plan"]["record_wave"], None)
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
@@ -160,7 +160,7 @@ class ResumePlanTests(SessionsCase):
         record = self.record_w1()
         self.write_state({"w1": {"status": "done", "commit": record["head_commit"]}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
 
@@ -168,7 +168,7 @@ class ResumePlanTests(SessionsCase):
         record = self.record_w1()
         self.write_state({"w1": {"status": "recorded", "commit": record["head_commit"]}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertIn("w1", plan["resume_plan"]["verify"])
 
@@ -179,7 +179,7 @@ class ResumePlanTests(SessionsCase):
         self.record_w1()
         self.write_state({"w1": {"status": "running", "attempts": 1}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertIn("w1", plan["resume_plan"]["verify"])
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
@@ -191,7 +191,7 @@ class ResumePlanTests(SessionsCase):
         self.record_w1()
         campaign.write_session(self.root, "feat/x", self.descriptor(current_wave=None))
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertIn("w1", plan["resume_plan"]["verify"])
         self.assertEqual(plan["current_wave"], 1)
@@ -207,7 +207,7 @@ class ResumePlanTests(SessionsCase):
         self.assertEqual(sorted(recorded["empty"]), ["w1", "w2"])
         self.write_state({"w1": {"status": "recorded", "commit": "0" * 40}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "recorded")
         self.assertIn("w1", plan["resume_plan"]["verify"])
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
@@ -217,7 +217,7 @@ class ResumePlanTests(SessionsCase):
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")  # uncommitted
         self.write_state({"w1": {"status": "running", "attempts": 1}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "running")
         self.assertEqual(plan["resume_plan"]["record_wave"], 0)
         self.assertIn("w1", plan["resume_plan"]["resume"])
@@ -228,21 +228,21 @@ class ResumePlanTests(SessionsCase):
         shutil.rmtree(unit["worktree"])
         self.write_state({"w1": {"status": "running", "attempts": 1}})
 
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertFalse(plan["worktree_present"])
         self.assertEqual(plan["nodes"]["w1"], "pending")
         self.assertIn("w1", plan["resume_plan"]["respawn"])
 
     def test_fresh_pending_nodes_are_not_reported_as_respawn(self):
         self.write_state({"w1": {"status": "pending"}})
-        plan = self.svc.resume(plan_only=True)
+        plan = self.svc.resume()
         self.assertEqual(plan["nodes"]["w1"], "pending")
         self.assertNotIn("w1", plan["resume_plan"]["respawn"])
 
     def test_resume_is_idempotent(self):
         record = self.record_w1()
         self.write_state({"w1": {"status": "recorded", "commit": record["head_commit"]}})
-        self.assertEqual(self.svc.resume(plan_only=True), self.svc.resume(plan_only=True))
+        self.assertEqual(self.svc.resume(), self.svc.resume())
 
     def test_record_on_resume_then_verify(self):
         # Simulate a suspend while w1's worker was mid-edit: the worktree is
@@ -252,7 +252,7 @@ class ResumePlanTests(SessionsCase):
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.write_state({"w1": {"status": "running", "attempts": 1}})
 
-        before = self.svc.resume(plan_only=True)
+        before = self.svc.resume()
         self.assertEqual(before["resume_plan"]["record_wave"], 0)
         self.assertIn("w1", before["resume_plan"]["resume"])
 
@@ -260,7 +260,7 @@ class ResumePlanTests(SessionsCase):
         record = next(c for c in recorded["records"] if c["node"] == "w1")
         self.write_state({"w1": {"status": "recorded", "commit": record["head_commit"]}})
 
-        after = self.svc.resume(plan_only=True)
+        after = self.svc.resume()
         self.assertEqual(after["nodes"]["w1"], "recorded")
         self.assertIn("w1", after["resume_plan"]["verify"])
         self.assertIsNone(after["resume_plan"]["record_wave"])
@@ -274,7 +274,7 @@ class RegistryTests(SessionsCase):
         campaign.write_session(self.root, "feat/x", self.descriptor())
 
         result = self.svc.sessions()
-        entry = next(s for s in result["sessions"] if s["feature_branch"] == "feat/x")
+        entry = next(s for s in result["sessions"] if s["work_branch"] == "feat/x")
         self.assertTrue(entry["is_current"])
         self.assertEqual(entry["session_file"], "/tmp/sess-1.jsonl")
         self.assertEqual(entry["total"], 3)
@@ -282,8 +282,8 @@ class RegistryTests(SessionsCase):
 
     def test_resume_is_a_pure_plan(self):
         campaign.write_session(self.root, "feat/x", self.descriptor())
-        plan = self.svc.resume(plan_only=True)
-        self.assertEqual(plan["feature_branch"], "feat/x")
+        plan = self.svc.resume()
+        self.assertEqual(plan["work_branch"], "feat/x")
         # The descriptor file remains the only registry; resume writes no rows.
         self.assertEqual(campaign.load_session(self.root, "feat/x")["pi"]["session_id"], "sess-1")
 

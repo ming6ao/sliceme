@@ -16,13 +16,12 @@ from ..util import (
 
 class SessionVerbs:
 
-    def resume(self, *, plan_only: bool = False) -> dict[str, Any]:
+    def resume(self) -> dict[str, Any]:
         """Reconcile a suspended campaign and return its resume plan.
 
         Git and ``state.db`` always win over the adapter-written descriptor.
-        The plan is a pure computation over git plus ``state.db``: it writes
-        nothing, so ``plan_only`` is a compatibility no-op kept for the CLI
-        surface.
+        The plan is a pure computation over git plus ``state.db``, so it writes
+        nothing.
         """
         config = self.config
         campaign_row = self.campaign
@@ -91,7 +90,6 @@ class SessionVerbs:
         result = {
             "campaign": descriptor.get("campaign") or dag.get("campaign"),
             "work_branch": branch,
-            "feature_branch": branch,
             "worktree_branch": config.get("work_branch"),
             "worktree": str(worktree) if worktree else None,
             "worktree_present": worktree_present,
@@ -165,8 +163,8 @@ class SessionVerbs:
             branch = current["work_branch"]
         entries: list[dict[str, Any]] = []
         for key, descriptor in campaign.list_sessions(self.root):
-            feature_branch = str(descriptor.get("feature_branch") or key)
-            row = self.store.get_campaign(feature_branch)
+            work_branch = str(descriptor.get("feature_branch") or key)
+            row = self.store.get_campaign(work_branch)
             campaign_key = row["key"] if row else None
             recorded = (
                 {
@@ -177,14 +175,13 @@ class SessionVerbs:
                 if campaign_key
                 else set()
             )
-            dag = campaign.load_dag(self.root, feature_branch) or {}
+            dag = campaign.load_dag(self.root, work_branch) or {}
             total = len([n for n in dag.get("nodes", []) if n.get("id")])
             done = len(recorded)
             entries.append(
                 {
-                    "work_branch": feature_branch,
-                    "feature_branch": feature_branch,
-                    "is_current": feature_branch == branch,
+                    "work_branch": work_branch,
+                    "is_current": work_branch == branch,
                     "campaign": descriptor.get("campaign") or dag.get("campaign"),
                     "label": descriptor.get("label"),
                     "status": descriptor.get("status") or "suspended",
@@ -194,7 +191,7 @@ class SessionVerbs:
                     "total": total,
                     "suspended_at": descriptor.get("suspended_at"),
                     "session_file": (descriptor.get("pi") or {}).get("session_file"),
-                    "descriptor": str(campaign.session_path(self.root, feature_branch)),
+                    "descriptor": str(campaign.session_path(self.root, work_branch)),
                 }
             )
         return {"root": str(self.root), "sessions": entries}

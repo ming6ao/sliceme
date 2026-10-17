@@ -431,10 +431,10 @@ class PiPackageTests(unittest.TestCase):
 
     def test_docs_document_the_session_actions(self):
         names = {a.name for a in surface.ACTIONS}
-        self.assertIn("status", names)
-        self.assertIn("check", names)
+        for name in ("status", "sessions", "resume", "check"):
+            self.assertIn(name, names)
         reference = (REPO_ROOT / "docs" / "reference.md").read_text(encoding="utf-8")
-        for needle in ("--resume", "--sessions"):
+        for needle in ("sliceme sessions", "sliceme resume"):
             self.assertIn(needle, reference)
 
 

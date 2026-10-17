@@ -70,7 +70,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             first = json.loads(out.stdout)
             self.assertTrue(first["initialized"])
-            self.assertEqual(first["feature_branch"], "feat/design")
+            self.assertEqual(first["work_branch"], "feat/design")
             self.assertIsNone(first["worktree"])
             self.assertTrue((root / ".sliceme" / "config.json").is_file())
 
@@ -97,11 +97,11 @@ class CliTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp, check=True)
             run_cli(["--json", "start", "--design", "DESIGN.md"], root)
 
-            out = run_cli(["--json", "status", "--health"], root)
+            out = run_cli(["--json", "doctor"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue(json.loads(out.stdout)["ok"])
 
-            out = run_cli(["--json", "status", "--simulate", "--no-checks"], root)
+            out = run_cli(["--json", "simulate", "--no-checks"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("waves", json.loads(out.stdout))
 
@@ -177,7 +177,7 @@ class CliTests(unittest.TestCase):
             # A plain `status` reports the feature branch and the one writer.
             out = run_cli(["status", "--json"], root)
             status = json.loads(out.stdout)
-            self.assertEqual(status["feature_branch"], "feat/x")
+            self.assertEqual(status["work_branch"], "feat/x")
             self.assertEqual([u["branch"] for u in status["units"]], ["feat/x"])
 
             write_json(
@@ -203,7 +203,7 @@ class CliTests(unittest.TestCase):
             record = json.loads(out.stdout)["records"][0]
 
             out = run_cli(
-                ["--json", "approve", "--commit", record["head_commit"]],
+                ["--json", "approve"],
                 root,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
@@ -306,16 +306,16 @@ class CliTests(unittest.TestCase):
                 )
             )
 
-            out = run_cli(["--json", "status", "--resume", "--plan-only"], root)
+            out = run_cli(["--json", "resume"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             plan = json.loads(out.stdout)
-            self.assertEqual(plan["feature_branch"], "feat/x")
+            self.assertEqual(plan["work_branch"], "feat/x")
             self.assertIn("w1", plan["nodes"])
 
-            out = run_cli(["--json", "status", "--sessions"], root)
+            out = run_cli(["--json", "sessions"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             entries = json.loads(out.stdout)["sessions"]
-            self.assertEqual(entries[0]["feature_branch"], "feat/x")
+            self.assertEqual(entries[0]["work_branch"], "feat/x")
             self.assertEqual(entries[0]["session_file"], "/tmp/s1.jsonl")
 
 
@@ -393,7 +393,7 @@ class CliTests(unittest.TestCase):
             # The default human output is the dense summary, not the nested dump.
             out = run_cli(["status"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIn("campaign: cli", out.stdout)
+            self.assertIn("campaign:    cli", out.stdout)
             self.assertIn("  w0 w1 recorded", out.stdout)
             self.assertIn("  w1 w2 pending", out.stdout)
             self.assertIn("wave 1 [pending]: w2", out.stdout)
@@ -420,7 +420,7 @@ class CliTests(unittest.TestCase):
             out = run_cli(["status", "--dense", "--json"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             lines = json.loads(out.stdout)["lines"]
-            self.assertEqual(lines[0], "campaign: cli")
+            self.assertEqual(lines[0], "campaign:    cli")
             self.assertIn("  w0 w1 recorded", lines)
             self.assertIn("  w1 w2 pending", lines)
             self.assertIn("wave 1 [pending]: w2", lines)
@@ -476,9 +476,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("feat--x [working]", out.stdout)
             self.assertIn("feat--y [working]", out.stdout)
 
-    def test_status_secondary_modes_keep_the_human_dump(self):
-        # --health/--gc/--simulate/--sessions/--resume are dispatched before the
-        # dense default; the CLI must print their own human dump, never lines.
+    def test_secondary_verbs_keep_the_human_dump(self):
+        # doctor/gc/simulate/sessions/resume are their own verbs; the CLI must
+        # print each verb's own human dump, never the dense summary's lines.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
@@ -504,11 +504,11 @@ class CliTests(unittest.TestCase):
             )
 
             cases = [
-                (["status", "--health"], "checks:"),
-                (["status", "--gc"], "removed_worktrees:"),
-                (["status", "--simulate", "--no-checks"], "record_count:"),
-                (["status", "--sessions"], "sessions:"),
-                (["status", "--resume", "--plan-only"], "resume_plan:"),
+                (["doctor"], "checks:"),
+                (["gc"], "removed_worktrees:"),
+                (["simulate", "--no-checks"], "record_count:"),
+                (["sessions"], "sessions:"),
+                (["resume"], "resume_plan:"),
             ]
             for argv, marker in cases:
                 out = run_cli(argv, root)

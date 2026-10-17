@@ -80,7 +80,7 @@ class WaveScopeCase(unittest.TestCase):
         return run("git", "show", f"{branch}:{rel}", cwd=self.root).stdout
 
     def approve(self):
-        return self.svc.record_approval(action="approve", all_commits=True, actor="test")
+        return self.svc.record_approval(action="approve", actor="test")
 
 
 class RecordTests(WaveScopeCase):

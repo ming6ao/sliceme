@@ -65,21 +65,39 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="status",
-        summary="show units, records, waves, and health",
+        summary="show the campaign state: units, records, waves, and checks",
         params=(
             Param("unit", "string", "show one unit instead of the summary"),
             Param("short", "boolean", "print only the current unit name"),
             Param("dense", "boolean", "print the compact status summary (default)"),
             Param("verbose", "boolean", "print the full nested status dump"),
-            Param("simulate", "boolean", "plan waves and verify the combined tree"),
-            Param("health", "boolean", "check git/plane health"),
-            Param("gc", "boolean", "prune worktrees and landed-unit branches"),
-            Param("no_checks", "boolean", "with --simulate: plan only, do not run checks"),
-            Param("sessions", "boolean", "list registered campaigns instead of the plane"),
-            Param("resume", "boolean", "reconcile a suspended campaign and return its resume plan"),
-            Param("plan_only", "boolean", "with --resume: accepted for compatibility; resume writes nothing"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
+    ),
+    Action(
+        name="sessions",
+        summary="list the registered campaigns from their session descriptors",
+    ),
+    Action(
+        name="resume",
+        summary="reconcile a suspended campaign and return its resume plan",
+        params=(Param("campaign", "string", CAMPAIGN_HELP),),
+    ),
+    Action(
+        name="simulate",
+        summary="plan the waves and verify the combined tree",
+        params=(
+            Param("no_checks", "boolean", "plan only, do not run the checks"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
+        name="gc",
+        summary="prune worktrees, delivered branches, scratch, and finished campaign files",
+    ),
+    Action(
+        name="doctor",
+        summary="check git, config, and state database health",
     ),
     Action(
         name="ready",
@@ -123,8 +141,6 @@ ACTIONS: tuple[Action, ...] = (
         name="approve",
         summary="record one campaign approval",
         params=(
-            Param("all", "boolean", "approve the whole campaign commit set"),
-            Param("commit", "string", "commit to approve"),
             Param("note", "string", "approval note"),
             Param("actor", "string", "who recorded the approval"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -225,16 +241,6 @@ def doctor(root: Path) -> dict[str, Any]:
 
 
 def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
-    if p.get("gc"):
-        return service.gc(artifacts=True)
-    if p.get("health"):
-        return doctor(service.root)
-    if p.get("simulate"):
-        return service.simulation(run_checks_flag=not p.get("no_checks"))
-    if p.get("sessions"):
-        return service.sessions()
-    if p.get("resume"):
-        return service.resume(plan_only=bool(p.get("plan_only")))
     if p.get("short"):
         row = service.require_campaign()
         return {"unit": row.get("name") or row["key"]}
@@ -247,6 +253,26 @@ def _dispatch_status(service: "Service", p: dict[str, Any]) -> Any:
     if p.get("json"):
         return service.status()
     return service.status_summary()
+
+
+def _dispatch_sessions(service: "Service", p: dict[str, Any]) -> Any:
+    return service.sessions()
+
+
+def _dispatch_resume(service: "Service", p: dict[str, Any]) -> Any:
+    return service.resume()
+
+
+def _dispatch_simulate(service: "Service", p: dict[str, Any]) -> Any:
+    return service.simulation(run_checks_flag=not p.get("no_checks"))
+
+
+def _dispatch_gc(service: "Service", p: dict[str, Any]) -> Any:
+    return service.gc(artifacts=True)
+
+
+def _dispatch_doctor(service: "Service", p: dict[str, Any]) -> Any:
+    return doctor(service.root)
 
 
 def _dispatch_plan(service: "Service", p: dict[str, Any]) -> Any:
@@ -288,8 +314,6 @@ def _dispatch_record(service: "Service", p: dict[str, Any]) -> Any:
 def _dispatch_approve(service: "Service", p: dict[str, Any]) -> Any:
     return service.record_approval(
         action="approve",
-        commit=p.get("commit"),
-        all_commits=bool(p.get("all")),
         actor=p.get("actor"),
         note=p.get("note"),
     )
@@ -308,6 +332,11 @@ def _dispatch_evidence(service: "Service", p: dict[str, Any]) -> Any:
 
 _HANDLERS = {
     "status": _dispatch_status,
+    "sessions": _dispatch_sessions,
+    "resume": _dispatch_resume,
+    "simulate": _dispatch_simulate,
+    "gc": _dispatch_gc,
+    "doctor": _dispatch_doctor,
     "ready": _dispatch_ready,
     "plan": _dispatch_plan,
     "deliver": _dispatch_deliver,
