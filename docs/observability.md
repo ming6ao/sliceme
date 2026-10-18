@@ -92,14 +92,7 @@ campaign falls back to a compact per-campaign plane list.
 `ready`, `phase`, and `paused`. The engine computes `paused` from the
 `<branch-key>.control.json` pause flag, so the sandbox needs no file access.
 
-## 4. The simulation
-
-`sliceme simulate` groups recorded records into DAG phases,
-materializes each phase's combined tree, and runs the configured checks once over
-the combined result. `--no-checks` plans only. The simulation is a dry run: it
-changes no record, no branch, and no base branch.
-
-## 5. Where child state lives
+## 4. Where child state lives
 
 The `sliceme.campaign` workflow resource launches each child through
 pi-subagents. pi-subagents owns the child status, the event stream, the tool
@@ -110,7 +103,7 @@ A phase with a stalled or failed child shows up as a node that never reaches
 `recorded`. The coordinator reads `ready` again after the phase children settle,
 and the next `record` attributes the changes that exist.
 
-## 6. Constraints
+## 5. Constraints
 
 - **No daemon.** Poll `sliceme status` or `ready`. Do not add `--follow`.
 - **One synchronous runner.** The check runner writes one terminal row per run,
@@ -121,7 +114,7 @@ and the next `record` attributes the changes that exist.
 - **Private.** The check output, the report, and the evidence document stay
   under the git-excluded `.sliceme/`.
 
-## 7. Tests
+## 6. Tests
 
 - `tests/test_status_summary.py` drives the dense `status` summary.
 - `tests/test_checks.py` drives the check cache and `status` check counts.
@@ -130,7 +123,7 @@ and the next `record` attributes the changes that exist.
 - `tests/test_cli.py` drives the `status` modes.
 - `tests/test_pi_package.py` checks the wiring and the resource grants.
 
-## 8. Related work
+## 7. Related work
 
 - `docs/sessions.md` describes suspend and resume.
 - `docs/database.md` documents the schema.

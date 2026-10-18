@@ -59,7 +59,6 @@ const ENGINE_ACTIONS = [
 	"status",
 	"sessions",
 	"resume",
-	"simulate",
 	"gc",
 	"doctor",
 	"ready",
@@ -90,7 +89,6 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	status: ["unit", "short", "dense", "verbose", "campaign"],
 	sessions: [],
 	resume: ["campaign"],
-	simulate: ["no_checks", "campaign"],
 	gc: [],
 	doctor: [],
 	ready: ["campaign"],
@@ -422,7 +420,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 		description:
 			"Drive a Sliceme campaign through the engine: start (plane + campaign), plan " +
 			"(design split), status (campaign state), sessions (registered campaigns), resume " +
-			"(resume plan), simulate (combined-tree plan), gc (prune), doctor (health), ready " +
+			"(resume plan), gc (prune), doctor (health), ready " +
 			"(current-phase node ids and paused), open (create the campaign worktree), record " +
 			"(the current phase as per-node commits), check (combined-tree checks), approve (one " +
 			"campaign approval), report (the deterministic report), evidence (the deterministic " +
@@ -488,7 +486,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			dense: Type.Optional(Type.Boolean({ description: "status: print the compact summary" })),
 			verbose: Type.Optional(Type.Boolean({ description: "status: print the full dump" })),
 			no_checks: Type.Optional(
-				Type.Boolean({ description: "simulate/deliver: skip the trusted checks" }),
+				Type.Boolean({ description: "deliver: skip the trusted checks" }),
 			),
 			narrative: Type.Optional(Type.String({ description: "report: what-changed text" })),
 			note: Type.Optional(Type.String({ description: "approve: approval note" })),

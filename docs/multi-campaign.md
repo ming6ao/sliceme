@@ -195,7 +195,7 @@ hash is unique across campaigns.
 - `create_campaign_workspace` derives the worktree path from the campaign,
   under `workspace.lock`.
 - `phase_unit`, `record_phase`, `normalize_dag`, `_dag_phases`, `_project_campaign`,
-  `status`, `resume`, `simulation`, `check_phase`, the review verbs, `deliver`,
+  `status`, `resume`, `check_phase`, the review verbs, `deliver`,
   `report`, and `remove_campaign_artifacts` take or resolve a campaign.
 - `status` returns a plane summary when the caller names no campaign. The
   summary holds `default_branch` and a list of campaigns.

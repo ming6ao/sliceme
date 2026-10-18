@@ -97,7 +97,7 @@ flowchart TB
     VE["verifier.py<br/>fingerprints · check runner"]
     SB["sandbox.py<br/>isolation profiles · gate"]
     CH["checks.py<br/>one synchronous combined-tree runner + cache"]
-    IN["integrate.py<br/>work-branch guard · delivery · simulate"]
+    IN["integrate.py<br/>work-branch guard · delivery"]
     GU["gitutil.py<br/>worktree · merge · merge-tree"]
     STO["store.py<br/>SQLite WAL persistence"]
   end
@@ -147,7 +147,7 @@ adapter owns state.
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner. |
 | `sliceme/sandbox.py` | Isolation profiles, project manifests, the gate, and command wrapping. |
 | `sliceme/checks.py` | The single synchronous combined-tree runner and the `verdicts` cache. |
-| `sliceme/integrate.py` | Work-branch guard and the base branch, pull request delivery, and combined-tree simulation. |
+| `sliceme/integrate.py` | Work-branch guard and the base branch, pull request delivery. |
 | `sliceme/pullrequest.py` | The `gh` forge client. |
 | `sliceme/campaign.py` | `dag.json` layout and readers; the deterministic report and evidence document. |
 | `sliceme/review/` | The reduced review surface: `packet.py`, `diff.py`. |
@@ -180,7 +180,6 @@ flowchart LR
 | `status` | The campaign state: records, phases, and checks; `short`, `unit`, `verbose`. |
 | `sessions` | List the registered campaigns from their session descriptors. |
 | `resume` | Reconcile a suspended campaign and return its resume plan. |
-| `simulate` | Plan the phases and verify the combined tree. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase ready node ids, the phase index, and `paused`. |
@@ -449,7 +448,7 @@ erDiagram
   <branch-key>.control.json        # cooperative pause flag
   <branch-key>.worker_<id>.log     # one log per worker id
   worktrees/                       # the single campaign worktree
-  scratch/                         # detached simulation and check worktrees (transient)
+  scratch/                         # detached check worktrees (transient)
 ```
 
 `<branch-key>` replaces `/` with `--` (`feat/x` → `feat--x`), so one campaign's

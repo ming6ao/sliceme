@@ -90,14 +90,6 @@ ACTIONS: tuple[Action, ...] = (
         params=(Param("campaign", "string", CAMPAIGN_HELP),),
     ),
     Action(
-        name="simulate",
-        summary="plan the phases and verify the combined tree",
-        params=(
-            Param("no_checks", "boolean", "plan only, do not run the checks"),
-            Param("campaign", "string", CAMPAIGN_HELP),
-        ),
-    ),
-    Action(
         name="gc",
         summary="prune worktrees, delivered branches, scratch, and finished campaign files",
     ),
@@ -267,10 +259,6 @@ def _dispatch_resume(service: "Service", p: dict[str, Any]) -> Any:
     return service.resume()
 
 
-def _dispatch_simulate(service: "Service", p: dict[str, Any]) -> Any:
-    return service.simulation(run_checks_flag=not p.get("no_checks"))
-
-
 def _dispatch_gc(service: "Service", p: dict[str, Any]) -> Any:
     return service.gc(artifacts=True)
 
@@ -339,7 +327,6 @@ _HANDLERS = {
     "status": _dispatch_status,
     "sessions": _dispatch_sessions,
     "resume": _dispatch_resume,
-    "simulate": _dispatch_simulate,
     "gc": _dispatch_gc,
     "doctor": _dispatch_doctor,
     "ready": _dispatch_ready,

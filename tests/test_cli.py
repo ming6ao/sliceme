@@ -86,7 +86,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(json.loads(out.stdout)["campaign"], first["campaign"])
 
-    def test_status_health_and_simulate(self):
+    def test_status_and_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
@@ -100,10 +100,6 @@ class CliTests(unittest.TestCase):
             out = run_cli(["--json", "doctor"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue(json.loads(out.stdout)["ok"])
-
-            out = run_cli(["--json", "simulate", "--no-checks"], root)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIn("phases", json.loads(out.stdout))
 
     def test_start_ignores_state_subdirectories(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,7 +473,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("feat--y [working]", out.stdout)
 
     def test_secondary_verbs_keep_the_human_dump(self):
-        # doctor/gc/simulate/sessions/resume are their own verbs; the CLI must
+        # doctor/gc/sessions/resume are their own verbs; the CLI must
         # print each verb's own human dump, never the dense summary's lines.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -506,7 +502,6 @@ class CliTests(unittest.TestCase):
             cases = [
                 (["doctor"], "checks:"),
                 (["gc"], "removed_worktrees:"),
-                (["simulate", "--no-checks"], "record_count:"),
                 (["sessions"], "sessions:"),
                 (["resume"], "resume_plan:"),
             ]

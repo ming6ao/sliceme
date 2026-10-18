@@ -19,10 +19,8 @@ When ``check_only`` is set (the orchestrator's ``verify`` step), the node's
 acceptance commands run at the record commit, the verdict is recorded with
 source ``node:<id>``, and nothing is merged.
 
-This module also owns record integration ordering and simulation: recorded
-records are grouped into the campaign DAG's phase order, and ``simulate``
-materializes each phase's combined tree so the plane's trusted checks can run
-once over the combined result.
+This module also owns record integration ordering: recorded records are grouped
+into the campaign DAG's phase order for the status projection.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ from . import campaign, gitutil, pullrequest
 from .ownership import DEFAULT_PHASE_SIZE, plan_dag_phases
 from .store import Store
 from .util import SlicemeError, scratch_dir
-from .verifier import CheckResult, checks_from_config, run_checks
+from .verifier import CheckResult, checks_from_config
 
 __all__ = [
     "DELIVERY_MODES",
@@ -52,7 +50,6 @@ __all__ = [
     "local_result",
     "plan_phases",
     "resolve_delivery_mode",
-    "simulate",
     "target_branch_of",
     "work_branch_of",
 ]
@@ -549,26 +546,20 @@ def deliver_local_merge(
 
 
 # ---------------------------------------------------------------------------
-# Candidate ordering and combined-tree simulation
+# Candidate ordering and phase projection
 # ---------------------------------------------------------------------------
 @dataclass
 class Phase:
     index: int
     records: list[dict[str, Any]] = field(default_factory=list)
-    combined: str = ""
-    check_status: str | None = None
-    checks: list[CheckResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "phase": self.index,
-            "combined": self.combined,
             "members": [
                 {"record": c["id"], "node": c.get("node"), "commit": c.get("head_commit")}
                 for c in self.records
             ],
-            "check_status": self.check_status,
-            "checks": [c.to_dict() for c in self.checks],
         }
 
 
@@ -618,71 +609,4 @@ def plan_phases(
         phase.records.append(record)
     phases.sort(key=lambda w: w.index)
     return phases
-
-
-def _synthetic_commit(root: Path, tree: str, parents: list[str], message: str) -> str:
-    args = ["commit-tree", tree]
-    for parent in parents:
-        args += ["-p", parent]
-    args += ["-m", message]
-    return gitutil.git(root, *args, check=True).stdout.strip()
-
-
-def _merge_into_phase(root: Path, combined: str, branch: str) -> tuple[bool, str]:
-    outcome = gitutil.merge_tree(root, combined, branch)
-    if not outcome.clean or not outcome.tree:
-        return False, combined
-    new_ref = _synthetic_commit(
-        root, outcome.tree, [combined, gitutil.rev_parse(root, branch)], "sliceme phase combine"
-    )
-    return True, new_ref
-
-
-def simulate(
-    store: Store,
-    root: Path,
-    config: dict[str, Any],
-    *,
-    campaign: str | None = None,
-    statuses: list[str] | None = None,
-    run_checks_flag: bool = True,
-) -> dict[str, Any]:
-    records = store.list_records(
-        statuses=statuses or ["recorded", "pending"], campaign=campaign
-    )
-    phases = plan_phases(store, root, config, records)
-    base_ref = base_branch_of(config)
-    scratch = scratch_dir(root)
-    for phase in phases:
-        combined = gitutil.rev_parse(root, base_ref)
-        for record in phase.records:
-            ok, combined = _merge_into_phase(root, combined, record["head_commit"])
-            if not ok:
-                combined = ""
-                break
-        phase.combined = combined
-        if not run_checks_flag or not phase.combined:
-            continue
-        path = scratch / f"phase-{phase.index}-{abs(hash(phase.combined)) % 10_000_000}"
-        try:
-            gitutil.add_detached_worktree(root, path, phase.combined)
-            status, results, _duration = run_checks(root, config, phase.combined, worktree=path)
-            phase.check_status = status
-            phase.checks = results
-        except SlicemeError:
-            phase.check_status = "error"
-        finally:
-            gitutil.cleanup_worktree(root, path)
-    return {
-        "record_count": len(records),
-        "phases": [w.to_dict() for w in phases],
-        "overall": _overall_status(phases),
-    }
-
-
-def _overall_status(phases: list[Phase]) -> str:
-    for phase in phases:
-        if phase.check_status not in (None, "passed"):
-            return "failed"
-    return "pass"
 

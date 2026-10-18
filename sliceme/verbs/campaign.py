@@ -358,15 +358,6 @@ class CampaignVerbs:
             "results": results,
         }
 
-    def simulation(self, *, run_checks_flag: bool = True) -> dict[str, Any]:
-        return integrate.simulate(
-            self.store,
-            self.root,
-            self.config,
-            campaign=self.campaign_key(),
-            run_checks_flag=run_checks_flag,
-        )
-
     def checks(self):
         """Build the single synchronous check runner for this plane."""
         from ..checks import CheckRunner

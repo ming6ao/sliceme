@@ -186,7 +186,6 @@ equals the default branch.
 | `status` | the campaign state: records, phases, and checks; `short`, `unit`, `dense`, `verbose` |
 | `sessions` | list the registered campaigns from their session descriptors |
 | `resume` | reconcile a suspended campaign from git plus `state.db` and return its resume plan |
-| `simulate` | plan the phases and verify the combined tree; `no_checks` plans only |
 | `gc` | prune worktrees, delivered branches, scratch, and finished campaign files |
 | `doctor` | check git, `config.json`, and `state.db` health |
 | `ready` | the current-phase ready node ids, the phase index, and `paused` |

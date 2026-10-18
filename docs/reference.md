@@ -19,7 +19,6 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `status` | The campaign state: records, phases, and checks. The default is the dense summary and `--verbose` is the full dump. |
 | `sessions` | List the registered campaigns from their session descriptors. |
 | `resume` | Reconcile a suspended campaign and return its resume plan. |
-| `simulate` | Plan the phases and verify the combined tree. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase node ids, the phase index, and `paused`. |
@@ -135,16 +134,6 @@ sliceme resume [--campaign REF]
 Read `.sliceme/<branch-key>.session.json`, reconcile it with git plus
 `state.db`, and return the resume plan. The plan is a pure read: it writes
 nothing. Git and the database win over the descriptor.
-
-### `simulate`
-
-```bash
-sliceme simulate [--no-checks] [--campaign REF]
-```
-
-Group recorded records into DAG phases, materialize each phase's combined tree,
-and run the configured checks once over the combined result. `--no-checks`
-plans only. The simulation changes no record, no branch, and no base branch.
 
 ### `gc`
 
@@ -380,7 +369,7 @@ recorded in `dag.json`, so Sliceme rejects a post-plan manifest change.
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
 | `sliceme/checks.py` | The single synchronous combined-tree check runner plus the `checks` cache |
-| `sliceme/integrate.py` | Work-branch guard and the base branch, pull request and local-merge delivery, and combined-tree simulation |
+| `sliceme/integrate.py` | Work-branch guard and the base branch, pull request and local-merge delivery |
 | `sliceme/pullrequest.py` | The `gh` forge client: find or create the delivery pull request |
 | `sliceme/campaign.py` | `dag.json` layout and readers; the deterministic report and evidence document |
 | `sliceme/review/` | Reduced review: `packet.py` (snapshot + commits + report + evidence), `diff.py` (diff parsing) |
@@ -410,7 +399,7 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
   feat--x.control.json             # cooperative pause flag
   feat--x.worker_<id>.log          # one log per worker id
   worktrees/                       # the single campaign worktree
-  scratch/                         # detached simulation and check worktrees (transient)
+  scratch/                         # detached check worktrees (transient)
 ```
 
 The adapter-written `.session.json` descriptor is the one place a node's status
@@ -468,7 +457,7 @@ The suite covers these areas:
 - the campaign approval gate and the report;
 - the workflow resource grants and field rejection (Node harness);
 - end-to-end flows (delivery, idempotency, conflict atomicity, failing checks,
-  simulation, cleanup, and reporting);
+  cleanup, and reporting);
 - CLI and packaging smoke tests.
 
 | File | Covers |
