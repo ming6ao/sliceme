@@ -122,6 +122,17 @@ export function controlPath(cwd: string, branch: string): string {
 }
 
 /**
+ * The adapter-written budget spend file for a campaign.
+ *
+ * The extension owns this file, as it owns the pause flag and the session
+ * descriptor. The engine reads the caps from `config.json` and never writes
+ * this file (`docs/sessions.md` §4).
+ */
+export function budgetPath(cwd: string, branch: string): string {
+	return path.join(stateDir(cwd), `${branchKey(branch)}.budget.json`);
+}
+
+/**
  * The private per-process pointer to the session's active campaign branch.
  *
  * The pi session owns a campaign, and a session can outlive one process, so the

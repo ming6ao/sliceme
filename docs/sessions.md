@@ -1,10 +1,11 @@
 # Sliceme session suspend and resume
 
-Status: implemented, with two future-work items open. The engine `resume` and
+Status: implemented, with one future-work item open. The engine `resume` and
 `sessions` actions, the adapter descriptor and pause flag, the
 `/suspend` and `/campaigns` commands, and phase-scoped continuation all work.
-Budget auto-suspend and a paused-worktree prune policy remain future work. The
-descriptor file is the only registry: there is no `campaign_sessions` table.
+The automatic wall-clock and cost suspend works. A paused-worktree prune policy
+remains future work. The descriptor file is the only registry: there is no
+`campaign_sessions` table.
 
 This document describes how a pi session suspends on request and resumes later.
 It also describes how a long campaign checkpoints its progress, so a resume
@@ -24,6 +25,8 @@ Pi saves every session as JSONL and reopens it with `pi --continue`,
   worker stopped during the suspension continues from the preserved campaign
   worktree.
 - The user can store and manage suspended sessions as campaigns.
+- A campaign stops itself when a wall-clock or cost cap is reached. The stop is
+  a safe point, so no worker stops inside an edit.
 
 ### Non-goals
 
@@ -107,7 +110,8 @@ guard before a switch) and `agent_settled` (a turn-boundary checkpoint).
 | Store | Path | Owner | Role |
 |---|---|---|---|
 | Resume descriptor | `.sliceme/<branch-key>.session.json` | pi adapter | pi session binding, pause reason, phase, resume plan. |
-| Pause flag | `.sliceme/<branch-key>.control.json` | pi adapter | Cooperative pause request. |
+| Pause flag | `.sliceme/<branch-key>.control.json` | pi adapter | Cooperative pause request, with `reason` (`user` or `budget`). |
+| Budget spend | `.sliceme/<branch-key>.budget.json` | pi adapter | Active campaign seconds and spent cost for the current cap window. |
 | Active pointer | `.sliceme/active.<pid>.campaign` | pi adapter | The session's work branch. |
 | Transcript | pi session JSONL | pi | Conversation history. |
 
@@ -127,6 +131,8 @@ The design uses no global index. Discovery reads the descriptor files.
 ```text
 sliceme resume
 sliceme sessions
+sliceme budget --seconds 7200 --usd 10
+sliceme budget --clear
 ```
 
 - `resume` reads `.sliceme/<branch-key>.session.json`, reconciles it
@@ -134,8 +140,12 @@ sliceme sessions
   read.
 - `sessions` is the engine view of the registered campaigns for a
   second terminal. It reads the descriptor files.
+- `budget` sets, raises, or clears the campaign caps in `config.json`. It also
+  starts a new measurement window, so the spend counters reset.
 
-The adapter writes the descriptor. The engine reads it.
+The adapter writes the descriptor, the pause flag, and the spend file. The
+engine reads the descriptor and the pause flag. The adapter alone reads the
+spend file; `gc` removes it.
 
 ## 6. Resume descriptor
 
@@ -232,9 +242,49 @@ previous reviewer evidence.
 5. A hard abort (Escape, Ctrl+C) still works: `ctx.signal` propagates to the
    child processes of the resource.
 
+### Budget auto-suspend
+
+`start` accepts `--budget-seconds` and `--budget-usd`. The engine stores both
+caps in `.sliceme/config.json` under `budget`. A missing `budget` key means "no
+cap".
+
+The pi adapter owns the enforcement, because it alone can measure both values:
+
+- The wall clock is active campaign time. The adapter adds one tick (15 seconds)
+  at a time to `active_seconds` in the spend file, so a suspension and a closed
+  process do not consume the cap. The adapter clamps the tick delta, so a crash
+  gap does not consume the cap either.
+- The cost is the pi session total in USD, from
+  `ctx.sessionManager.getEntries()`, minus the baseline the campaign recorded.
+  That number is the cost the user pays. It includes the parent conversation,
+  the planners, the reviewers, and compaction.
+
+On a trip, the adapter writes the pause flag with `reason: "budget"` and the
+`metric` that tripped. It does **not** abort the turn. The phase is the safe
+point: the campaign resource stops at its next `ready` call, so a worker never
+stops in the middle of an edit. The campaign therefore overshoots the cap by at
+most one phase.
+
+The adapter also marks the descriptor `suspended` with `reason: "budget"` at
+trip time. A later shutdown cannot lose the stop reason. The campaign resource
+returns `state: "paused"` with the engine's `pause_reason` and `pause_metric`,
+so a budget stop and a user suspension stay distinct.
+
+A budget stop does not auto-resume. The user runs `sliceme budget` to raise or
+clear the cap. A new window starts, so the counters reset. The `budget` action
+also clears the budget pause flag, so the campaign can continue. A `budget` stop
+never expires: only a raised cap releases it.
+
+Example:
+
+```text
+/sliceme DESIGN.md                  start a campaign; a cap is optional
+sliceme budget --seconds 7200 --usd 10
+                                    raise the cap after a budget stop
+```
+
 ## 10. Remaining work
 
-- Budget auto-suspend from a wall-clock or cost cap.
 - A time-boxed prune policy for preserved campaign worktrees, surfaced in `gc`.
 
 ## 11. Test plan
@@ -244,3 +294,7 @@ previous reviewer evidence.
 preserved-worktree path, the missing-worktree fallback, idempotent resume, and
 the additive `verdicts` migration. Adapter tests cover the pause flag, the hooks,
 the resume prompt, and the registry.
+
+`tests/test_budget.py` covers the caps, the pause reason, the `budget` action,
+and the spend file. `tests/budget_test.mjs` covers the pure budget module: the
+cap reading, the active-second accumulator, the cost sum, and the trip test.

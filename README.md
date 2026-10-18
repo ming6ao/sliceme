@@ -32,6 +32,9 @@ never author the same files.
 - **Two workflow resources** — the `sliceme.plan` resource owns the bounded
   planner re-pass loop, and the `sliceme.campaign` resource owns the campaign
   loop. The extension registers both, plus the plan and delivery steps.
+- **Optional budget stop** — `start --budget-seconds N --budget-usd USD` stops
+  the campaign at a phase boundary when the wall clock or the cost cap is
+  reached. The campaign then suspends and resumes through the session path.
 
 ## Install
 
@@ -55,6 +58,7 @@ sliceme start DESIGN.md           derive the work branch; planner -> dag.json + 
 sliceme open                      fetch main; create the worktree from origin/main
 sliceme ready                     the current phase's ready node ids
 sliceme status                    phases, nodes, and paused
+sliceme budget --seconds N --usd USD   set, raise, or clear the campaign caps
 sliceme plan DESIGN.md            show the campaign split declared in the design
 sliceme record                    commit the finished nodes as per-node commits
 sliceme check                     run the combined-tree checks for the phase

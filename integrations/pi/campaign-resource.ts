@@ -89,7 +89,8 @@ export function campaignGrants(
  * `runs.host` and all work runs through `runs.run`. The loop verifies after
  * `record`: it records the node commits first, then checks and reviews the
  * recorded evidence. `HOST_TIMEOUT_MS` bounds each engine verb, including the
- * synchronous combined-tree `check`.
+ * synchronous combined-tree `check`. A paused `ready` returns the engine's
+ * pause reason, so a budget stop and a user suspension stay distinct.
  */
 export function buildCampaignScript(
 	commands: CampaignCommands,
@@ -109,7 +110,7 @@ export function buildCampaignScript(
 		`  if (!readyRes.ok) throw new Error("sliceme ready failed: " + (readyRes.error || readyRes.stderr || readyRes.exitCode));`,
 		`  const ready = JSON.parse(readyRes.stdout);`,
 		`  if (ready.paused) {`,
-		`    return { state: "paused", phase: ready.phase === undefined ? null : ready.phase, phases: phases, nodes: nodes };`,
+		`    return { state: "paused", phase: ready.phase === undefined ? null : ready.phase, reason: ready.pause_reason === undefined ? null : ready.pause_reason, metric: ready.pause_metric === undefined ? null : ready.pause_metric, phases: phases, nodes: nodes };`,
 		`  }`,
 		`  const ids = Array.isArray(ready.ready) ? ready.ready : [];`,
 		`  if (ids.length === 0) break;`,

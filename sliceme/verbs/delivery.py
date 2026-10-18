@@ -168,6 +168,7 @@ class DeliveryVerbs:
             campaign.dag_path(self.root, branch),
             campaign.session_path(self.root, branch),
             campaign.control_path(self.root, branch),
+            campaign.budget_path(self.root, branch),
             *sorted(state.glob(f"{key}.worker_*.log")),
         ]
         if not keep_report:

@@ -69,6 +69,8 @@ def _add_action(sub: Any, action: surface.Action) -> None:
             kwargs["default"] = False
         elif param.type == "int":
             kwargs["type"] = int
+        elif param.type == "number":
+            kwargs["type"] = float
         elif param.type == "list":
             kwargs["action"] = "append"
             kwargs["default"] = []

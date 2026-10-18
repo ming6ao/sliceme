@@ -19,9 +19,10 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `status` | The campaign state: records, phases, and checks. The default is the dense summary and `--verbose` is the full dump. |
 | `sessions` | List the registered campaigns from their session descriptors. |
 | `resume` | Reconcile a suspended campaign and return its resume plan. |
+| `budget` | Set, raise, or clear the campaign wall-clock and cost caps. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
-| `ready` | The current-phase node ids, the phase index, and `paused`. |
+| `ready` | The current-phase node ids, the phase index, `paused`, and `pause_reason`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
 | `deliver` | Deliver after the confirmation: `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | Run the synchronous combined-tree checks for the current phase. |
@@ -47,6 +48,7 @@ sliceme start [--path DIR]
                 [--design DESIGN.md] [--feature-branch BRANCH] [--base REF]
                 [--mode pull_request|local]
                 [--check NAME=COMMAND ...]
+                [--budget-seconds N] [--budget-usd USD]
                 [--force] [--campaign REF]
 ```
 
@@ -71,6 +73,9 @@ creates. Re-running `start` is a no-op for the same campaign.
 - The campaign worktree uses the work branch. `open`
   fetches the base branch and creates the worktree from `origin/<base>`.
 - `--check NAME=COMMAND` registers a trusted plane check (repeatable).
+- `--budget-seconds N` and `--budget-usd USD` set the campaign caps. Both are
+  optional; a missing cap means "no limit". The cap stops the campaign at a
+  phase boundary (`docs/sessions.md` §9).
 - Sliceme captures the recorded `default_branch` once at init: origin `HEAD`,
   else `init.defaultBranch`, else an existing `main` or `master`, else `main`.
 - Re-running `start` with a different `--feature-branch` adds a campaign to the
@@ -135,6 +140,18 @@ Read `.sliceme/<branch-key>.session.json`, reconcile it with git plus
 `state.db`, and return the resume plan. The plan is a pure read: it writes
 nothing. Git and the database win over the descriptor.
 
+### `budget`
+
+```bash
+sliceme budget [--seconds N] [--usd USD] [--clear] [--campaign REF]
+```
+
+Set, raise, or clear the caps the adapter enforces. The verb writes `budget` and
+`budget_started_at` in `.sliceme/config.json`. `--clear` removes both caps. Each
+call starts a new measurement window, so the adapter resets its spend counters.
+The `budget` action also clears a budget pause flag, so the campaign can
+continue.
+
 ### `gc`
 
 ```bash
@@ -162,7 +179,8 @@ sliceme ready [--campaign REF]
 ```
 
 Returns `campaign`, `ready` (the current-phase node ids that are neither
-recorded nor running), `phase` (the current phase index), and `paused`. The
+recorded nor running), `phase` (the current phase index), `paused`,
+`pause_reason`, and `budget`. The
 workflow resource polls this verb, so its fields are the loop contract. The phase
 is the one scheduling gate. Every dependency lives in an earlier phase. A node
 is ready once the engine reaches its phase, and the node is neither
@@ -373,7 +391,7 @@ recorded in `dag.json`, so Sliceme rejects a post-plan manifest change.
 | `sliceme/pullrequest.py` | The `gh` forge client: find or create the delivery pull request |
 | `sliceme/campaign.py` | `dag.json` layout and readers; the deterministic report and evidence document |
 | `sliceme/review/` | Reduced review: `packet.py` (snapshot + commits + report + evidence), `diff.py` (diff parsing) |
-| `integrations/pi/` | the pi adapter: `common.ts` (invocation and paths), `coordinator.ts` (tool, agents, commands), `plan-resource.ts` (the `sliceme.plan` resource), `campaign-resource.ts` (the `sliceme.campaign` resource), `agents/{planner,worker}.md` |
+| `integrations/pi/` | the pi adapter: `common.ts` (invocation and paths), `budget.ts` (the pure cap and spend logic), `coordinator.ts` (tool, agents, commands, the budget watchdog), `plan-resource.ts` (the `sliceme.plan` resource), `campaign-resource.ts` (the `sliceme.campaign` resource), `agents/{planner,worker}.md` |
 
 The engine is dependency-free Python 3.11+. `Service` is the only state owner;
 adapters only parse arguments and render results. `bin/sliceme` is a shim so the
@@ -396,7 +414,8 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
   feat--x.evidence.json            # complete evidence (full check output)
   feat--x.evidence.md              # human evidence; the pull request body
   feat--x.session.json             # adapter-written suspend/resume descriptor
-  feat--x.control.json             # cooperative pause flag
+  feat--x.control.json             # cooperative pause flag (reason: user | budget)
+  feat--x.budget.json              # adapter-written budget spend (active seconds, cost)
   feat--x.worker_<id>.log          # one log per worker id
   worktrees/                       # the single campaign worktree
   scratch/                         # detached check worktrees (transient)
@@ -405,9 +424,10 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
 The adapter-written `.session.json` descriptor is the one place a node's status
 lives: its `nodes` map records `pending|running|recorded|failed` (and an
 `attempts` counter) at suspend time. There is no `state.json`. Git and
-`state.db` are authoritative. Only the pi adapter writes the descriptor and the
-`.control.json` pause flag; the engine reads them (`resume`, `sessions`,
-`ready`).
+`state.db` are authoritative. Only the pi adapter writes the descriptor, the
+`.control.json` pause flag, and the `.budget.json` spend file; the engine reads
+the descriptor and the flag (`resume`, `sessions`, `ready`), and `gc` removes
+the spend file.
 
 SQLite tables: `campaigns`, `records`, `verdicts`, `approvals`.
 
@@ -480,10 +500,12 @@ The suite covers these areas:
 | `tests/test_review_approval.py` | the one campaign approval, the override, and the retired comment verbs |
 | `tests/test_review_report.py` | the deterministic report and the packet |
 | `tests/test_sessions.py` | the descriptor round-trip, the resume plan, cleanup, and the additive `verdicts` table |
+| `tests/test_budget.py` | the caps, the pause reason, the `budget` action, and the spend file |
 | `tests/test_status_summary.py` | the dense `status` summary |
 | `tests/test_cli.py` | CLI surface and lifecycle |
 | `tests/test_pi_package.py` | pi package contract, the tool/verbs, the resource, and the agent definitions |
 | `tests/campaign_resource_test.mjs` | the resource fixed grants and bounded-field rejection |
+| `tests/budget_test.mjs` | the pure budget module: caps, active seconds, cost sum, and the trip test |
 
 ## 6. Deliberate gaps
 

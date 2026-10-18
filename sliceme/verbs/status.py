@@ -58,6 +58,18 @@ class StatusVerbs:
             return []
         return self._ready_in_current_phase(branch)
 
+    def pause_state(self) -> dict[str, Any] | None:
+        """The bound campaign's pause control file, or ``None``.
+
+        The pi adapter writes this file.  It carries ``pause``, ``reason``
+        (``user`` or ``budget``), and the ``metric`` that tripped a budget.
+        """
+        row = self.campaign
+        if row is None:
+            return None
+        control = campaign.load_control(self.root, str(row["work_branch"]))
+        return control if control else None
+
     def paused(self) -> bool:
         """True when the bound campaign's cooperative pause flag is set.
 
@@ -66,11 +78,8 @@ class StatusVerbs:
         value so a caller can stop before doing work without reading the file
         itself.
         """
-        row = self.campaign
-        if row is None:
-            return False
-        control = campaign.load_control(self.root, str(row["work_branch"]))
-        return bool(control and control.get("pause"))
+        state = self.pause_state()
+        return bool(state and state.get("pause"))
 
     def _recorded_nodes(self) -> set[str]:
         """The node ids with a record, empty or not.
@@ -237,7 +246,14 @@ class StatusVerbs:
         """
         row = self.campaign
         if row is None:
-            return {"campaign": None, "ready": [], "phase": None, "paused": False}
+            return {
+                "campaign": None,
+                "ready": [],
+                "phase": None,
+                "paused": False,
+                "pause_reason": None,
+                "budget": None,
+            }
         # Defensive merge first, so a shared directory becomes one node before
         # the one-visit validation runs.
         self.normalize_dag()
@@ -248,11 +264,15 @@ class StatusVerbs:
         if error:
             raise SlicemeError(error)
         cursor = self._phase_cursor(branch)
+        pause = self.pause_state() or {}
         return {
             "campaign": row.get("name") or row["key"],
             "ready": self._ready_in_current_phase(branch),
             "phase": cursor.index,
-            "paused": self.paused(),
+            "paused": bool(pause.get("pause")),
+            "pause_reason": pause.get("reason"),
+            "pause_metric": pause.get("metric"),
+            "budget": self.config.get("budget"),
         }
 
     def status(self) -> dict[str, Any]:
@@ -299,6 +319,9 @@ class StatusVerbs:
             "dag_phases_error": dag_phases_error,
             "ready": self.ready_nodes(),
             "paused": self.paused(),
+            "pause_reason": (self.pause_state() or {}).get("reason"),
+            "budget": self.config.get("budget"),
+            "budget_started_at": self.config.get("budget_started_at"),
             "dag_merge": dag_merge,
             "checks": self.store.verdict_counts(campaign=key),
             "sandbox": self.sandbox_info(),
@@ -391,6 +414,8 @@ class StatusVerbs:
             "nodes": node_rows,
             "dag_phases": dag_phases,
             "paused": self.paused(),
+            "pause_reason": (self.pause_state() or {}).get("reason"),
+            "budget": self.config.get("budget"),
             "lines": lines,
         }
 

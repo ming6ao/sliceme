@@ -251,12 +251,14 @@ class CleanupTests(MultiCampaignCase):
         write_json(campaign.dag_path(self.root, branch), {"nodes": []})
         write_json(campaign.session_path(self.root, branch), {"status": "suspended"})
         write_json(campaign.control_path(self.root, branch), {"pause": True})
+        write_json(campaign.budget_path(self.root, branch), {"active_seconds": 1.0})
         campaign.worker_log_path(self.root, branch, "w1").write_text("log\n")
         campaign.report_path(self.root, branch).write_text("# report\n")
         return [
             campaign.dag_path(self.root, branch),
             campaign.session_path(self.root, branch),
             campaign.control_path(self.root, branch),
+            campaign.budget_path(self.root, branch),
             campaign.worker_log_path(self.root, branch, "w1"),
         ]
 

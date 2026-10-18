@@ -72,6 +72,11 @@ for (const key of ["status", "ready-0", "record-0", "check-0"]) {
 	);
 }
 assert.ok(resolved.script.includes('"sliceme-worker"'));
+// A paused ready carries the engine's pause reason, so a budget stop and a
+// user suspension stay distinct.
+assert.ok(resolved.script.includes('state: "paused"'));
+assert.ok(resolved.script.includes("ready.pause_reason"));
+assert.ok(resolved.script.includes("ready.pause_metric"));
 assert.ok(resolved.script.includes('"ready-" + phases'));
 assert.ok(resolved.script.includes('"record-" + phases'));
 assert.ok(resolved.script.includes('"check-" + phases'));

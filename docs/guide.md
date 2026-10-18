@@ -539,6 +539,8 @@ one confirmation before `deliver`.
 | Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; findings surface. Nothing is pushed. |
 | Orchestrator crash | The pi-subagents children are children of the coordinator, so a crash kills them. On resume, a node left `running` stays `running` if the campaign worktree is present, else `pending`. Sliceme reuses the campaign worktree. Git and `state.db` win over the session descriptor. |
 | User suspends (`/suspend`) | The pause flag stops new work. The adapter aborts the in-flight turn, which stops the current child within seconds. The interrupted node stays `running`, and the adapter writes `.sliceme/<branch-key>.session.json`. Resume (`/campaigns`, `pi --continue`, or `sliceme resume`) reconciles from git plus `state.db`: a node interrupted with edits in the shared worktree stays `running`, the phase is re-recorded, and unchanged records re-verify from the check cache. |
+| Campaign reaches a budget cap | The adapter writes the pause flag with `reason: budget`. It never aborts the turn: the phase is the safe point, so the resource stops at its next `ready` call. The adapter marks the descriptor `suspended` with `reason: budget`. The user raises the cap with `sliceme budget`, which opens a new window and clears the flag, then resumes. |
 
 Caps: `concurrency` (the phase size), the resource's `phaseCap` and `nodeCap`
-fields, and the per-command check timeout bound the cost of each campaign.
+fields, the per-command check timeout, and the optional `budget` wall-clock and
+cost caps bound the cost of each campaign.

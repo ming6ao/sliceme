@@ -24,6 +24,7 @@ AGENTS_DIR = PI_DIR / "agents"
 PI_COORDINATOR = PI_DIR / "coordinator.ts"
 PI_COMMON = PI_DIR / "common.ts"
 PI_RESOURCE = PI_DIR / "campaign-resource.ts"
+PI_BUDGET = PI_DIR / "budget.ts"
 PI_PLAN_RESOURCE = PI_DIR / "plan-resource.ts"
 PI_UNIT = PI_DIR / "unit.ts"
 
@@ -366,6 +367,31 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("function applyEngineReply", common)
         self.assertIn("clearActiveCampaign(ctx.cwd)", coordinator)
 
+    def test_budget_watchdog_contract(self):
+        # The adapter owns the caps check: it writes the pause flag with
+        # `reason: "budget"`, records the spend, and never aborts a running
+        # phase.  The engine reads the flag and reports the reason.
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        common = PI_COMMON.read_text(encoding="utf-8")
+        resource = PI_RESOURCE.read_text(encoding="utf-8")
+        self.assertTrue(PI_BUDGET.is_file())
+        self.assertIn("export function budgetPath", common)
+        self.assertIn("BUDGET_TICK_MS", coordinator)
+        self.assertIn("function startBudgetWatchdog", coordinator)
+        self.assertIn("function stopBudgetWatchdog", coordinator)
+        self.assertIn("function updateBudget", coordinator)
+        self.assertIn("function clearBudgetPause", coordinator)
+        self.assertIn("budgetPath(ctx.cwd, branch)", coordinator)
+        self.assertIn("budgetWindowChanged", coordinator)
+        self.assertIn("readBudgetCaps", coordinator)
+        self.assertIn("evaluateBudget", coordinator)
+        self.assertIn("sessionCostUsd", coordinator)
+        self.assertIn('reason === "budget"', coordinator)
+        self.assertIn('action === "budget"', coordinator)
+        # The pause reason reaches the resource, so a budget stop and a user
+        # suspension stay distinct.
+        self.assertIn("ready.pause_reason", resource)
+
     def test_campaign_resource_unit_test(self):
         # The resolver is pure, so a Node harness drives the fixed grants and the
         # bounded-field rejection. Node 22.6+ strips the TypeScript types.
@@ -432,6 +458,23 @@ class PiPackageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_budget_unit_test(self):
+        # The budget module is pure: the harness pins the caps, the
+        # active-second accumulator, the cost sum, and the trip test.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "budget_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_typescript_extensions_type_check(self):
         # `npm run typecheck` must pass on the pi extensions. It resolves the pi
         # type declarations from the running pi runtime and exits 3 when neither
@@ -462,6 +505,10 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("bin/", files)
         self.assertIn("sliceme/", files)
         self.assertIn("docs/", files)
+        # The extension imports these modules by relative path, so the package
+        # must ship every one of them.
+        for module in ("budget.ts", "common.ts", "campaign-resource.ts", "plan-resource.ts", "coordinator.ts"):
+            self.assertIn(f"integrations/pi/{module}", files)
 
     def test_docs_document_the_session_actions(self):
         names = {a.name for a in surface.ACTIONS}

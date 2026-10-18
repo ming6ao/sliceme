@@ -71,7 +71,8 @@ and for rebuildable caches.
 | Campaign registry | `state.db` table `campaigns` | Many processes create and read it. The code joins it with records. |
 | DAG | `.sliceme/<branch-key>.dag.json` | The planner subagent writes it with the Write tool. Files are the agent contract. |
 | Session descriptor | `.sliceme/<branch-key>.session.json` | The adapter writes it; it carries the per-node status map. One file per campaign. |
-| Pause flag | `.sliceme/<branch-key>.control.json` | The adapter reads and writes it. |
+| Pause flag | `.sliceme/<branch-key>.control.json` | The adapter reads and writes it. It carries `reason: user` or `reason: budget`. |
+| Budget spend | `.sliceme/<branch-key>.budget.json` | The adapter reads and writes it. It carries the active campaign seconds and the spent cost. |
 | Active pointer | `.sliceme/active.<pid>.campaign` | The adapter binds a session to one campaign. |
 | Worker logs | `.sliceme/<branch-key>.worker_<id>.log` | Append-only text. |
 | Units, records, verdicts, approval rows | `state.db` | Already in the database. |

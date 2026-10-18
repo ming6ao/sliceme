@@ -88,6 +88,26 @@ def load_control(root: Path, branch: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def budget_path(root: Path, branch: str) -> Path:
+    """The adapter-written budget spend file for a campaign.
+
+    The pi adapter owns this file.  It records the active seconds and the
+    spent cost of the current campaign, so a resume continues the same budget.
+    """
+    return state_dir(root) / f"{branch_key(branch)}.budget.json"
+
+
+def load_budget(root: Path, branch: str) -> dict[str, Any] | None:
+    data = read_json(budget_path(root, branch))
+    return data if isinstance(data, dict) else None
+
+
+def write_budget(root: Path, branch: str, spend: dict[str, Any]) -> Path:
+    path = budget_path(root, branch)
+    write_json(path, spend)
+    return path
+
+
 def write_control(root: Path, branch: str, control: dict[str, Any] | None) -> Path:
     path = control_path(root, branch)
     if control is None:
@@ -153,6 +173,7 @@ def config_branch(config: dict[str, Any]) -> str:
 
 __all__ = [
     "branch_key",
+    "budget_path",
     "build_skeleton",
     "config_branch",
     "control_path",
@@ -162,6 +183,7 @@ __all__ = [
     "evidence_md_path",
     "evidence_narrative",
     "list_sessions",
+    "load_budget",
     "load_control",
     "load_dag",
     "load_session",
@@ -172,6 +194,7 @@ __all__ = [
     "report_path",
     "session_path",
     "worker_log_path",
+    "write_budget",
     "write_control",
     "write_evidence",
     "write_report",

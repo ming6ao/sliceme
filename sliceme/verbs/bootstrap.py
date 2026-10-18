@@ -46,6 +46,32 @@ def _ensure_gitignore(root: Path) -> None:
     exclude.write_text(content + entry + "\n", encoding="utf-8")
 
 
+def _budget_values(seconds: Any, usd: Any) -> dict[str, Any]:
+    """Validate and build the ``budget`` config object.
+
+    Both caps are optional.  A cap must be positive.  An empty result means
+    "no cap", so the caller omits the key.
+    """
+    budget: dict[str, Any] = {}
+    if seconds is not None:
+        try:
+            value = int(seconds)
+        except (TypeError, ValueError):
+            raise SlicemeError("budget seconds must be a whole number") from None
+        if value <= 0:
+            raise SlicemeError("budget seconds must be positive")
+        budget["wall_seconds"] = value
+    if usd is not None:
+        try:
+            value_usd = float(usd)
+        except (TypeError, ValueError):
+            raise SlicemeError("budget USD must be a number") from None
+        if value_usd <= 0:
+            raise SlicemeError("budget USD must be positive")
+        budget["cost_usd"] = value_usd
+    return budget
+
+
 def _campaign_branch_of(design: str | None, feature_branch: str | None) -> str:
     """The campaign branch: the pull request head.
 
@@ -77,6 +103,8 @@ class BootstrapVerbs:
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
         mode: str | None = None,
+        budget_seconds: Any = None,
+        budget_usd: Any = None,
     ) -> dict[str, Any]:
         """Create the on-disk plane (config + state db) for a git repo.
 
@@ -122,6 +150,10 @@ class BootstrapVerbs:
             "policy": {"require_verification": True, "allow_auto_approve": [], "remote": "origin"},
             "created_at": now(),
         }
+        budget = _budget_values(budget_seconds, budget_usd)
+        if budget:
+            config["budget"] = budget
+            config["budget_started_at"] = now()
         ensure_parent(cfg_file)
         write_json(cfg_file, config)
         state.mkdir(parents=True, exist_ok=True)
@@ -188,6 +220,8 @@ class BootstrapVerbs:
         feature_branch: str | None,
         base: str | None,
         mode: str | None = None,
+        budget_seconds: Any = None,
+        budget_usd: Any = None,
     ) -> None:
         """Register a campaign in an existing plane (idempotent on the branch).
 
@@ -209,6 +243,11 @@ class BootstrapVerbs:
         cfg["delivery_mode"] = integrate.resolve_delivery_mode(
             {"delivery_mode": mode or cfg.get("delivery_mode")}
         )
+        if budget_seconds is not None or budget_usd is not None:
+            budget = _budget_values(budget_seconds, budget_usd)
+            if budget:
+                cfg["budget"] = budget
+                cfg["budget_started_at"] = now()
         for retired in (
             "target_branch",
             "main_branch",
@@ -244,6 +283,8 @@ class BootstrapVerbs:
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
         mode: str | None = None,
+        budget_seconds: Any = None,
+        budget_usd: Any = None,
     ) -> dict[str, Any]:
         """Bootstrap the plane and its campaign for *path* (default cwd),
         idempotently.
@@ -277,6 +318,8 @@ class BootstrapVerbs:
                 checks=checks,
                 force=force,
                 mode=mode,
+                budget_seconds=budget_seconds,
+                budget_usd=budget_usd,
             )
             initialized = True
         elif design or feature_branch:
@@ -289,6 +332,8 @@ class BootstrapVerbs:
                 feature_branch=feature_branch,
                 base=base,
                 mode=mode,
+                budget_seconds=budget_seconds,
+                budget_usd=budget_usd,
             )
 
         # Keep the exclude entry fresh even when the plane already existed and
@@ -318,6 +363,40 @@ class BootstrapVerbs:
             }
         finally:
             service.close()
+
+    def set_budget(
+        self,
+        *,
+        seconds: Any = None,
+        usd: Any = None,
+        clear: bool = False,
+    ) -> dict[str, Any]:
+        """Set, raise, or clear the bound campaign's budget.
+
+        Every call starts a fresh measurement window: the engine records a new
+        ``budget_started_at``, and the pi adapter resets its own spend counters
+        when it sees the new window.  ``clear`` removes both caps.
+        """
+        campaign_row = self.require_campaign()
+        branch = str(campaign_row["work_branch"])
+        cfg = dict(self.plane_config)
+        merged: dict[str, Any] | None = None
+        if clear:
+            cfg.pop("budget", None)
+        else:
+            if seconds is None and usd is None:
+                raise SlicemeError("budget requires --seconds, --usd, or --clear")
+            merged = dict(cfg.get("budget") or {})
+            merged.update(_budget_values(seconds, usd))
+            cfg["budget"] = merged
+        cfg["budget_started_at"] = now()
+        write_json(config_path(self.root), cfg)
+        return {
+            "campaign": campaign_row.get("name") or campaign_row["key"],
+            "work_branch": branch,
+            "budget": merged,
+            "budget_started_at": cfg["budget_started_at"],
+        }
 
     def unit_detail(self, unit_ref: str | int) -> dict[str, Any]:
         """The dashboard projection of one campaign, found by reference."""

@@ -27,7 +27,7 @@ class Param:
     """One argument, rendered as a CLI flag and a tool property."""
 
     name: str
-    type: str  # string | boolean | int | list
+    type: str  # string | boolean | int | number | list
     help: str
     required: bool = False
     choices: tuple[str, ...] = ()
@@ -65,7 +65,19 @@ ACTIONS: tuple[Action, ...] = (
                 choices=("pull_request", "local"),
             ),
             Param("checks", "list", "trusted check NAME=COMMAND (repeatable)", flag="check"),
+            Param("budget_seconds", "int", "wall-clock cap in seconds (default: no cap)"),
+            Param("budget_usd", "number", "cost cap in USD (default: no cap)"),
             Param("force", "boolean", "overwrite an existing config"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
+        name="budget",
+        summary="set, raise, or clear the campaign budget (wall-clock seconds and cost in USD)",
+        params=(
+            Param("seconds", "int", "wall-clock cap in seconds"),
+            Param("usd", "number", "cost cap in USD"),
+            Param("clear", "boolean", "clear both caps"),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -207,6 +219,8 @@ def start(params: dict[str, Any], *, cwd: str | Path | None = None) -> dict[str,
         checks=parse_checks(params.get("checks") or []),
         force=bool(params.get("force")),
         mode=params.get("mode"),
+        budget_seconds=params.get("budget_seconds"),
+        budget_usd=params.get("budget_usd"),
     )
 
 
@@ -278,6 +292,14 @@ def _dispatch_ready(service: "Service", p: dict[str, Any]) -> Any:
     return service.ready()
 
 
+def _dispatch_budget(service: "Service", p: dict[str, Any]) -> Any:
+    return service.set_budget(
+        seconds=p.get("seconds"),
+        usd=p.get("usd"),
+        clear=bool(p.get("clear")),
+    )
+
+
 def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
     return service.deliver(
         source=p.get("source"),
@@ -330,6 +352,7 @@ _HANDLERS = {
     "gc": _dispatch_gc,
     "doctor": _dispatch_doctor,
     "ready": _dispatch_ready,
+    "budget": _dispatch_budget,
     "plan": _dispatch_plan,
     "deliver": _dispatch_deliver,
     "check": _dispatch_check,

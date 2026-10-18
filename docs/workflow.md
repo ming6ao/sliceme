@@ -162,9 +162,11 @@ sliceme deliver [--mode MODE]       pull_request: push + open a PR against main
                                     local: merge the local base branch
 ```
 
-The resource bounds the loop with the `phaseCap` and `nodeCap` fields. The
-coordinator also registers two commands and two lifecycle hooks
-(`docs/sessions.md`):
+The resource bounds the loop with the `phaseCap` and `nodeCap` fields. An
+optional wall-clock or cost cap stops the campaign at a phase boundary
+(`docs/sessions.md` §9); the resource returns `state: "paused"` with the engine's
+pause reason. The coordinator also registers two commands and two lifecycle
+hooks (`docs/sessions.md`):
 
 ```text
 /suspend [label]            park the campaign and write the resume descriptor
@@ -182,10 +184,11 @@ equals the default branch.
 
 | Action | Purpose |
 |---|---|
-| `start` | bootstrap the plane; `design` derives the work branch; `feature_branch` overrides it; `base` overrides the base branch |
+| `start` | bootstrap the plane; `design` derives the work branch; `feature_branch` overrides it; `base` overrides the base branch; `budget_seconds` and `budget_usd` set the caps |
 | `status` | the campaign state: records, phases, and checks; `short`, `unit`, `dense`, `verbose` |
 | `sessions` | list the registered campaigns from their session descriptors |
 | `resume` | reconcile a suspended campaign from git plus `state.db` and return its resume plan |
+| `budget` | set, raise, or clear the campaign wall-clock and cost caps |
 | `gc` | prune worktrees, delivered branches, scratch, and finished campaign files |
 | `doctor` | check git, `config.json`, and `state.db` health |
 | `ready` | the current-phase ready node ids, the phase index, and `paused` |

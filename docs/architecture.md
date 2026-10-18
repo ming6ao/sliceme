@@ -182,7 +182,7 @@ flowchart LR
 | `resume` | Reconcile a suspended campaign and return its resume plan. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
-| `ready` | The current-phase ready node ids, the phase index, and `paused`. |
+| `ready` | The current-phase ready node ids, the phase index, `paused`, and `pause_reason`. |
 | `plan` | The design's campaign split joined with the registry state. |
 | `deliver` | Deliver after the confirmation: `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | The one combined-tree check runner for the current phase. |
@@ -445,7 +445,8 @@ erDiagram
   <branch-key>.evidence.json       # complete evidence (full check output)
   <branch-key>.evidence.md         # human evidence; the pull request body
   <branch-key>.session.json        # adapter-written suspend/resume descriptor
-  <branch-key>.control.json        # cooperative pause flag
+  <branch-key>.control.json        # cooperative pause flag (reason: user | budget)
+  <branch-key>.budget.json         # adapter-written budget spend (active seconds, cost)
   <branch-key>.worker_<id>.log     # one log per worker id
   worktrees/                       # the single campaign worktree
   scratch/                         # detached check worktrees (transient)

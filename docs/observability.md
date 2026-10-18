@@ -79,7 +79,7 @@ campaign falls back to a compact per-campaign plane list.
 `status --verbose` or `status --json` returns the nested view:
 
 - `dag_phases` (the scheduler's phase plan) and `dag_phases_error`;
-- `ready` (the ready node ids) and `paused`;
+- `ready` (the ready node ids), `paused`, `pause_reason`, and `budget`;
 - `checks` (the terminal-check counts);
 - the campaign writer and `records` with their `node`, `log`, `record`,
   and `verification` columns;
@@ -89,8 +89,10 @@ campaign falls back to a compact per-campaign plane list.
 ### 3.3 The loop read
 
 `ready` returns the small object the workflow resource polls: `campaign`,
-`ready`, `phase`, and `paused`. The engine computes `paused` from the
-`<branch-key>.control.json` pause flag, so the sandbox needs no file access.
+`ready`, `phase`, `paused`, `pause_reason`, and `budget`. The engine computes
+`paused` from the `<branch-key>.control.json` pause flag, so the sandbox needs no
+file access. The pi adapter writes the flag with `reason: user` for `/suspend`,
+or `reason: budget` when a wall-clock or cost cap trips.
 
 ## 4. Where child state lives
 

@@ -31,6 +31,16 @@ import {
 	CAMPAIGN_RESOURCE_VERSION,
 	resolveCampaignResource,
 } from "./campaign-resource.ts";
+import type { BudgetSpend } from "./budget.ts";
+import {
+	budgetWindowChanged,
+	evaluateBudget,
+	hasCampaignBudget,
+	nextActiveSeconds,
+	readBudgetCaps,
+	sessionCostUsd,
+	spentUsd,
+} from "./budget.ts";
 import {
 	PLAN_RESOURCE,
 	PLAN_RESOURCE_VERSION,
@@ -38,6 +48,7 @@ import {
 } from "./plan-resource.ts";
 import {
 	applyEngineReply,
+	budgetPath,
 	clearActiveCampaign,
 	controlPath,
 	loadPiSubagents,
@@ -53,9 +64,16 @@ import {
 
 const PAUSE_TTL_SECONDS = 3600;
 
+/** The campaign budget watchdog period, in milliseconds. */
+const BUDGET_TICK_MS = 15_000;
+
+/** The active-seconds clamp: two ticks, so a crash gap cannot consume the cap. */
+const BUDGET_MAX_DELTA_SECONDS = (BUDGET_TICK_MS / 1000) * 2;
+
 /** Engine verbs that call for a human decision or report a campaign. */
 const ENGINE_ACTIONS = [
 	"start",
+	"budget",
 	"status",
 	"sessions",
 	"resume",
@@ -83,9 +101,12 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 		"base",
 		"mode",
 		"checks",
+		"budget_seconds",
+		"budget_usd",
 		"force",
 		"campaign",
 	],
+	budget: ["seconds", "usd", "clear", "campaign"],
 	status: ["unit", "short", "dense", "verbose", "campaign"],
 	sessions: [],
 	resume: ["campaign"],
@@ -200,6 +221,8 @@ function registerAgentViaEvents(
 function isPaused(ctx: ExtensionContext, branch: string): boolean {
 	const control = readJson<any>(controlPath(ctx.cwd, branch), null);
 	if (!control?.pause) return false;
+	// A budget stop does not expire. The user must raise the cap and resume.
+	if (control.reason === "budget") return true;
 	const requested = Number(control.requested_at ?? 0);
 	if (requested && Date.now() / 1000 - requested > PAUSE_TTL_SECONDS) return false;
 	return true;
@@ -213,6 +236,89 @@ function clearPause(ctx: ExtensionContext, branch: string): void {
 	}
 }
 
+/** The parsed `.sliceme/config.json` for the plane. */
+function readPlaneConfig(cwd: string): any {
+	return readJson<any>(path.join(stateDir(cwd), "config.json"), null);
+}
+
+/** The adapter's spend file, or an empty object. */
+function readSpend(cwd: string, branch: string): BudgetSpend {
+	return readJson<BudgetSpend>(budgetPath(cwd, branch), {});
+}
+
+/** Clear a budget pause flag, because a new cap window opened. */
+function clearBudgetPause(ctx: ExtensionContext, branch: string): void {
+	const control = readJson<any>(controlPath(ctx.cwd, branch), null);
+	if (control?.reason === "budget") clearPause(ctx, branch);
+}
+
+/**
+ * Add one tick of active time, record the spend, and optionally trip the caps.
+ *
+ * The extension is the one writer of the spend file and the pause flag. The
+ * engine reads the caps from `config.json` and writes neither file
+ * (`docs/sessions.md` §4). This function never aborts the running phase: the
+ * campaign resource stops at its next `ready` call, which is the safe point.
+ */
+function updateBudget(ctx: ExtensionContext, branch: string): void {
+	const config = readPlaneConfig(ctx.cwd);
+	const caps = readBudgetCaps(config);
+	if (!hasCampaignBudget(caps)) return;
+	const nowSeconds = Date.now() / 1000;
+	const declaredWindow = Number(config?.budget_started_at ?? 0);
+	let spend = readSpend(ctx.cwd, branch);
+	if (Number(spend.window_started_at ?? 0) !== declaredWindow) {
+		// A `budget` action opened a new window: the counters start at zero.
+		spend = { window_started_at: declaredWindow, active_seconds: 0 };
+	}
+	const sessionCost = sessionCostUsd(ctx.sessionManager.getEntries());
+	const baseline =
+		typeof spend.session_baseline_usd === "number" &&
+		Number.isFinite(spend.session_baseline_usd)
+			? spend.session_baseline_usd
+			: sessionCost;
+	const withBaseline: BudgetSpend = { ...spend, session_baseline_usd: baseline };
+	const active = nextActiveSeconds(
+		spend,
+		nowSeconds,
+		BUDGET_MAX_DELTA_SECONDS,
+		declaredWindow > 0 ? declaredWindow : undefined,
+	);
+	const spent = spentUsd(withBaseline, sessionCost);
+	const verdict = evaluateBudget({ caps, activeSeconds: active, spentUsd: spent });
+	writeJson(budgetPath(ctx.cwd, branch), {
+		window_started_at: declaredWindow,
+		active_seconds: active,
+		last_tick_at: nowSeconds,
+		spent_usd: spent,
+		session_baseline_usd: baseline,
+	});
+	if (!verdict.tripped) return;
+	const existingControl = readJson<any>(controlPath(ctx.cwd, branch), null);
+	if (existingControl?.pause) return;
+	writeJson(controlPath(ctx.cwd, branch), {
+		pause: true,
+		reason: "budget",
+		metric: verdict.metric,
+		requested_at: nowSeconds,
+	});
+	// Mark the descriptor now, so a shutdown or a crash cannot lose the stop
+	// reason. `writeSessionDescriptor` also creates the file when it is missing.
+	writeSessionDescriptor(ctx, branch, {
+		status: "suspended",
+		reason: "budget",
+		extra: { budget: { metric: verdict.metric, caps } },
+	});
+	if (ctx.hasUI) {
+		const label = verdict.metric === "cost_usd" ? "cost" : "wall clock";
+		ctx.ui.notify(
+			`sliceme: the campaign ${label} budget is spent; the campaign stops after ` +
+				`the current phase. Raise it with the "budget" action, then resume.`,
+			"warning",
+		);
+	}
+}
+
 /**
  * The engine's `config.json` mirror of the campaign's work branch.
  *
@@ -220,7 +326,7 @@ function clearPause(ctx: ExtensionContext, branch: string): void {
  * for a resumed session in a new process (`docs/multi-campaign.md` §4.4).
  */
 function configuredBranch(cwd: string): string | undefined {
-	const config = readJson<any>(path.join(stateDir(cwd), "config.json"), null);
+	const config = readPlaneConfig(cwd);
 	const branch = config?.work_branch ?? config?.target_branch ?? config?.main_branch;
 	return typeof branch === "string" && branch ? branch : undefined;
 }
@@ -231,6 +337,8 @@ interface SessionDescriptorOptions {
 	label?: string;
 	campaign?: string;
 	plan?: any;
+	/** Extra descriptor fields, merged last (for example the budget stop). */
+	extra?: Record<string, unknown>;
 }
 
 /** Write the pi-session descriptor for *branch* (`.sliceme/<key>.session.json`). */
@@ -261,6 +369,7 @@ function writeSessionDescriptor(
 		current_phase: plan.current_phase ?? existing.current_phase ?? null,
 		nodes: plan.nodes ?? existing.nodes ?? {},
 		resume_plan: plan.resume_plan ?? existing.resume_plan ?? {},
+		...(over.extra ?? {}),
 	};
 	writeJson(sessionPath(ctx.cwd, branch), descriptor);
 	return descriptor;
@@ -343,6 +452,39 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	const activeCampaign = (cwd: string): string | undefined =>
 		readActiveCampaign(cwd) ?? configuredBranch(cwd);
 
+	let budgetTimer: ReturnType<typeof setInterval> | undefined;
+
+	/** Stop the budget watchdog (shutdown, or a replaced session). */
+	function stopBudgetWatchdog(): void {
+		if (budgetTimer) clearInterval(budgetTimer);
+		budgetTimer = undefined;
+	}
+
+	/**
+	 * Start the campaign budget watchdog.
+	 *
+	 * One tick adds one active-time delta, records the spend, and writes the
+	 * pause flag when a cap trips. The tick never aborts a turn: the campaign
+	 * resource stops at its next `ready` call, which is the phase boundary.
+	 */
+	function startBudgetWatchdog(ctx: ExtensionContext): void {
+		stopBudgetWatchdog();
+		budgetTimer = setInterval(() => {
+			try {
+				const branch = activeCampaign(ctx.cwd);
+				if (!branch) return;
+				const descriptor = readJson<any>(sessionPath(ctx.cwd, branch), undefined);
+				if (descriptor?.status === "completed" || descriptor?.status === "ready") return;
+				const control = readJson<any>(controlPath(ctx.cwd, branch), null);
+				if (control?.pause) return;
+				updateBudget(ctx, branch);
+			} catch {
+				/* a watchdog tick must never break the session */
+			}
+		}, BUDGET_TICK_MS);
+		(budgetTimer as any)?.unref?.();
+	}
+
 	/** Make the engine tool callable for this session. */
 	function activateTool(): void {
 		const active = new Set(pi.getActiveTools());
@@ -423,7 +565,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"(resume plan), gc (prune), doctor (health), ready " +
 			"(current-phase node ids and paused), open (create the campaign worktree), record " +
 			"(the current phase as per-node commits), check (combined-tree checks), approve (one " +
-			"campaign approval), report (the deterministic report), evidence (the deterministic " +
+			"campaign approval), budget (set, raise, or clear the campaign caps), " +
+			"report (the deterministic report), evidence (the deterministic " +
 			"evidence document), and deliver (push + pull request, or a local merge). The " +
 			"planning loop runs in " +
 			"the sliceme.plan workflow resource, and the campaign loop runs in the " +
@@ -444,6 +587,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"combined-tree check.",
 			"Stop at the human gates: an explicit user suspension and the campaign " +
 				"approval before `deliver`.",
+			"`ready` reports `paused`, `pause_reason`, and `budget`. A `budget` pause " +
+				"needs the `budget` action to raise the cap before a resume; do not resume a " +
+				"budget-stopped campaign without it.",
 			"After the campaign resource returns `complete`, run `evidence`, then " +
 				"run `report`. Show the evidence summary and the delivery details to the user: " +
 				"for the `pull_request` mode the head branch, the base `main`, and the title; " +
@@ -480,6 +626,13 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			checks: Type.Optional(
 				Type.Array(Type.String(), { description: "start: trusted check NAME=COMMAND" }),
 			),
+			budget_seconds: Type.Optional(
+				Type.Number({ description: "start: wall-clock cap in seconds" }),
+			),
+			budget_usd: Type.Optional(Type.Number({ description: "start: cost cap in USD" })),
+			seconds: Type.Optional(Type.Number({ description: "budget: wall-clock cap in seconds" })),
+			usd: Type.Optional(Type.Number({ description: "budget: cost cap in USD" })),
+			clear: Type.Optional(Type.Boolean({ description: "budget: clear both caps" })),
 			force: Type.Optional(Type.Boolean({ description: "start: overwrite an existing config" })),
 			unit: Type.Optional(Type.String({ description: "status: show one unit" })),
 			short: Type.Optional(Type.Boolean({ description: "status: print only the unit name" })),
@@ -503,7 +656,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			const flags = ACTION_FLAGS[action] ?? [];
 			const { json, text } = await sliceme(ctx, engineArgs(action, flags, params), signal);
 			// Update the active pointer and mark a successful delivery completed.
-			applyEngineReply(ctx.cwd, action, json);
+			const branch = applyEngineReply(ctx.cwd, action, json);
+			// A raised cap clears the budget pause, so the campaign can continue.
+			if (action === "budget") {
+				const target = branch ?? activeCampaign(ctx.cwd);
+				if (target) clearBudgetPause(ctx, target);
+			}
 			return { content: [{ type: "text" as const, text }], details: json ?? {} };
 		},
 	});
@@ -619,6 +777,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		captureEngine();
+		startBudgetWatchdog(ctx);
 		try {
 			registerAgents();
 			await registerWorkflowResources(ctx);
@@ -636,7 +795,23 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			if (!branch) return;
 			const descriptor = readJson<any>(sessionPath(ctx.cwd, branch), undefined);
 			if (!descriptor || descriptor.status !== "suspended") return;
-			if (isPaused(ctx, branch)) return;
+			if (isPaused(ctx, branch)) {
+				const control = readJson<any>(controlPath(ctx.cwd, branch), null);
+				const raised =
+					control?.reason === "budget" &&
+					budgetWindowChanged(readPlaneConfig(ctx.cwd), readSpend(ctx.cwd, branch));
+				if (!raised) {
+					if (ctx.hasUI && control?.reason === "budget") {
+						ctx.ui.notify(
+							`sliceme: the budget cap stopped this campaign; raise it with the ` +
+								`"budget" action, then resume.`,
+							"warning",
+						);
+					}
+					return;
+				}
+				clearPause(ctx, branch);
+			}
 			const plan = await fetchResumePlan(ctx, branch);
 			if (!planHasWork(plan)) {
 				clearPause(ctx, branch);
@@ -672,6 +847,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		stopBudgetWatchdog();
 		for (const registration of agentRegistrations) registration.dispose();
 		agentRegistrations = [];
 		resourceRegistration?.dispose();
@@ -682,9 +858,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			const branch = activeCampaign(ctx.cwd);
 			clearActiveCampaign(ctx.cwd);
 			if (!branch) return;
+			const pending = readJson<any>(controlPath(ctx.cwd, branch), null);
+			const reason = pending?.pause && pending.reason === "budget" ? "budget" : "user";
 			writeSessionDescriptor(ctx, branch, {
 				status: shutdownStatus(ctx, branch),
-				reason: "user",
+				reason,
 			});
 		} catch {
 			/* never block shutdown */
