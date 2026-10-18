@@ -39,14 +39,19 @@ from .util import SlicemeError, scratch_dir
 from .verifier import CheckResult, checks_from_config, run_checks
 
 __all__ = [
+    "DELIVERY_MODES",
     "DeliveryResult",
     "Phase",
     "base_branch_of",
+    "deliver",
+    "deliver_local_merge",
     "deliver_pull_request",
     "delivery_base_of",
     "found_default_branch",
     "is_default_branch",
+    "local_result",
     "plan_phases",
+    "resolve_delivery_mode",
     "simulate",
     "target_branch_of",
     "work_branch_of",
@@ -56,12 +61,20 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Integration primitives
 # ---------------------------------------------------------------------------
+#: The two delivery modes.  ``pull_request`` pushes the campaign branch and
+#: opens a pull request.  ``local`` merges the campaign branch into the local
+#: base branch and stops, so the user pushes the base branch later.
+DELIVERY_MODES = ("pull_request", "local")
+
+
 @dataclass
 class DeliveryResult:
     status: str  # delivered | failed
     detail: str = ""
     pull_request: dict[str, Any] | None = None
     checks: list[CheckResult] = field(default_factory=list)
+    mode: str = "pull_request"
+    merge_commit: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +82,8 @@ class DeliveryResult:
             "detail": self.detail,
             "pull_request": self.pull_request,
             "checks": [c.to_dict() for c in self.checks],
+            "mode": self.mode,
+            "merge_commit": self.merge_commit,
         }
 
 
@@ -171,20 +186,37 @@ def is_default_branch(
 
 
 # ---------------------------------------------------------------------------
-# Final delivery: push the campaign branch and open a pull request
+# Final delivery: a pull request, or a local merge
 # ---------------------------------------------------------------------------
-def _mark_delivered(store: Store, campaign: str | None = None) -> None:
+def _mark_delivered(
+    store: Store, campaign: str | None = None, *, state: str = "delivered"
+) -> None:
     """Mark this campaign's recorded records as delivered.
 
     The record's ``head_commit`` stays as provenance (the node's commit on
-    the campaign worktree).  The campaign state moves to ``delivered``, because
-    the worktree holds no undelivered work after a successful delivery.
+    the campaign worktree).  The campaign state moves to ``delivered`` for a
+    pull request and to ``landed`` for a local merge, because the worktree
+    holds no undelivered work after a successful delivery.
     """
     for record in store.list_records(statuses=["recorded"], campaign=campaign):
         store.update_record(int(record["id"]), status="delivered")
     if campaign:
-        store.set_campaign_state(campaign, "delivered")
+        store.set_campaign_state(campaign, state)
     store.conn.commit()
+
+
+def resolve_delivery_mode(
+    config: dict[str, Any], *, mode: str | None = None
+) -> str:
+    """The delivery mode: the flag, then the campaign value, then the plane.
+
+    An absent value means ``pull_request``, so a plane created by an older
+    release keeps its behavior.
+    """
+    chosen = mode or config.get("delivery_mode") or "pull_request"
+    if chosen not in DELIVERY_MODES:
+        raise SlicemeError("delivery mode must be one of: " + ", ".join(DELIVERY_MODES))
+    return chosen
 
 
 def delivered_result(
@@ -198,6 +230,22 @@ def delivered_result(
         detail=detail,
         pull_request=pull_request,
         checks=checks or [],
+    )
+
+
+def local_result(
+    detail: str,
+    *,
+    merge_commit: str | None = None,
+    checks: list[CheckResult] | None = None,
+) -> DeliveryResult:
+    """A successful local merge result.  There is no pull request."""
+    return DeliveryResult(
+        status="delivered",
+        detail=detail,
+        checks=checks or [],
+        mode="local",
+        merge_commit=merge_commit,
     )
 
 
@@ -327,6 +375,174 @@ def deliver_pull_request(
         delivered_result(
             f"pull request opened: {found['url']}",
             found,
+            checks=checks,
+        )
+    ]
+
+
+def deliver(
+    store: Store,
+    root: Path,
+    config: dict[str, Any],
+    *,
+    campaign: str | None = None,
+    source: str | None = None,
+    run_checks_flag: bool = True,
+    mode: str | None = None,
+) -> list[DeliveryResult]:
+    """Deliver the campaign with the selected mode.
+
+    ``local`` merges the campaign branch into the local base branch and stops.
+    ``pull_request`` pushes the branch and opens a pull request.  Both modes
+    keep the campaign branch and the campaign evidence.
+    """
+    resolved = resolve_delivery_mode(config, mode=mode)
+    if resolved == "local":
+        return deliver_local_merge(
+            store,
+            root,
+            config,
+            campaign=campaign,
+            source=source,
+            run_checks_flag=run_checks_flag,
+        )
+    return deliver_pull_request(
+        store,
+        root,
+        config,
+        campaign=campaign,
+        source=source,
+        run_checks_flag=run_checks_flag,
+    )
+
+
+def _require_base_not_behind_remote(
+    root: Path, config: dict[str, Any], base: str
+) -> None:
+    """Refuse a local merge when the remote base is ahead or diverged.
+
+    The local merge moves the base branch.  When the remote base already
+    holds commits that the local base does not, a later user push would
+    surprise the user, so the engine refuses first.
+    """
+    remote = (config.get("policy") or {}).get("remote") or "origin"
+    ref = f"refs/remotes/{remote}/{base}"
+    res = gitutil.git(root, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
+    if not res.ok:
+        return
+    remote_head = res.stdout.strip()
+    base_head = gitutil.rev_parse(root, base)
+    if gitutil.merge_base(root, base_head, remote_head) != remote_head:
+        raise SlicemeError(
+            f"refusing a local merge: {remote}/{base} is ahead of or has "
+            f"diverged from local '{base}'; update '{base}' first"
+        )
+
+
+def _merge_base_branch(root: Path, base: str, source: str, message: str) -> str:
+    """Merge *source* into the local *base* branch and return the merge commit.
+
+    The engine merges in the worktree that holds the base branch.  That keeps
+    the user's checkout in sync.  When the base branch is not checked out, the
+    engine merges in a temporary worktree, so the merge never disturbs any
+    checkout.
+    """
+    entry = gitutil.worktree_for_branch(root, base)
+    if entry is not None:
+        if not gitutil.is_clean(entry.path):
+            raise SlicemeError(
+                f"refusing a local merge: the worktree for '{base}' has "
+                "uncommitted changes"
+            )
+        return gitutil.merge_no_ff(entry.path, source, message)
+    scratch = scratch_dir(root) / f"land-{abs(hash(base + source)) % 10_000_000}"
+    try:
+        gitutil.add_worktree(root, scratch, branch=base, base=base, new_branch=False)
+        return gitutil.merge_no_ff(scratch, source, message)
+    finally:
+        gitutil.cleanup_worktree(root, scratch)
+
+
+def deliver_local_merge(
+    store: Store,
+    root: Path,
+    config: dict[str, Any],
+    *,
+    campaign: str | None = None,
+    source: str | None = None,
+    run_checks_flag: bool = True,
+) -> list[DeliveryResult]:
+    """Merge the campaign worktree branch into the local base branch.
+
+    The merge stays local: sliceme pushes nothing and calls no forge.  The
+    user pushes the base branch later.  The merge always creates a merge
+    commit, so the campaign history stays visible.  The campaign branch is
+    kept for provenance.  The campaign state moves to ``landed``.
+    """
+    campaign_branch = target_branch_of(config)
+    if is_default_branch(root, campaign_branch, config):
+        raise SlicemeError(
+            f"refusing to deliver the default branch '{campaign_branch}' as the "
+            "campaign branch; sliceme merges a feature branch only"
+        )
+    base = delivery_base_of(config)
+    if campaign_branch == base:
+        raise SlicemeError(
+            f"refusing to deliver: the campaign branch '{campaign_branch}' equals "
+            "the delivery base"
+        )
+    source = source or config.get("work_branch")
+    if not source or not gitutil.branch_exists(root, source):
+        raise SlicemeError(
+            "no campaign worktree branch to deliver; run `sliceme open` first"
+        )
+    source = str(source)
+    if not gitutil.branch_exists(root, base):
+        raise SlicemeError(f"delivery base '{base}' does not exist")
+
+    source_head = gitutil.rev_parse(root, source)
+    base_head = gitutil.rev_parse(root, base)
+    if gitutil.merge_base(root, base_head, source_head) == source_head:
+        _mark_delivered(store, campaign, state="landed")
+        return [
+            local_result(
+                f"already contained in local {base}", merge_commit=base_head
+            )
+        ]
+
+    outcome = gitutil.merge_tree(root, base_head, source_head)
+    if not outcome.clean:
+        return [
+            DeliveryResult(
+                status="failed", detail=_conflict_detail(outcome), mode="local"
+            )
+        ]
+
+    checks: list[CheckResult] = []
+    if run_checks_flag:
+        specs = checks_from_config(config)
+        if specs:
+            runner = _delivery_checks(store, root, config, campaign)
+            row = runner.run(source="deliver", commit=source_head, checks=specs)
+            checks = _check_results(row)
+            if row["status"] != "passed":
+                return [
+                    DeliveryResult(
+                        status="failed",
+                        detail="checks failed; local merge not applied",
+                        checks=checks,
+                        mode="local",
+                    )
+                ]
+
+    _require_base_not_behind_remote(root, config, base)
+    message = f"sliceme: merge {source} into {base}"
+    merge_commit = _merge_base_branch(root, base, source, message)
+    _mark_delivered(store, campaign, state="landed")
+    return [
+        local_result(
+            f"merged {source} into local {base}; push {base} when ready",
+            merge_commit=merge_commit,
             checks=checks,
         )
     ]

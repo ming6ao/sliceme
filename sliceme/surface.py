@@ -58,6 +58,12 @@ ACTIONS: tuple[Action, ...] = (
             Param("design", "string", "design document path; the campaign branch derives from its name"),
             Param("feature_branch", "string", "campaign branch (pull request head); default feat/<design-stem>"),
             Param("base", "string", "delivery base override (the pull request base; default the default branch)"),
+            Param(
+                "mode",
+                "string",
+                "delivery mode: pull_request (push + PR) or local (merge the local base branch)",
+                choices=("pull_request", "local"),
+            ),
             Param("checks", "list", "trusted check NAME=COMMAND (repeatable)", flag="check"),
             Param("force", "boolean", "overwrite an existing config"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -114,9 +120,15 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="deliver",
-        summary="push the campaign worktree and open the delivery pull request (after approval)",
+        summary="push and open a pull request, or merge the local base branch (after approval)",
         params=(
             Param("source", "string", "campaign worktree branch (default: recorded worktree branch)"),
+            Param(
+                "mode",
+                "string",
+                "delivery mode: pull_request (push + PR) or local (merge the local base branch)",
+                choices=("pull_request", "local"),
+            ),
             Param("cleanup", "string", "cleanup after delivery", choices=("none", "worktrees", "all")),
             Param("no_checks", "boolean", "skip the plane's trusted checks"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -202,6 +214,7 @@ def start(params: dict[str, Any], *, cwd: str | Path | None = None) -> dict[str,
         base=params.get("base"),
         checks=parse_checks(params.get("checks") or []),
         force=bool(params.get("force")),
+        mode=params.get("mode"),
     )
 
 
@@ -282,6 +295,7 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
         source=p.get("source"),
         cleanup=p.get("cleanup") or "none",
         run_checks_flag=not p.get("no_checks"),
+        mode=p.get("mode"),
     )
 
 

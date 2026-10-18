@@ -130,6 +130,11 @@ class Service(
             cfg["campaign_key"] = campaign["key"]
         cfg["work_branch"] = work_branch
         cfg["base_branch"] = base_branch
+        cfg["delivery_mode"] = (
+            (campaign.get("delivery_mode") if campaign else None)
+            or cfg.get("delivery_mode")
+            or "pull_request"
+        )
         # Read-time shim for one release: the retired names mirror the new ones.
         cfg["target_branch"] = work_branch
         cfg["main_branch"] = work_branch

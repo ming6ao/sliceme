@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   name TEXT,
   design TEXT,
   state TEXT NOT NULL DEFAULT 'working',
+  delivery_mode TEXT,
+  merge_commit TEXT,
   pr_url TEXT,
   pr_number INTEGER,
   created_at REAL NOT NULL,
@@ -112,6 +114,8 @@ CREATE TABLE campaigns (
   name TEXT,
   design TEXT,
   state TEXT NOT NULL DEFAULT 'working',
+  delivery_mode TEXT,
+  merge_commit TEXT,
   pr_url TEXT,
   pr_number INTEGER,
   created_at REAL NOT NULL,
@@ -150,6 +154,9 @@ class Store:
         """Additive column migrations for planes created by older versions."""
         self._ensure_columns(
             "campaigns", {"pr_url": "TEXT", "pr_number": "INTEGER"}
+        )
+        self._ensure_columns(
+            "campaigns", {"delivery_mode": "TEXT", "merge_commit": "TEXT"}
         )
         self._ensure_columns("candidates", {"node": "TEXT"})
         self._ensure_columns("candidates", {"empty": "INTEGER NOT NULL DEFAULT 0"})
@@ -374,6 +381,8 @@ class Store:
         name: str | None = None,
         design: str | None = None,
         state: str = "working",
+        delivery_mode: str | None = None,
+        merge_commit: str | None = None,
     ) -> dict[str, Any]:
         """Register a campaign.  Idempotent on the unique key or work branch."""
         ts = now()
@@ -381,8 +390,9 @@ class Store:
         with self.tx() as c:
             c.execute(
                 "INSERT OR IGNORE INTO campaigns(key, work_branch, worktree,"
-                " base_branch, unit_name, name, design, state, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                " base_branch, unit_name, name, design, state, delivery_mode,"
+                " merge_commit, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     work_branch,
@@ -392,6 +402,8 @@ class Store:
                     name,
                     design,
                     state,
+                    delivery_mode,
+                    merge_commit,
                     ts,
                     ts,
                 ),
@@ -452,6 +464,44 @@ class Store:
             (
                 url,
                 number,
+                now(),
+                str(ref),
+                str(ref),
+                str(ref),
+                int(ref) if str(ref).isdigit() else -1,
+            ),
+        )
+        self.conn.commit()
+        return self.get_campaign(ref)
+
+    def set_campaign_delivery_mode(
+        self, ref: str | int, mode: str
+    ) -> dict[str, Any] | None:
+        """Record the delivery mode on a campaign row."""
+        self.conn.execute(
+            "UPDATE campaigns SET delivery_mode=?, updated_at=?"
+            " WHERE key=? OR work_branch=? OR unit_name=? OR id=?",
+            (
+                mode,
+                now(),
+                str(ref),
+                str(ref),
+                str(ref),
+                int(ref) if str(ref).isdigit() else -1,
+            ),
+        )
+        self.conn.commit()
+        return self.get_campaign(ref)
+
+    def set_campaign_merge_commit(
+        self, ref: str | int, commit: str
+    ) -> dict[str, Any] | None:
+        """Record the local merge commit on a campaign row."""
+        self.conn.execute(
+            "UPDATE campaigns SET merge_commit=?, updated_at=?"
+            " WHERE key=? OR work_branch=? OR unit_name=? OR id=?",
+            (
+                commit,
                 now(),
                 str(ref),
                 str(ref),

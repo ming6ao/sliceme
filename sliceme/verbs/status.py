@@ -421,6 +421,7 @@ class StatusVerbs:
                     "worktree": row.get("worktree"),
                     "unit_name": row["unit_name"],
                     "state": row["state"],
+                    "delivery_mode": row.get("delivery_mode"),
                     "records": len(records),
                     "delivered": sum(1 for c in records if c["status"] == "delivered"),
                 }
@@ -538,6 +539,8 @@ class StatusVerbs:
             "worktree": row.get("worktree"),
             "branch": row.get("work_branch"),
             "state": row.get("state"),
+            "delivery_mode": row.get("delivery_mode"),
+            "merge_commit": row.get("merge_commit"),
             "node": node,
             "log": str(campaign.worker_log_path(self.root, row["work_branch"], node))
             if node

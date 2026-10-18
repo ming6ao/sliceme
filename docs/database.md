@@ -189,7 +189,9 @@ retry needs no new review.
 | `unit_name` | TEXT NOT NULL UNIQUE | the campaign worktree writer name |
 | `name` | TEXT | display name |
 | `design` | TEXT | design document reference |
-| `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, `delivered`, `closed` |
+| `state` | TEXT NOT NULL DEFAULT `'working'` | `working`, `delivered`, `landed`, `closed` |
+| `delivery_mode` | TEXT | `pull_request` or `local` (migration; NULL means `pull_request`) |
+| `merge_commit` | TEXT | the local merge commit on the base branch (migration) |
 | `pr_url` | TEXT | the delivery pull request URL (migration) |
 | `pr_number` | INTEGER | the delivery pull request number (migration) |
 | `created_at` | REAL NOT NULL | |
@@ -200,8 +202,9 @@ Index: `idx_campaigns_state(state)`.
 Created by `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`,
 and `Store.create_campaign` (idempotent on the key or target). Read by
 `Service.campaign`, `Service.status`, the report and evidence, and `plan`. A
-legacy plane gets one row on first open. `Service.deliver` sets `delivered` and
-records `pr_url` / `pr_number`.
+legacy plane gets one row on first open. `Service.deliver` sets `delivered` for
+a `pull_request` delivery and `landed` for a `local` delivery. It records
+`pr_url` / `pr_number` for a pull request and `merge_commit` for a local merge.
 
 ## 6. Row lifecycle
 
@@ -217,9 +220,11 @@ records `pr_url` / `pr_number`.
    `verdicts` row, or the cache serves a terminal fingerprint. `packet.build_packet`
    reads the newest terminal check per commit as evidence.
 5. **Delivery.** After every phase completes and the user confirms, `deliver`
-   pushes the work branch and opens a pull request against the delivery
-   base, then `_mark_delivered` sets the campaign's records to `delivered` and the
-   campaign state to `delivered`.
+   runs in the selected mode. A `pull_request` delivery pushes the work branch
+   and opens a pull request against the delivery base. A `local` delivery
+   merges the work branch into the local base branch. Then `_mark_delivered`
+   sets the campaign's records to `delivered` and the campaign state to
+   `delivered` or `landed`.
 6. **Review.** The human records one campaign decision through
    `approve`. The delivery gate reads the newest unconsumed row.
 7. **Status and report.** `Service.status` reads the campaign row, records,

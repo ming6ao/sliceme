@@ -111,10 +111,11 @@ review.
    edge. Never rely on runtime arbitration.
 5. **The reviewer only reads.** The one check runner runs the checks. Workers
    never run the suite, and the reviewer judges the recorded evidence.
-6. **Never push the default branch.** The work branch is the pull request
-   head and is never `main`, `master`, or the repository default branch.
-   `deliver` refuses a work branch that equals the default branch, with no
-   override. The pull request base is the base branch (`main`).
+6. **Never push the default branch.** The work branch is the delivery head and
+   is never `main`, `master`, or the repository default branch. `deliver`
+   refuses a work branch that equals the default branch, with no override. The
+   delivery base is the base branch (`main`). A `local` delivery merges into
+   the local base branch only; the user pushes it later.
 
 ## Planning and campaign loops (the coordinator)
 
@@ -157,7 +158,8 @@ shows the summary to the user, then runs:
 sliceme evidence                    write the deterministic evidence document
 sliceme report                      the deterministic report (--narrative appends the summary)
 sliceme approve                     record the one campaign approval (after the user confirms)
-sliceme deliver                     push the work branch and open a pull request against main
+sliceme deliver [--mode MODE]       pull_request: push + open a PR against main
+                                    local: merge the local base branch
 ```
 
 The resource bounds the loop with the `phaseCap` and `nodeCap` fields. The
@@ -189,7 +191,7 @@ equals the default branch.
 | `doctor` | check git, `config.json`, and `state.db` health |
 | `ready` | the current-phase ready node ids, the phase index, and `paused` |
 | `plan` | the design's `sliceme-campaigns` split joined with the registry state, plus the next entry |
-| `deliver` | push the work branch and open the delivery pull request against the base branch (`main`); `source`, `cleanup`, `no_checks` |
+| `deliver` | deliver the campaign; `mode` selects `pull_request` (push + PR) or `local` (merge the local base branch); `source`, `cleanup`, `no_checks` |
 | `check` | run the one combined-tree check runner for the current phase |
 | `open` | create or reuse the campaign worktree |
 | `record` | record the current phase: conformance + per-node commits |
@@ -211,8 +213,8 @@ Workers are pure editors: they edit only their owned directories and stop. The
 resource runs `record` to enforce conformance and create
 per-node commits, then `check` runs the combined-tree checks. A worker
 never runs the suite, never runs `git`, and never runs the tests. Nothing lands
-on the base branch until a human merges the pull request that the
-coordinator's single `deliver` step opens.
+on the base branch until the human gate. The coordinator's single `deliver`
+step then opens a pull request, or merges the local base branch.
 
 Ownership syntax is a repository-relative directory path. It is always a
 directory at the deepest level that contains the paths the node touches:

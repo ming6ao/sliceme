@@ -6,7 +6,7 @@ git ignores it.
 
 A human reviews the unmerged commits from the campaign worktree. The reviewer
 reads the diff and the report, then approves or requests changes on the
-campaign. The design has one safety goal: **no pull request without a human
+campaign. The design has one safety goal: **no delivery without a human
 approval of the campaign.**
 
 ## 1. Scope
@@ -30,8 +30,9 @@ Out:
 - Per-commit approval.
 - Remote or shared review.
 - Uncommitted working-tree changes. The review unit is commits.
-- Promotion from the work branch to the default branch. That step stays a
-  human act on the forge.
+- Promotion to a shared branch. After a `local` delivery the user pushes the
+  base branch, and after a `pull_request` delivery the user merges on the
+  forge. Both steps stay human acts.
 
 ## 2. Architecture
 
@@ -79,8 +80,7 @@ the main reason to read the packet.
 
 Review is **incremental and non-blocking**. A human can review after the first
 commit and approve as work lands. Workers keep editing; nothing waits on the
-review. The coordinator opens the pull request only after a human approves the
-campaign.
+review. The coordinator delivers only after a human approves the campaign.
 
 ## 4. State
 
@@ -110,11 +110,12 @@ on its own.
   review.
 
 The coordinator prompts for confirmation one time, after the last phase. It
-writes the evidence and the report, shows the evidence summary and the pull
-request details to the user, and asks for one confirmation. On a confirmation it
-records the approval and runs `deliver`; on a decline it stops and keeps the
-campaign for a later try. The confirmation is the only pause; suspension
-stays an explicit user command.
+writes the evidence and the report. It shows the evidence summary and the
+delivery details to the user, then asks for one confirmation. The details are
+the selected mode, the branches, and the title for a pull request. On a
+confirmation it records the approval and runs `deliver`; on a decline it stops
+and keeps the campaign for a later try. The confirmation is the only pause;
+suspension stays an explicit user command.
 
 ## 6. The report
 
@@ -131,14 +132,18 @@ request; the report stays reviewable next to it.
 ## 7. Delivery
 
 The coordinator triggers delivery after every phase completes and a human approves
-the campaign. The design orders delivery to avoid a race with the campaign loop:
+the campaign. The delivery mode is `pull_request` or `local`. The design orders
+delivery to avoid a race with the campaign loop:
 
 1. **Quiesce.** The resource records and checks one phase at a time, so no worker
    commits mid-delivery.
 2. **Lock.** Take the one workspace lock at `.sliceme/workspace.lock`.
-3. **Re-check the gate** under the lock and immediately before the push.
-4. Push the work branch, open the pull request, mark the records delivered,
-   and consume the approval.
+3. **Re-check the gate** under the lock and immediately before the merge or the
+   push.
+4. Deliver in the selected mode: `pull_request` pushes the work branch and opens
+   the pull request; `local` merges the work branch into the local base branch.
+   Both modes mark the records delivered, set the campaign to `delivered` or
+   `landed`, and consume the approval.
 
 Preconditions, enforced in `Service`:
 

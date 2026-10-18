@@ -26,41 +26,43 @@ class DeliveryVerbs:
         source: str | None = None,
         cleanup: str = "none",
         run_checks_flag: bool = True,
+        mode: str | None = None,
     ) -> dict[str, Any]:
-        """Push the campaign worktree branch and open the delivery pull request.
+        """Deliver the campaign with the selected mode.
 
-        This is the single, end-of-campaign delivery.  The campaign branch is
-        never the default branch and there is no override.  The pull request
-        base is the delivery base (the default branch).  Once the pull request
-        is open, the campaign is done.
+        ``pull_request`` pushes the campaign branch and opens a pull request.
+        ``local`` merges the campaign branch into the local base branch and
+        stops, so the user pushes the base branch later.  Both modes run under
+        the one approval gate.  The campaign branch is never the default
+        branch and there is no override.
         """
         if cleanup not in {"none", "worktrees", "all"}:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
         from ..review import packet
 
-        feature_branch = self.config.get("work_branch") or ""
-        source_branch = source or self.config.get("work_branch") or ""
         key = self.campaign_key()
         stored = self.store.get_campaign(key) if key else None
-        if stored and stored.get("pr_url"):
-            # Idempotent: the pull request is open, so the campaign is done.
-            results = [
-                integrate.delivered_result(
-                    f"pull request already open: {stored['pr_url']}",
-                    {"url": stored["pr_url"], "number": stored.get("pr_number")},
-                )
-            ]
+        resolved_mode = integrate.resolve_delivery_mode(self.config, mode=mode)
+        feature_branch = self.config.get("work_branch") or ""
+        source_branch = source or self.config.get("work_branch") or ""
+
+        done = self._already_delivered(stored, resolved_mode)
+        if done is not None:
+            results = [done]
         else:
             commits = packet.campaign_commits(self)
             with workspace_lock(self.root):
                 override = self.require_all_approved(commits)
-                results = integrate.deliver_pull_request(
+                if key:
+                    self.store.set_campaign_delivery_mode(key, resolved_mode)
+                results = integrate.deliver(
                     self.store,
                     self.root,
                     self.config,
                     campaign=key,
                     source=source,
                     run_checks_flag=run_checks_flag,
+                    mode=resolved_mode,
                 )
                 if results and all(result.status == "delivered" for result in results):
                     self.consume_approvals(commits)
@@ -68,14 +70,20 @@ class DeliveryVerbs:
                         self.store.consume_approvals([int(override["id"])])
                         self.store.conn.commit()
                     if key:
-                        pull_request = results[0].pull_request or {}
+                        first = results[0]
+                        pull_request = first.pull_request or {}
                         if pull_request.get("url"):
                             self.store.set_campaign_pull_request(
                                 key,
                                 url=str(pull_request["url"]),
                                 number=pull_request.get("number"),
                             )
-                        self.store.set_campaign_state(key, "delivered")
+                        if first.merge_commit:
+                            self.store.set_campaign_merge_commit(
+                                key, first.merge_commit
+                            )
+                        state = "landed" if resolved_mode == "local" else "delivered"
+                        self.store.set_campaign_state(key, state)
                         self.store.conn.commit()
                     self._campaign = None
         cleanup_result: dict[str, Any] | None = None
@@ -89,12 +97,37 @@ class DeliveryVerbs:
             "feature_branch": feature_branch,
             # Deprecated mirror kept for one release; read work_branch first.
             "target_branch": feature_branch,
+            "base_branch": self.config.get("base_branch"),
+            "mode": resolved_mode,
             "source": source_branch,
             "results": [r.to_dict() for r in results],
             "pull_request": results[0].pull_request if results else None,
+            "merge_commit": results[0].merge_commit if results else None,
             "cleanup": cleanup_result,
             "artifacts_removed": artifacts_removed,
         }
+
+    def _already_delivered(
+        self, stored: dict[str, Any] | None, mode: str
+    ) -> "integrate.DeliveryResult | None":
+        """The result for a campaign that already finished delivery, else None."""
+        if not stored:
+            return None
+        if mode == "local":
+            if stored.get("state") == "landed":
+                return integrate.local_result(
+                    f"already merged into local "
+                    f"{stored.get('base_branch') or 'base'}",
+                    merge_commit=stored.get("merge_commit"),
+                )
+            return None
+        if stored.get("pr_url"):
+            # Idempotent: the pull request is open, so the campaign is done.
+            return integrate.delivered_result(
+                f"pull request already open: {stored['pr_url']}",
+                {"url": stored["pr_url"], "number": stored.get("pr_number")},
+            )
+        return None
 
     def report(
         self, *, narrative: str | None = None, design: str | None = None
@@ -178,12 +211,16 @@ class DeliveryVerbs:
             registered = bool(branch) and gitutil.worktree_for_branch(self.root, branch) is not None
             if path.exists() or registered:
                 removed.append(str(row["key"]))
-            # Landed content is already on main as a squashed commit, so its
-            # branch is disposable; otherwise one branch leaks per delivered
-            # campaign.  Closed campaigns may hold unmerged work, so keep their
-            # branches.  ``cleanup_worktree`` prunes stale metadata before
-            # deleting the branch, so a hand-deleted worktree no longer blocks it.
-            drop_branch = state in {"landed", "delivered"} and branch
+            # A delivered pull request branch is disposable: the work is on the
+            # forge.  A landed campaign branch stays until the user pushes the
+            # local base branch, so the merge keeps a second reference.  Closed
+            # campaigns may hold unmerged work, so keep their branches.
+            # ``cleanup_worktree`` prunes stale metadata before deleting the
+            # branch, so a hand-deleted worktree no longer blocks it.
+            drop_branch = bool(branch) and (
+                state == "delivered"
+                or (state == "landed" and self._landed_is_pushed(row))
+            )
             branch_existed = bool(drop_branch) and gitutil.branch_exists(self.root, branch)
             gitutil.cleanup_worktree(
                 self.root, path, branch=branch if drop_branch else None
@@ -204,6 +241,29 @@ class DeliveryVerbs:
             "pruned_artifacts": pruned_artifacts,
             "pruned_approvals": pruned_approvals,
         }
+
+    def _landed_is_pushed(self, row: dict[str, Any]) -> bool:
+        """Whether a landed campaign's merge commit is on the remote base.
+
+        The user pushes the base branch by hand after a local merge.  The
+        remote ref is the signal that the push happened, so the campaign
+        branch is safe to drop.
+        """
+        merge_commit = row.get("merge_commit")
+        base = row.get("base_branch")
+        if not merge_commit or not base:
+            return False
+        remote = (self.plane_config.get("policy") or {}).get("remote") or "origin"
+        ref = f"refs/remotes/{remote}/{base}"
+        res = gitutil.git(
+            self.root, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False
+        )
+        if not res.ok:
+            return False
+        return (
+            gitutil.merge_base(self.root, res.stdout.strip(), str(merge_commit))
+            == str(merge_commit)
+        )
 
     def _prune_finished_artifacts(self) -> list[str]:
         """Remove the files of campaigns that have finished (report kept).

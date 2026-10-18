@@ -76,6 +76,7 @@ class BootstrapVerbs:
         base: str | None = None,
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Create the on-disk plane (config + state db) for a git repo.
 
@@ -110,11 +111,13 @@ class BootstrapVerbs:
         # The campaign worktree accumulates on the campaign branch, so the
         # worktree branch and the pull request head are one branch.
         work_branch = campaign_branch
+        delivery_mode = integrate.resolve_delivery_mode({"delivery_mode": mode})
         config = {
             "version": 1,
             "work_branch": work_branch,
             "base_branch": delivery_base,
             "default_branch": default_branch,
+            "delivery_mode": delivery_mode,
             "checks": checks or [],
             "policy": {"require_verification": True, "allow_auto_approve": [], "remote": "origin"},
             "created_at": now(),
@@ -129,6 +132,7 @@ class BootstrapVerbs:
                 branch=campaign_branch,
                 base_branch=delivery_base,
                 design=design,
+                delivery_mode=delivery_mode,
             )
             store.conn.commit()
         finally:
@@ -143,6 +147,7 @@ class BootstrapVerbs:
         branch: str,
         base_branch: str,
         design: str | None,
+        delivery_mode: str | None = None,
     ) -> dict[str, Any]:
         """Create the campaign row for *branch* (idempotent on the branch)."""
         existing = store.get_campaign(branch)
@@ -171,6 +176,7 @@ class BootstrapVerbs:
             base_branch=base_branch,
             design=design,
             unit_name="campaign" if not store.list_campaigns() else f"campaign:{key}",
+            delivery_mode=delivery_mode,
         )
 
     @classmethod
@@ -181,6 +187,7 @@ class BootstrapVerbs:
         design: str | None,
         feature_branch: str | None,
         base: str | None,
+        mode: str | None = None,
     ) -> None:
         """Register a campaign in an existing plane (idempotent on the branch).
 
@@ -199,6 +206,9 @@ class BootstrapVerbs:
         cfg["work_branch"] = campaign_branch
         cfg["base_branch"] = delivery_base
         cfg["default_branch"] = default_branch
+        cfg["delivery_mode"] = integrate.resolve_delivery_mode(
+            {"delivery_mode": mode or cfg.get("delivery_mode")}
+        )
         for retired in (
             "target_branch",
             "main_branch",
@@ -217,6 +227,7 @@ class BootstrapVerbs:
                     branch=campaign_branch,
                     base_branch=delivery_base,
                     design=design,
+                    delivery_mode=integrate.resolve_delivery_mode(cfg),
                 )
                 store.conn.commit()
             finally:
@@ -232,6 +243,7 @@ class BootstrapVerbs:
         base: str | None = None,
         checks: list[dict[str, Any]] | None = None,
         force: bool = False,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Bootstrap the plane and its campaign for *path* (default cwd),
         idempotently.
@@ -264,6 +276,7 @@ class BootstrapVerbs:
                 base=base,
                 checks=checks,
                 force=force,
+                mode=mode,
             )
             initialized = True
         elif design or feature_branch:
@@ -275,6 +288,7 @@ class BootstrapVerbs:
                 design=design,
                 feature_branch=feature_branch,
                 base=base,
+                mode=mode,
             )
 
         # Keep the exclude entry fresh even when the plane already existed and

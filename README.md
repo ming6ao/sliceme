@@ -22,8 +22,10 @@ never author the same files.
 - **One combined-tree check** — one synchronous runner checks the recorded phase
   tree and caches the verdict. A resumed node reads the cache.
 - **One human gate** — the user confirms the campaign one time. Sliceme then
-  pushes the work branch and opens one pull request against the default
-  branch (`main`). Sliceme never pushes the default branch.
+  delivers in one of two modes. The `pull_request` mode pushes the work branch
+  and opens one pull request against the base branch (`main`). The `local`
+  mode merges the work branch into the local base branch, and the user pushes
+  it later. Sliceme never pushes the default branch.
 - **Deterministic evidence** — the engine writes the campaign commits, checks,
   diffs, and worker logs to one evidence document. The document is the pull
   request body. There is no narrative agent.
@@ -59,7 +61,7 @@ sliceme check                     run the combined-tree checks for the phase
 sliceme approve                   record the one campaign approval
 sliceme report                    write the deterministic campaign report
 sliceme evidence                  write the deterministic evidence document
-sliceme deliver                   push the work branch and open a pull request against main
+sliceme deliver --mode MODE       deliver: pull_request (push + PR) or local (merge the base branch)
 ```
 
 ## Docs

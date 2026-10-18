@@ -82,6 +82,7 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 		"design",
 		"feature_branch",
 		"base",
+		"mode",
 		"checks",
 		"force",
 		"campaign",
@@ -100,7 +101,7 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	approve: ["note", "actor", "campaign"],
 	report: ["narrative", "design", "campaign"],
 	evidence: ["design", "campaign"],
-	deliver: ["source", "cleanup", "no_checks", "campaign"],
+	deliver: ["source", "mode", "cleanup", "no_checks", "campaign"],
 };
 
 /** Render one engine verb plus its selected params as CLI arguments. */
@@ -425,7 +426,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"(current-phase node ids and paused), open (create the campaign worktree), record " +
 			"(the current phase as per-node commits), check (combined-tree checks), approve (one " +
 			"campaign approval), report (the deterministic report), evidence (the deterministic " +
-			"evidence document), and deliver (push + pull request). The planning loop runs in " +
+			"evidence document), and deliver (push + pull request, or a local merge). The " +
+			"planning loop runs in " +
 			"the sliceme.plan workflow resource, and the campaign loop runs in the " +
 			"sliceme.campaign workflow resource.",
 		promptSnippet: "Call the Sliceme engine (start → plan → resource loop → deliver)",
@@ -445,10 +447,16 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"Stop at the human gates: an explicit user suspension and the campaign " +
 				"approval before `deliver`.",
 			"After the campaign resource returns `complete`, run `evidence`, then " +
-				"run `report`. Show the evidence summary and the pull request details " +
-				"(the head branch, the base `main`, and the title) to the user, and ask for " +
+				"run `report`. Show the evidence summary and the delivery details to the user: " +
+				"for the `pull_request` mode the head branch, the base `main`, and the title; " +
+				"for the `local` mode the base branch and the coming local merge. Ask for " +
 				"confirmation one time. On a confirmation run `approve` and " +
-				"then `deliver`; on a decline stop and keep the campaign for a later attempt.",
+				"then `deliver` with the selected `mode`; on a decline stop and keep the " +
+				"campaign for a later attempt.",
+			"The delivery mode is `pull_request` (push the branch and open a pull request) " +
+				"or `local` (merge the campaign branch into the local base branch and stop, " +
+				"so the user pushes later). The plane default comes from `start` with `mode`; " +
+				"`deliver` accepts `mode` to override it for one campaign.",
 			"A node is ready only once every dependency is done. Use `ready` for the ready node " +
 				"ids, the current phase, and `paused`.",
 		],
@@ -463,6 +471,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			),
 			campaign: Type.Optional(Type.String({ description: "campaign to operate on" })),
 			base: Type.Optional(Type.String({ description: "start: delivery base override" })),
+			mode: Type.Optional(
+				StringEnum(["pull_request", "local"] as const, {
+					description: "start/deliver: pull_request (push + PR) or local (merge the local base)",
+				}),
+			),
 			feature_branch: Type.Optional(
 				Type.String({ description: "start: campaign branch (pull request head)" }),
 			),
@@ -517,9 +530,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					`from the base branch. Run the campaign ` +
 					`loop through the sliceme.campaign workflow resource: call the subagent tool ` +
 					`with workflow "sliceme.campaign" and async true. When it completes, run ` +
-					`"evidence" and "report", show the evidence summary and the pull ` +
-					`request details to the user, and ask for confirmation one time. On a ` +
-					`confirmation run "approve" and then "deliver"; on a ` +
+					`"evidence" and "report", show the evidence summary and the delivery ` +
+					`details to the user, and ask for confirmation one time. Ask which delivery ` +
+					`mode to use: "pull_request" (push the branch and open a pull request) or ` +
+					`"local" (merge the local base branch, then push later). On a ` +
+					`confirmation run "approve" and then "deliver" with the chosen "mode"; on a ` +
 					`decline stop and keep the campaign. Stop only at the human gates: an ` +
 					`explicit user suspension and the final confirmation before delivery.`,
 			);

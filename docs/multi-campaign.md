@@ -157,7 +157,9 @@ CREATE TABLE IF NOT EXISTS campaigns (
   unit_name TEXT NOT NULL UNIQUE,
   name TEXT,
   design TEXT,
-  state TEXT NOT NULL DEFAULT 'working', -- working | delivered | closed
+  state TEXT NOT NULL DEFAULT 'working', -- working | delivered | landed | closed
+  delivery_mode TEXT,                    -- pull_request | local
+  merge_commit TEXT,                     -- the local merge commit
   pr_url TEXT,
   pr_number INTEGER,
   created_at REAL NOT NULL,
@@ -203,7 +205,8 @@ hash is unique across campaigns.
 
 - `_mark_delivered` takes a campaign and marks only that campaign's records.
 - `deliver` and `plan_phases` receive the campaign config.
-- One pull request per campaign. The workspace lock serializes deliveries.
+- One delivery per campaign, in one of two modes. The workspace lock
+  serializes deliveries.
 
 ### 6.3 `sliceme/campaign.py`
 

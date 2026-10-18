@@ -22,8 +22,9 @@ dark/light themes is at [architecture.html](./architecture.html). The source is
 Sliceme turns a design document into a DAG of work. It packs non-conflicting
 nodes into phases. It runs one pure-editor worker subagent per node in a single
 campaign worktree. One synchronous check runner tests the recorded phase tree
-against a content fingerprint. Sliceme then opens one pull request from the
-work branch onto the default branch after the user confirms.
+against a content fingerprint. After the user confirms, Sliceme delivers in one
+of two modes. It opens one pull request from the work branch onto the default
+branch, or it merges the work branch into the local base branch.
 
 A pi coordinator session owns the planning and campaign loops. The trusted
 `sliceme.plan` workflow resource runs the bounded planner re-pass loop. The
@@ -184,7 +185,7 @@ flowchart LR
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase ready node ids, the phase index, and `paused`. |
 | `plan` | The design's campaign split joined with the registry state. |
-| `deliver` | Push the work branch and open the delivery pull request against the base branch after the confirmation. |
+| `deliver` | Deliver after the confirmation: `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | The one combined-tree check runner for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase: conformance + per-node commits. |
@@ -236,7 +237,7 @@ sequenceDiagram
   C->>E: evidence + report
   U->>C: confirm the pull request one time
   C->>E: approve
-  C->>E: deliver (push the work branch; pull request against main)
+  C->>E: deliver (pull_request: push + PR; local: merge the base branch)
 ```
 
 The coordinator is **not** a worktree. `start` records the campaign without
@@ -312,8 +313,8 @@ Two paths share this primitive:
 1. **Phase path (`check`).** The runner checks the recorded phase head
    with `source=phase:<n>`, and the reviewer judges the recorded evidence.
 2. **Delivery path (`deliver`).** The plane's trusted checks run on the campaign
-   head with `source=deliver` before the push. Sliceme reuses a passed
-   fingerprint.
+   head with `source=deliver` before the merge or the push. Sliceme reuses a
+   passed fingerprint.
 
 `source` is part of the identity, so a `phase:1` verdict can never collide with a
 plane check. Sliceme folds in the sandbox digest and the checks version. A
@@ -387,9 +388,10 @@ sequenceDiagram
 
 Delivery is deterministic and idempotent. Sliceme returns an open pull request as
 it is. A base branch that already contains the work branch is a no-op.
-Delivery pushes the work branch and opens one pull request with `gh`. The
-engine never merges and never mutates the base branch. The work branch is
-never the default branch.
+The `pull_request` mode pushes the work branch and opens one pull request with
+`gh`. The `local` mode merges the work branch into the local base branch with
+one merge commit and pushes nothing. The work branch is never the default
+branch.
 
 ## 10. State and persistence
 
@@ -475,8 +477,8 @@ stateDiagram-v2
 | Worker produces no record / fails the checks | The coordinator retries, splits the node, or stops. |
 | Reviewer reports a problem | The coordinator retries, splits the node, or stops. |
 | A phase record touches a path outside every node's `dir` | Plan conformance rejects it; the coordinator corrects the `dir` or adds a `depends_on` edge; phases reproject. |
-| Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; structured findings return; nothing is pushed. |
-| Checks fail at `deliver` | Sliceme does not open the pull request; records stay undelivered. |
+| Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; structured findings return; nothing is pushed and the base branch is unchanged. |
+| Checks fail at `deliver` | Sliceme does not deliver; records stay undelivered. |
 | Default-branch work branch | Refused at `start` and at `deliver`; there is no override. |
 | Orchestrator crash | The children of the coordinator die. On resume, a `running` node stays `running` if the campaign worktree is present, else `pending`; a `recorded` node stays `recorded`. Sliceme reuses the campaign worktree. |
 | Concurrent spawns completing together | Coordinator state is a rebuildable cache; git and `state.db` are the source of truth. |

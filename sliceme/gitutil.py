@@ -185,6 +185,19 @@ def push(
     return git(repo, *args, check=True)
 
 
+def merge_no_ff(
+    worktree: str | os.PathLike[str], source: str, message: str
+) -> str:
+    """Merge *source* into the current branch of *worktree*.
+
+    The merge always creates a merge commit (``--no-ff``), so the campaign
+    history stays visible and the merge has one revert point.  The function
+    returns the new head commit.
+    """
+    git(worktree, "merge", "--no-ff", "--no-edit", "-m", message, source, check=True)
+    return head_commit(worktree)
+
+
 def remove_worktree(repo: str | os.PathLike[str], path: Path, *, force: bool = True) -> None:
     path = Path(path)
     if path.exists():

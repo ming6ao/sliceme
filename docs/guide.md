@@ -7,9 +7,9 @@
 
 Sliceme *(slice the design into parallel agents)* coordinates parallel coding
 agents around one campaign. A campaign is a machine-readable DAG, plan-time
-**directory ownership**, git worktrees, and fingerprint-pinned delivery as a
-pull request against the default branch. This guide covers the model, ownership,
-orchestration, and the pi integration. The action reference is in
+**directory ownership**, git worktrees, and fingerprint-pinned delivery. A
+delivery is one pull request, or one local merge into the local base branch.
+This guide covers the model, ownership, orchestration, and the pi integration. The action reference is in
 [reference.md](./reference.md).
 
 ## 1. The problem
@@ -27,7 +27,8 @@ order. Sliceme adds a deterministic layer over git:
 - it assigns each DAG node disjoint **directories** at plan time;
 - it serializes overlapping directory subtrees into phases;
 - it checks each recorded phase against a content fingerprint;
-- it delivers the campaign as one pull request against the default branch.
+- it delivers the campaign as one pull request, or as one local merge into the
+  local base branch.
 
 The model drafts the plan. The model never decides at run time whether a node
 blocks another node.
@@ -290,7 +291,8 @@ resource loop
         │  repeat
         ▼
 evidence + report ──► user confirms ──► approve ──► deliver
-                                                        (push the work branch; pull request against main)
+                                                        (pull_request: push the work branch + open a PR
+                                                         local: merge the local base branch)
 ```
 
 1. **`start`** derives the **work branch** from the design file name
@@ -320,15 +322,18 @@ evidence + report ──► user confirms ──► approve ──► deliver
    resource returns `complete`; the Markdown document is the pull request body.
 8. **`report`** writes the deterministic skeleton plus the narrative of
    the coordinator. The coordinator runs it before the gate, so the report is
-   reviewable. The coordinator shows the evidence summary and the pull request
-   details. The details are the head branch, the base `main`, and the title.
-   The coordinator asks the user to confirm one time.
+   reviewable. The coordinator shows the evidence summary and the delivery
+   details: for `pull_request` the head branch, the base `main`, and the title;
+   for `local` the base branch and the coming local merge. The coordinator asks
+   the user to confirm one time.
 9. **`approve`** records the one campaign approval. The user
    makes the decision, and the coordinator records it with the engine tool.
 10. **`deliver`** runs after every phase completes and the user confirms. It runs
-    the trusted checks, pushes the work branch, and opens one pull request
-    against the base branch (`main`). The work branch is never the default
-    branch.
+    the trusted checks, then delivers in the selected mode. The `pull_request`
+    mode pushes the work branch and opens one pull request against the base
+    branch (`main`). The `local` mode merges the work branch into the local base
+    branch with one merge commit, and the user pushes later. The work branch is
+    never the default branch.
 
 The `sliceme.plan` resource runs the planner at most three times. A plan error
 becomes the input to the next pass. The resource records nothing, so a re-pass
@@ -341,8 +346,9 @@ DAG projection, so the next `status` or `ready` reprojects the phases.
 Cleanup is destructive, so the agent cannot choose it without a flag. There is
 no per-phase cleanup: Sliceme never removes files between phases. The `deliver`
 action takes `--cleanup worktrees`. That option removes the campaign worktree,
-drops the work branch, and clears scratch. It keeps the report and the
-`dag.json` record. `cleanup: all` also removes every other campaign file: the
+drops a delivered work branch, and clears scratch. It keeps a landed branch
+until the user pushes the base branch. It keeps the report and the `dag.json`
+record. `cleanup: all` also removes every other campaign file: the
 `dag.json`, `session.json`, and `control.json` records and the worker logs.
 
 Every cleanup level keeps the report and the evidence document.

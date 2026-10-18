@@ -24,7 +24,7 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase node ids, the phase index, and `paused`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
-| `deliver` | Push the work branch and open the delivery pull request against the base branch after the confirmation. |
+| `deliver` | Deliver after the confirmation: `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | Run the synchronous combined-tree checks for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase: conformance + per-node commits. |
@@ -46,6 +46,7 @@ the layout.
 ```bash
 sliceme start [--path DIR]
                 [--design DESIGN.md] [--feature-branch BRANCH] [--base REF]
+                [--mode pull_request|local]
                 [--check NAME=COMMAND ...]
                 [--force] [--campaign REF]
 ```
@@ -65,6 +66,9 @@ creates. Re-running `start` is a no-op for the same campaign.
   There is no override.
 - `--base REF` records the **base branch** (the pull request base). The
   default is the repository default branch (`main`).
+- `--mode pull_request|local` records the plane delivery mode. The default is
+  `pull_request`. A `local` delivery merges the work branch into the local base
+  branch and stops, so the user pushes the base branch later.
 - The campaign worktree uses the work branch. `open`
   fetches the base branch and creates the worktree from `origin/<base>`.
 - `--check NAME=COMMAND` registers a trusted plane check (repeatable).
@@ -150,7 +154,8 @@ sliceme gc
 
 Prune worktrees, delivered-work branches, scratch, expired review rows, and the
 files of every campaign that has finished. It keeps the report and the evidence
-document.
+document. It keeps a landed campaign branch until its merge commit is on the
+remote base branch.
 
 ### `doctor`
 
@@ -194,30 +199,43 @@ one owner per directory inside one campaign. See
 ### `deliver`
 
 ```bash
-sliceme deliver [--source BRANCH]
+sliceme deliver [--source BRANCH] [--mode pull_request|local]
                    [--cleanup none|worktrees|all] [--no-checks] [--campaign REF]
 ```
 
-- Pushes the work branch (`--source`, default the recorded
-  `work_branch`) to the remote
-  (`policy.remote`, default `origin`).
-- Opens one pull request against the **base branch** (the repository default
-  branch, `main`) with the `gh` program. The body is the evidence document.
+The delivery mode is the `--mode` value, then the campaign value, then the
+plane value. The default is `pull_request`. Both modes keep the campaign branch
+and the campaign evidence.
+
+- The `pull_request` mode pushes the work branch (`--source`, default the
+  recorded `work_branch`) to the remote (`policy.remote`, default `origin`).
+  It opens one pull request against the **base branch** (the repository
+  default branch, `main`) with the `gh` program. The body is the evidence
+  document.
+- The `local` mode merges the work branch into the local **base branch** with
+  one merge commit. It pushes nothing and calls no forge. The user pushes the
+  base branch later.
 - Pre-checks the merge with `git merge-tree`. A conflict returns structured
-  findings before the push.
+  findings before the merge or the push.
 - Runs the plane's trusted checks on the campaign head through the single check
-  runner; a failed check stops the delivery before the push. The runner caches
-  the verdict by fingerprint.
-- Marks recorded records and their unit `delivered` without rewriting their
-  recorded commits.
+  runner. A failed check stops the delivery. The runner caches the verdict by
+  fingerprint.
+- Marks recorded records `delivered` without rewriting their recorded commits.
+  The campaign moves to `delivered` for a pull request and to `landed` for a
+  local merge.
 
 It is idempotent: Sliceme returns an open pull request as it is, and a delivery
 base that already contains the work branch is a no-op. Delivery needs the
 campaign work branch; run `open` first. It refuses until the newest
 campaign decision is an unconsumed `approve`, or an `override` records a note.
-Install `gh` and authenticate it before the first delivery.
 
-Sliceme resolves `gh` in this order:
+A `local` delivery refuses a base worktree with uncommitted changes, and it
+refuses when the remote base branch is ahead of or has diverged from the local
+base branch. After a local merge, `gc` keeps the campaign branch until the
+merge commit is on the remote base branch.
+
+Install `gh` and authenticate it before the first `pull_request` delivery.
+The `pull_request` mode resolves `gh` in this order:
 
 1. the `SLICEME_GH` environment variable, when set;
 2. the process `PATH`;
@@ -362,7 +380,7 @@ recorded in `dag.json`, so Sliceme rejects a post-plan manifest change.
 | `sliceme/verifier.py` | Fingerprints and the sandboxed check runner |
 | `sliceme/sandbox.py` | Isolation profiles + project manifests (`none`/`bwrap`/`unshare`/`command`), the gate, and command wrapping |
 | `sliceme/checks.py` | The single synchronous combined-tree check runner plus the `checks` cache |
-| `sliceme/integrate.py` | Work-branch guard and the base branch, pull request delivery, and combined-tree simulation |
+| `sliceme/integrate.py` | Work-branch guard and the base branch, pull request and local-merge delivery, and combined-tree simulation |
 | `sliceme/pullrequest.py` | The `gh` forge client: find or create the delivery pull request |
 | `sliceme/campaign.py` | `dag.json` layout and readers; the deterministic report and evidence document |
 | `sliceme/review/` | Reduced review: `packet.py` (snapshot + commits + report + evidence), `diff.py` (diff parsing) |
@@ -469,6 +487,7 @@ The suite covers these areas:
 | `tests/test_evidence.py` | the evidence document: commits, checks, diffs, logs, and the bounded Markdown |
 | `tests/test_e2e.py` | the full flow from `start` to the delivery pull request |
 | `tests/test_pull_request.py` | the `gh` client, the evidence-backed body, the head/base, and the fail-closed rules |
+| `tests/test_local_merge.py` | the local delivery mode: the merge commit, the `landed` state, the safety rails, and the idempotent re-run |
 | `tests/test_review_approval.py` | the one campaign approval, the override, and the retired comment verbs |
 | `tests/test_review_report.py` | the deterministic report and the packet |
 | `tests/test_sessions.py` | the descriptor round-trip, the resume plan, cleanup, and the additive `verdicts` table |
