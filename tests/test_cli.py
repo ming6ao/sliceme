@@ -146,7 +146,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(out.stdout.strip(), "feat--x")
 
-    def test_campaign_phase_record_approve_and_report(self):
+    def test_campaign_phase_record_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp, check=True)
@@ -198,12 +198,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             record = json.loads(out.stdout)["records"][0]
 
-            out = run_cli(
-                ["--json", "approve"],
-                root,
-            )
-            self.assertEqual(out.returncode, 0, out.stderr)
-            out = run_cli(["--json", "deliver"], root)
+            out = run_cli(["--json", "deliver", "--confirm"], root)
             self.assertEqual(out.returncode, 0, out.stderr)
             delivered = json.loads(out.stdout)
             self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])

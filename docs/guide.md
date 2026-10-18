@@ -61,7 +61,7 @@ blocks another node.
 | **Check runner** | The single synchronous combined-tree runner that runs one check set and caches the verdict. |
 | **Workflow resource** | `sliceme.campaign`, the trusted loop that pi-subagents runs. |
 | **Fingerprint** | Content hash of (tree, command vector, toolchain, policy, sandbox, checks, source) that pins a check result. |
-| **Campaign approval** | One decision that covers the whole campaign commit set before delivery. |
+| **Campaign approval** | One decision that covers the whole campaign commit set. `deliver` records it and consumes it when the delivery lands. |
 
 ## 3. Directory ownership
 
@@ -267,9 +267,9 @@ is the target repository.
 | `record` | `<python> <engine> --json record <campaign>` | commit the finished nodes |
 | `check` | `<python> <engine> --json check <campaign>` | run the combined-tree checks |
 
-The resource cannot approve a campaign or deliver it. The coordinator records
-the approval and runs `deliver` after the user confirms. The user permission is
-the only gate.
+The resource cannot deliver a campaign. The coordinator runs `deliver` after
+the user confirms. The `deliver` action records the one campaign approval, so
+there is no separate approve step. The user permission is the only gate.
 
 ### Lifecycle
 
@@ -290,8 +290,9 @@ resource loop
   9. caps?    -> stop      phaseCap or nodeCap reached
         │  repeat
         ▼
-evidence + report ──► user confirms ──► approve ──► deliver
-                                                        (pull_request: push the work branch + open a PR
+evidence + report ──► user confirms ──► deliver --confirm
+                                                        (records the one approval,
+                                                         pull_request: push the work branch + open a PR
                                                          local: merge the local base branch)
 ```
 
@@ -326,14 +327,13 @@ evidence + report ──► user confirms ──► approve ──► deliver
    details: for `pull_request` the head branch, the base `main`, and the title;
    for `local` the base branch and the coming local merge. The coordinator asks
    the user to confirm one time.
-9. **`approve`** records the one campaign approval. The user
-   makes the decision, and the coordinator records it with the engine tool.
-10. **`deliver`** runs after every phase completes and the user confirms. It runs
-    the trusted checks, then delivers in the selected mode. The `pull_request`
-    mode pushes the work branch and opens one pull request against the base
-    branch (`main`). The `local` mode merges the work branch into the local base
-    branch with one merge commit, and the user pushes later. The work branch is
-    never the default branch.
+9. **`deliver`** runs after every phase completes and the user confirms. The
+    `confirm` flag is the confirmation token. Delivery records the one
+    campaign-level approval, runs the trusted checks, and then delivers in the
+    selected mode. The `pull_request` mode pushes the work branch and opens one
+    pull request against the base branch (`main`). The `local` mode merges the
+    work branch into the local base branch with one merge commit, and the user
+    pushes later. The work branch is never the default branch.
 
 The `sliceme.plan` resource runs the planner at most three times. A plan error
 becomes the input to the next pass. The resource records nothing, so a re-pass
@@ -433,8 +433,8 @@ record                        -> conformance-by-ownership -> per-node commits
 check                         -> the one check runner over the combined tree
 (no merge per phase)           -> open N+1 in the same worktree
 evidence + report             -> the deterministic evidence and report
-approve                       -> one campaign approval, after the user confirms
-deliver                       -> push the work branch and open a pull request against main
+deliver --confirm             -> records the one campaign approval, then pushes the work branch
+                                 and opens a pull request against main
 ```
 
 The recorder (`Service.record_phase`) stages the worktree and attributes every
@@ -498,7 +498,7 @@ campaign. The workflow lives in the prompt guidelines of the tool and in
 
 | Role | Bound to a worktree? | Contract |
 |---|---|---|
-| **Coordinator** | no | owns the plan (`dag.json`), starts the resource, records the approval, calls `deliver` once at the end, writes the evidence and the report |
+| **Coordinator** | no | owns the plan (`dag.json`), starts the resource, calls `deliver --confirm` once at the end, writes the evidence and the report |
 | **Planner** | no | reads the design, writes `dag.json` |
 | **Worker** | no (pure editor) | edit owned directories only, then stop; never git, never commit |
 | **Reviewer** | no (read-only) | the builtin reviewer judges the recorded phase evidence, never edits |

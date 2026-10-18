@@ -1,9 +1,10 @@
 """Build one review snapshot: the accumulated commits and the report.
 
 The review unit is the campaign worktree.  Commits accumulate as phases land, so
-a human can review and approve them before or after the campaign finishes.  One
-campaign-level approval covers the whole commit set; delivery proceeds only
-while the newest campaign decision is an unconsumed ``approve``.
+a human can review them before or after the campaign finishes.  One
+campaign-level approval covers the whole commit set.  ``deliver`` records it and
+consumes it when the delivery lands, so ``all_approved`` is true only between
+the confirmation and the delivery.
 
 The report (``.sliceme/<branch-key>.report.md``) is git-ignored, so it is read
 from disk and included in the packet as a virtual file.  It is evidence for the

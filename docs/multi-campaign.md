@@ -217,7 +217,7 @@ hash is unique across campaigns.
 ### 6.4 `sliceme/surface.py` and `sliceme/cli.py`
 
 - `start`, `status`, `ready`, `plan`, `deliver`, `check`, `open`, `record`,
-  `approve`, `report`, and `evidence` all accept `campaign`.
+  `report`, and `evidence` all accept `campaign`.
 - `start` creates a campaign for the derived (or `--feature-branch`) campaign
   branch. It does not retarget the plane.
 - The CLI resolves the campaign before the code builds the `Service`.
@@ -229,7 +229,7 @@ The reduced review surface is campaign-scoped:
 - `packet.campaign_branch_key` reads the bound campaign.
 - `packet.build_packet` returns the commits, the report, and the evidence of one
   campaign.
-- `approve` records one campaign-level decision.
+- `deliver --confirm` records one campaign-level decision.
 - `report` writes `.sliceme/<branch-key>.report.md` for one campaign.
 
 A plane with several campaigns and no `--campaign` returns the plane summary

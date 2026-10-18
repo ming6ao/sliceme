@@ -78,9 +78,6 @@ class LocalMergeCase(unittest.TestCase):
         self.svc.record_phase(0, messages={"w1": "test"})
         return unit
 
-    def approve(self):
-        return self.svc.record_approval(action="approve", actor="test")
-
     def campaign_row(self):
         return self.svc.store.get_campaign("feat/x")
 
@@ -100,8 +97,7 @@ class LocalMergeCase(unittest.TestCase):
 
     def test_local_merge_lands_on_the_base_branch(self):
         unit = self.record_one()
-        self.approve()
-        result = self.svc.deliver()
+        result = self.svc.deliver(confirm=True)
         self.assertEqual(result["mode"], "local")
         self.assertEqual(result["results"][0]["status"], "delivered")
         self.assertIsNone(result["pull_request"])
@@ -122,8 +118,7 @@ class LocalMergeCase(unittest.TestCase):
 
     def test_local_merge_creates_a_merge_commit(self):
         self.record_one()
-        self.approve()
-        self.svc.deliver()
+        self.svc.deliver(confirm=True)
         parents = run("git", "rev-list", "--parents", "-n", "1", "main", cwd=self.root)
         # A merge commit has three tokens: the commit and its two parents.
         self.assertEqual(len(parents.stdout.split()), 3)
@@ -134,8 +129,7 @@ class LocalMergeCase(unittest.TestCase):
         (self.root / "src" / "a" / "x.py").write_text("a = 'base'\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "base change", cwd=self.root)
-        self.approve()
-        result = self.svc.deliver()
+        result = self.svc.deliver(confirm=True)
         self.assertEqual(result["results"][0]["status"], "failed")
         self.assertIn("conflict", result["results"][0]["detail"])
         self.assertEqual(self.campaign_row()["state"], "working")
@@ -144,15 +138,13 @@ class LocalMergeCase(unittest.TestCase):
     def test_a_dirty_base_worktree_refuses(self):
         self.record_one()
         (self.root / "src" / "a" / "x.py").write_text("uncommitted\n")
-        self.approve()
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.deliver()
+            self.svc.deliver(confirm=True)
         self.assertIn("uncommitted", str(ctx.exception))
         self.assertEqual(self.campaign_row()["state"], "working")
 
     def test_a_remote_that_is_ahead_refuses(self):
         self.record_one()
-        self.approve()
         # Publish main, then add one commit on the remote that is not local.
         run("git", "push", "-q", "origin", "main", cwd=self.root)
         (self.root / "src" / "a" / "x.py").write_text("a = 'remote'\n")
@@ -161,16 +153,15 @@ class LocalMergeCase(unittest.TestCase):
         run("git", "push", "-q", "origin", "main", cwd=self.root)
         run("git", "reset", "--hard", "-q", "HEAD~1", cwd=self.root)
         with self.assertRaises(SlicemeError) as ctx:
-            self.svc.deliver()
+            self.svc.deliver(confirm=True)
         self.assertIn("ahead", str(ctx.exception))
         self.assertEqual(self.campaign_row()["state"], "working")
 
     def test_local_merge_is_idempotent(self):
         self.record_one()
-        self.approve()
-        first = self.svc.deliver()
+        first = self.svc.deliver(confirm=True)
         self.assertEqual(first["results"][0]["status"], "delivered")
-        second = self.svc.deliver()
+        second = self.svc.deliver(confirm=True)
         self.assertEqual(second["results"][0]["status"], "delivered")
         self.assertIn("already merged", second["results"][0]["detail"])
         self.assertEqual(second["merge_commit"], first["merge_commit"])
@@ -178,26 +169,24 @@ class LocalMergeCase(unittest.TestCase):
         count = run("git", "rev-list", "--merges", "--count", "main", cwd=self.root)
         self.assertEqual(count.stdout.strip(), "1")
 
-    def test_local_merge_requires_approval(self):
+    def test_local_merge_requires_confirmation(self):
         self.record_one()
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
-        self.assertIn("not-approved", str(ctx.exception))
+        self.assertEqual(ctx.exception.reason, "not_confirmed")
         self.assertEqual(self.campaign_row()["state"], "working")
 
     def test_local_merge_needs_no_gh(self):
         self.record_one()
-        self.approve()
         with mock.patch("sliceme.pullrequest.available", return_value=False):
-            result = self.svc.deliver()
+            result = self.svc.deliver(confirm=True)
         self.assertEqual(result["results"][0]["status"], "delivered")
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 2\n")
 
     def test_mode_override_wins_for_one_deliver(self):
         # The plane default is local; an explicit pull_request mode pushes.
         self.record_one()
-        self.approve()
-        result = self.svc.deliver(mode="pull_request")
+        result = self.svc.deliver(confirm=True, mode="pull_request")
         self.assertEqual(result["mode"], "pull_request")
         self.assertTrue(result["pull_request"]["url"].startswith("https://example.test/pull/"))
         self.assertEqual(self.campaign_row()["state"], "delivered")
@@ -310,8 +299,7 @@ class GcKeepsLandedBranchTests(unittest.TestCase):
         unit = self.svc.create_phase_workspace(0)
         (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
         self.svc.record_phase(0, messages={"w1": "test"})
-        self.svc.record_approval(action="approve", actor="test")
-        self.svc.deliver()
+        self.svc.deliver(confirm=True)
         self.svc.gc()
         # The merge is local, so the branch stays as a second reference.
         self.assertTrue(self.branch_exists("feat/x"))

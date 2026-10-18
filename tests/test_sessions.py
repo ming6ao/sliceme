@@ -119,8 +119,6 @@ class SessionsCase(unittest.TestCase):
         result = self.svc.record_phase(0, messages={"w1": "test"})
         return next(c for c in result["records"] if c["node"] == "w1")
 
-    def approve(self):
-        return self.svc.record_approval(action="approve", actor="test")
 
 
 class DescriptorTests(SessionsCase):
@@ -309,8 +307,7 @@ class DeliveryCleanupTests(SessionsCase):
         self.assertTrue(worktree.exists())
         self.assertTrue(self.branch_exists(branch))
 
-        self.approve()
-        delivered = self.svc.deliver(cleanup="worktrees")
+        delivered = self.svc.deliver(confirm=True, cleanup="worktrees")
 
         self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
         # The approved work is opened as a pull request; the target branch is
@@ -324,8 +321,7 @@ class DeliveryCleanupTests(SessionsCase):
     def test_default_delivery_keeps_the_campaign_worktree(self):
         self.record_w1()
         row = self.svc.store.get_campaign("feat/x")
-        self.approve()
-        self.svc.deliver()
+        self.svc.deliver(confirm=True)
         # Cleanup is opt-in: the default keeps the worktree for inspection.
         self.assertTrue(Path(row["worktree"]).exists())
 
@@ -335,9 +331,8 @@ class DeliveryCleanupTests(SessionsCase):
         campaign.write_control(self.root, "feat/x", {"pause": False})
         campaign.worker_log_path(self.root, "feat/x", "w1").write_text("log\n")
         self.svc.report(narrative="done")
-        self.approve()
 
-        delivered = self.svc.deliver(cleanup="all")
+        delivered = self.svc.deliver(confirm=True, cleanup="all")
 
         self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
         for path in (

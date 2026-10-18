@@ -124,7 +124,7 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="deliver",
-        summary="push and open a pull request, or merge the local base branch (after approval)",
+        summary="confirm and deliver: push and open a pull request, or merge the local base branch",
         params=(
             Param("source", "string", "campaign worktree branch (default: recorded worktree branch)"),
             Param(
@@ -133,6 +133,9 @@ ACTIONS: tuple[Action, ...] = (
                 "delivery mode: pull_request (push + PR) or local (merge the local base branch)",
                 choices=("pull_request", "local"),
             ),
+            Param("confirm", "boolean", "confirm the one campaign approval and deliver"),
+            Param("actor", "string", "who confirmed the delivery"),
+            Param("note", "string", "approval note"),
             Param("cleanup", "string", "cleanup after delivery", choices=("none", "worktrees", "all")),
             Param("no_checks", "boolean", "skip the plane's trusted checks"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -152,15 +155,6 @@ ACTIONS: tuple[Action, ...] = (
         name="record",
         summary="record the current phase: conformance + per-node commits",
         params=(Param("campaign", "string", CAMPAIGN_HELP),),
-    ),
-    Action(
-        name="approve",
-        summary="record one campaign approval",
-        params=(
-            Param("note", "string", "approval note"),
-            Param("actor", "string", "who recorded the approval"),
-            Param("campaign", "string", CAMPAIGN_HELP),
-        ),
     ),
     Action(
         name="report",
@@ -306,6 +300,9 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
         cleanup=p.get("cleanup") or "none",
         run_checks_flag=not p.get("no_checks"),
         mode=p.get("mode"),
+        confirm=bool(p.get("confirm")),
+        actor=p.get("actor"),
+        note=p.get("note"),
     )
 
 
@@ -324,14 +321,6 @@ def _dispatch_record(service: "Service", p: dict[str, Any]) -> Any:
 
     with workspace_lock(service.root):
         return service.record_phase(phase_index)
-
-
-def _dispatch_approve(service: "Service", p: dict[str, Any]) -> Any:
-    return service.record_approval(
-        action="approve",
-        actor=p.get("actor"),
-        note=p.get("note"),
-    )
 
 
 def _dispatch_report(service: "Service", p: dict[str, Any]) -> Any:
@@ -358,7 +347,6 @@ _HANDLERS = {
     "check": _dispatch_check,
     "open": _dispatch_open,
     "record": _dispatch_record,
-    "approve": _dispatch_approve,
     "report": _dispatch_report,
     "evidence": _dispatch_evidence,
 }

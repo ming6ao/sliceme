@@ -284,7 +284,7 @@ def deliver_pull_request(
 ) -> list[DeliveryResult]:
     """Push the campaign worktree branch and open the delivery pull request.
 
-    Called once, after every phase is recorded and every commit is approved.
+    Called once, after every phase is recorded and the user confirmed the campaign.
     The pull request head is the campaign worktree branch.  The pull request
     base is the delivery base (the repository default branch).  The campaign
     branch is never the default branch: there is no override.

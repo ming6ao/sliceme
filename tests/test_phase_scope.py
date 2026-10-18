@@ -79,8 +79,6 @@ class PhaseScopeCase(unittest.TestCase):
     def file_on(self, branch, rel):
         return run("git", "show", f"{branch}:{rel}", cwd=self.root).stdout
 
-    def approve(self):
-        return self.svc.record_approval(action="approve", actor="test")
 
 
 class RecordTests(PhaseScopeCase):
@@ -196,8 +194,7 @@ class PhaseIntegrationTests(PhaseScopeCase):
         self.svc.record_phase(0, messages={"w1": "test", "w2": "test"})
         # Nothing lands on the delivery base until the pull request merges.
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
-        self.approve()
-        delivered = self.svc.deliver()
+        delivered = self.svc.deliver(confirm=True)
         self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
         self.assertTrue(delivered["pull_request"]["url"])
         # The campaign branch carries the work; the delivery base is unchanged
@@ -211,9 +208,8 @@ class PhaseIntegrationTests(PhaseScopeCase):
         unit = self.svc.create_phase_workspace(0)
         self.edit(unit["worktree"], "src/a/x.py", "a = 2\n")
         self.svc.record_phase(0, messages={"w1": "test"})
-        self.approve()
-        first = self.svc.deliver()
-        second = self.svc.deliver()
+        first = self.svc.deliver(confirm=True)
+        second = self.svc.deliver(confirm=True)
         self.assertEqual(
             first["pull_request"]["url"], second["pull_request"]["url"]
         )
@@ -234,8 +230,7 @@ class PhaseIntegrationTests(PhaseScopeCase):
 
         # Still nothing on the delivery base until the pull request merges.
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
-        self.approve()
-        self.svc.deliver()
+        self.svc.deliver(confirm=True)
         self.assertEqual(self.file_on(first["branch"], "src/a/x.py"), "a = 2\n")
         self.assertEqual(self.file_on(first["branch"], "src/c/z.py"), "c = 2\n")
         self.assertEqual(self.file_on("main", "src/a/x.py"), "a = 1\n")
@@ -265,8 +260,7 @@ class PhaseIntegrationTests(PhaseScopeCase):
         run("git", "commit", "-qm", "base change", cwd=self.root)
         base_head = run("git", "rev-parse", base, cwd=self.root).stdout.strip()
 
-        self.approve()
-        delivered = self.svc.deliver()
+        delivered = self.svc.deliver(confirm=True)
         self.assertEqual(delivered["results"][0]["status"], "failed")
         self.assertIn("conflict", delivered["results"][0]["detail"])
         self.assertEqual(
@@ -288,8 +282,7 @@ class PhaseIntegrationTests(PhaseScopeCase):
         base = self.svc.config["delivery_base"]
         base_head = run("git", "rev-parse", base, cwd=self.root).stdout.strip()
 
-        self.approve()
-        delivered = self.svc.deliver()
+        delivered = self.svc.deliver(confirm=True)
         self.assertEqual(delivered["results"][0]["status"], "failed")
         self.assertIn("checks failed", delivered["results"][0]["detail"])
         self.assertEqual(

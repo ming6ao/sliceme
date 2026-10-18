@@ -201,8 +201,7 @@ class DeliveryIsolationTests(MultiCampaignCase):
         self.record("feat/y", "feat/y", content_a="a = 3\n")
         x = self.service("feat/x")
         try:
-            x.record_approval(action="approve", actor="test")
-            result = x.deliver()
+            result = x.deliver(confirm=True)
             self.assertEqual([r["status"] for r in result["results"]], ["delivered"])
             self.assertTrue(result["pull_request"]["url"])
             worktree_branch = x.store.get_campaign("feat--x")["work_branch"]

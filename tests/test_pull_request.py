@@ -74,9 +74,6 @@ class PullRequestCase(unittest.TestCase):
         self.svc.record_phase(0, messages={"w1": "test"})
         return unit
 
-    def approve(self):
-        return self.svc.record_approval(action="approve", actor="test")
-
     def campaign_row(self):
         return self.svc.store.get_campaign("feat/x")
 
@@ -91,8 +88,7 @@ class PullRequestCase(unittest.TestCase):
 
     def test_deliver_opens_pr_and_records_state(self):
         unit = self.record_one()
-        self.approve()
-        result = self.svc.deliver()
+        result = self.svc.deliver(confirm=True)
         self.assertEqual(result["results"][0]["status"], "delivered")
         url = result["pull_request"]["url"]
         self.assertTrue(url.startswith("https://example.test/pull/"))
@@ -112,8 +108,7 @@ class PullRequestCase(unittest.TestCase):
 
     def test_pr_body_is_the_evidence_document(self):
         unit = self.record_one()
-        self.approve()
-        self.svc.deliver()
+        self.svc.deliver(confirm=True)
         pr = self.pr_state(unit["branch"])
         # The evidence document is the pull request body.  Delivery writes it
         # when the coordinator did not.
@@ -127,10 +122,9 @@ class PullRequestCase(unittest.TestCase):
 
     def test_missing_gh_is_a_clear_error(self):
         self.record_one()
-        self.approve()
         with mock.patch("sliceme.pullrequest.available", return_value=False):
             with self.assertRaises(SlicemeError) as ctx:
-                self.svc.deliver()
+                self.svc.deliver(confirm=True)
         self.assertIn("gh", str(ctx.exception))
         row = self.campaign_row()
         self.assertIsNone(row["pr_url"])
@@ -138,30 +132,28 @@ class PullRequestCase(unittest.TestCase):
 
     def test_missing_remote_leaves_campaign_working(self):
         self.record_one()
-        self.approve()
         run("git", "remote", "remove", "origin", cwd=self.root)
         with self.assertRaises(SlicemeError):
-            self.svc.deliver()
+            self.svc.deliver(confirm=True)
         row = self.campaign_row()
         self.assertIsNone(row["pr_url"])
         self.assertEqual(row["state"], "working")
 
-    def test_approval_gate_blocks_delivery(self):
+    def test_delivery_requires_confirmation(self):
         self.record_one()
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
-        self.assertIn("not-approved", str(ctx.exception))
+        self.assertEqual(ctx.exception.reason, "not_confirmed")
         self.assertIsNone(self.campaign_row()["pr_url"])
 
     def test_deliver_finds_gh_outside_the_process_path(self):
         # A process started from a desktop launcher or a service has a small
         # PATH. The GitHub CLI is installed, so delivery must still work.
         unit = self.record_one()
-        self.approve()
         with mock.patch.object(pullrequest, "_which", return_value=None):
             with mock.patch.object(pullrequest, "_COMMON_BIN_DIRS", (str(FAKE_GH_BIN),)):
                 with mock.patch.object(pullrequest, "_WINDOWS_GH_PATHS", ()):
-                    result = self.svc.deliver()
+                    result = self.svc.deliver(confirm=True)
         self.assertEqual(result["results"][0]["status"], "delivered")
         self.assertTrue(result["pull_request"]["url"].startswith("https://example.test/pull/"))
         self.assertEqual(self.campaign_row()["state"], "delivered")
@@ -175,8 +167,7 @@ class PullRequestCase(unittest.TestCase):
         (self.root / "src" / "a" / "x.py").write_text("a = 'base'\n")
         run("git", "add", "-A", cwd=self.root)
         run("git", "commit", "-qm", "base change", cwd=self.root)
-        self.approve()
-        result = self.svc.deliver()
+        result = self.svc.deliver(confirm=True)
         self.assertEqual(result["results"][0]["status"], "failed")
         self.assertIn("conflict", result["results"][0]["detail"])
         self.assertIsNone(self.campaign_row()["pr_url"])

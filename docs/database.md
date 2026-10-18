@@ -82,7 +82,8 @@ approvals  (standalone; keyed by branch_key)
   campaign worktree accumulates commits, so a later phase adds rows.
 - A **check** is one terminal check result. It carries its own fingerprint and
   result; the review evidence reads the newest terminal check for a commit.
-- A **review decision** is one campaign-level approval, rejection, or override.
+- A **review decision** is one campaign-level approval. `deliver` records it
+  after the human confirmation and consumes it when the delivery lands.
 
 All `*_at` columns are `REAL` epoch seconds from `util.now()` (`time.time()`).
 
@@ -162,9 +163,9 @@ Read by `Store.find_verdict` (the cache lookup), `Store.get_verdict` (`check`),
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `branch_key` | TEXT NOT NULL | work-branch key (`feat/x` → `feat--x`) |
 | `commit_hash` | TEXT | null for a campaign-level decision |
-| `action` | TEXT NOT NULL | `approve`, `request_changes`, `override` |
-| `actor` | TEXT | who recorded the decision |
-| `note` | TEXT | required for `request_changes` and `override` |
+| `action` | TEXT NOT NULL | `approve` (the only value `deliver` writes) |
+| `actor` | TEXT | who confirmed the delivery |
+| `note` | TEXT | optional approval note |
 | `created_at` | REAL NOT NULL | |
 | `consumed_at` | REAL | set by a successful delivery |
 
@@ -174,8 +175,9 @@ Append-only. `Store.add_approval` inserts; the newest row for a campaign
 wins. `Store.latest_approval` reads the newest row, and
 `Store.consume_approvals` sets `consumed_at` after a successful delivery.
 One approval covers the whole campaign commit set, so a later commit does not
-re-open the gate. A failed check or forge call leaves the row unconsumed, so a
-retry needs no new review.
+re-open the gate. `Service.record_delivery_approval` writes the row inside
+`deliver --confirm`. A failed check or forge call leaves the row unconsumed,
+and the next delivery appends a new row.
 
 ### 5.4 `campaigns`
 
@@ -225,8 +227,8 @@ a `pull_request` delivery and `landed` for a `local` delivery. It records
    merges the work branch into the local base branch. Then `_mark_delivered`
    sets the campaign's records to `delivered` and the campaign state to
    `delivered` or `landed`.
-6. **Review.** The human records one campaign decision through
-   `approve`. The delivery gate reads the newest unconsumed row.
+6. **Review.** The human confirms the campaign one time. `deliver --confirm`
+   records one campaign approval, and a landed delivery consumes the row.
 7. **Status and report.** `Service.status` reads the campaign row, records,
    phases, and check counts. `campaign.build_skeleton` reads the campaign row,
    records, and the newest verdict per record for the report.
@@ -242,7 +244,7 @@ a `pull_request` delivery and `landed` for a `local` delivery. It records
 | `campaigns` | `Service._ensure_legacy_campaign`, `BootstrapVerbs._create_plane_campaign`, `Store.create_campaign`, `Store.set_campaign_worktree`, `Service.deliver` | `Service.campaign`, `Service.status`, `plan`, the report and evidence, `gc` |
 | `records` | `Service._record_phase_commits`, `integrate._mark_delivered` | `Service.status`, `packet.build_packet`, `campaign.build_skeleton` |
 | `verdicts` | `CheckRunner.run` | `Store.find_verdict/get_verdict/latest_verdict_for_commit/verdict_counts`, `packet._evidence_map` |
-| `approvals` | `Service.record_approval`, `consume_approvals` | `Service.campaign_approval`, `packet.build_packet`, `require_all_approved` |
+| `approvals` | `Service.record_delivery_approval`, `Store.consume_approvals` | `Service.campaign_approval`, `Service.campaign_approved`, `packet.build_packet` |
 
 ## 8. Status and value domains
 
@@ -251,7 +253,7 @@ a `pull_request` delivery and `landed` for a `local` delivery. It records
 | `campaigns` | `state` | `working` (default), `delivered`, `closed` |
 | `records` | `status` | `recorded` (default), `pending`, `delivered`, `failed`, `blocked` |
 | `verdicts` | `status` | `passed`, `failed`, `error` |
-| `approvals` | `action` | `approve`, `request_changes`, `override` |
+| `approvals` | `action` | `approve` |
 
 ## 9. Concurrency and integrity
 
@@ -294,8 +296,9 @@ does not re-run a full check.
 
 `approvals` is an append-only decision log: the newest row for a campaign
 wins, and `consumed_at` marks a delivery that already used the decision. One
-approval covers the whole campaign commit set, so `Service.deliver` refuses
-until the user confirms the campaign. `gc` prunes rows for campaigns without a
+approval covers the whole campaign commit set. `Service.deliver` refuses
+without the `confirm` token, then records the row and consumes it when the
+delivery lands. `gc` prunes rows for campaigns without a
 descriptor older than the retention window (`policy.review_retention_days`,
 default 30) and never prunes the current campaign. See `docs/review.md` for the
 design.

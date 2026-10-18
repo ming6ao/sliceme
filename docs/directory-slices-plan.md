@@ -320,7 +320,7 @@ Add these tests:
 - a plan that drops a recorded node is rejected with `revisited_directory`;
 - a directory revisit in a second campaign is allowed;
 - the `sliceme.plan` resource stops after the bound of three passes, and it
-  never records, checks, approves, opens, or delivers.
+  never records, checks, opens, or delivers.
 
 ## 16. Migration
 

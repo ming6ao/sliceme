@@ -77,5 +77,5 @@ rm -rf /tmp/sliceme-fake-plane
 
 ## Related documents
 
-- [Campaign review](./review.md) — the approval gate and the report.
+- [Campaign review](./review.md) — the confirmation and delivery, and the report.
 - [Database](./database.md) — the SQLite schema and the data lifecycle.

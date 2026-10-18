@@ -352,15 +352,11 @@ def add_evidence(svc: Service, commits: dict[str, str], node_phase: dict[str, in
     store.conn.commit()
 
 
-def add_review_data(svc: Service, commits: dict[str, str]) -> None:
-    svc.record_approval(
-        action="approve", commit=commits["w1"], actor="demo-reviewer"
-    )
-    svc.record_approval(
-        action="request_changes",
-        commit=commits["w3"],
+def add_review_data(svc: Service) -> None:
+    """Seed the one campaign-level approval that the review packet reads."""
+    svc.record_delivery_approval(
         actor="demo-reviewer",
-        note="Fix the failing session test before approval.",
+        note="Campaign reviewed; approved for delivery.",
     )
 
 
@@ -487,7 +483,7 @@ def main() -> int:
         commits = build_campaign(svc)
         node_phase = {"w1": 0, "w2": 0, "w3": 1, "w4": 1, "w5": 2}
         add_evidence(svc, commits, node_phase)
-        add_review_data(svc, commits)
+        add_review_data(svc)
         svc.report(
             narrative=(
                 "The campaign adds token verification, store migrations, a "

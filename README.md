@@ -62,10 +62,9 @@ sliceme budget --seconds N --usd USD   set, raise, or clear the campaign caps
 sliceme plan DESIGN.md            show the campaign split declared in the design
 sliceme record                    commit the finished nodes as per-node commits
 sliceme check                     run the combined-tree checks for the phase
-sliceme approve                   record the one campaign approval
 sliceme report                    write the deterministic campaign report
 sliceme evidence                  write the deterministic evidence document
-sliceme deliver --mode MODE       deliver: pull_request (push + PR) or local (merge the base branch)
+sliceme deliver --confirm --mode MODE   deliver: pull_request (push + PR) or local (merge the base branch)
 ```
 
 ## Docs
@@ -78,7 +77,7 @@ sliceme deliver --mode MODE       deliver: pull_request (push + PR) or local (me
 - [Database](./docs/database.md) — the local plane's SQLite schema and lifecycle.
 - [Observability](./docs/observability.md) — status projections and check counts.
 - [Sessions](./docs/sessions.md) — suspend and resume sessions and campaign progress.
-- [Local review](./docs/review.md) — the campaign approval gate and the report.
+- [Local review](./docs/review.md) — the campaign confirmation and delivery, and the report.
 - [Fake plane](./docs/fake-plane.md) — build a fake plane for engine inspection.
 - [Publishing](./docs/publishing.md) — packaging and release.
 

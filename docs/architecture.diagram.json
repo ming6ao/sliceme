@@ -9,7 +9,7 @@
       { "id": "campaign-loop", "label": "Campaign loop", "focus": ["request", "coordinator", "subagents", "surface", "service"], "note": "A design becomes a DAG; the coordinator spawns phases of one-shot subagents through the engine verbs." },
       { "id": "engine-core", "label": "Engine core", "focus": ["surface", "service", "store", "integrate"], "note": "One action registry dispatches to the service, which owns plane state and landing." },
       { "id": "verification", "label": "Check path", "focus": ["service", "checks", "sandbox"], "note": "One synchronous runner checks the recorded phase tree and caches the verdict." },
-      { "id": "landing", "label": "Approved delivery", "focus": ["service", "integrate", "git"], "note": "After every phase and user approval, Sliceme pushes the campaign branch and opens a pull request against the default branch." }
+      { "id": "landing", "label": "Confirmed delivery", "focus": ["service", "integrate", "git"], "note": "After every phase and the user confirmation, Sliceme pushes the campaign branch and opens a pull request against the default branch." }
     ]
   },
   "components": [
@@ -34,7 +34,7 @@
     { "id": "dispatch", "from": "surface", "to": "service", "label": "dispatch", "variant": "emphasis", "labelDy": 71 },
     { "id": "rows", "from": "service", "to": "store", "label": "rows", "labelDy": 81 },
     { "id": "check-run", "from": "service", "to": "checks", "label": "check" },
-    { "id": "land", "from": "service", "to": "integrate", "label": "deliver (approved)" },
+    { "id": "land", "from": "service", "to": "integrate", "label": "deliver --confirm" },
     { "id": "wrap", "from": "checks", "to": "sandbox", "label": "wrap command", "labelDy": 88 },
     { "id": "merge", "from": "integrate", "to": "git", "label": "push branch", "labelDy": 88 }
   ],
@@ -42,6 +42,6 @@
     { "dot": "cyan", "title": "Plan to phases", "items": ["Planner writes dag.json from the design", "dir + depends_on derive the phase schedule", "concurrency caps each phase; overlapping subtrees serialize"] },
     { "dot": "emerald", "title": "One engine, many adapters", "items": ["surface.py is the single action registry", "The CLI and the pi tools derive from it", "Service owns plane state; adapters only render"] },
     { "dot": "amber", "title": "One check runner", "items": ["One synchronous run over the recorded phase tree", "Fingerprint dedupe serves an unchanged verdict", "A stricter sandbox is a new fingerprint"] },
-    { "dot": "rose", "title": "Approved delivery", "items": ["One campaign worktree accumulates every phase", "No target change until all phases are done", "deliver opens one pull request, refuses main/master"] }
+    { "dot": "rose", "title": "Confirmed delivery", "items": ["One campaign worktree accumulates every phase", "No target change until all phases are done", "deliver opens one pull request, refuses main/master"] }
   ]
 }

@@ -84,7 +84,6 @@ const ENGINE_ACTIONS = [
 	"open",
 	"record",
 	"check",
-	"approve",
 	"report",
 	"evidence",
 	"deliver",
@@ -117,10 +116,9 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	open: ["campaign"],
 	record: ["campaign"],
 	check: ["campaign"],
-	approve: ["note", "actor", "campaign"],
 	report: ["narrative", "design", "campaign"],
 	evidence: ["design", "campaign"],
-	deliver: ["source", "mode", "cleanup", "no_checks", "campaign"],
+	deliver: ["source", "mode", "confirm", "actor", "note", "cleanup", "no_checks", "campaign"],
 };
 
 /** Render one engine verb plus its selected params as CLI arguments. */
@@ -564,11 +562,10 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"(design split), status (campaign state), sessions (registered campaigns), resume " +
 			"(resume plan), gc (prune), doctor (health), ready " +
 			"(current-phase node ids and paused), open (create the campaign worktree), record " +
-			"(the current phase as per-node commits), check (combined-tree checks), approve (one " +
-			"campaign approval), budget (set, raise, or clear the campaign caps), " +
-			"report (the deterministic report), evidence (the deterministic " +
-			"evidence document), and deliver (push + pull request, or a local merge). The " +
-			"planning loop runs in " +
+			"(the current phase as per-node commits), check (combined-tree checks), budget (set, " +
+			"raise, or clear the campaign caps), report (the deterministic report), evidence (the " +
+			"deterministic evidence document), and deliver (confirm the one approval, then push + " +
+			"pull request, or a local merge). The planning loop runs in " +
 			"the sliceme.plan workflow resource, and the campaign loop runs in the " +
 			"sliceme.campaign workflow resource.",
 		promptSnippet: "Call the Sliceme engine (start → plan → resource loop → deliver)",
@@ -586,7 +583,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"never run the test suite. The engine records per-node commits and runs one " +
 				"combined-tree check.",
 			"Stop at the human gates: an explicit user suspension and the campaign " +
-				"approval before `deliver`.",
+				"confirmation before `deliver`.",
 			"`ready` reports `paused`, `pause_reason`, and `budget`. A `budget` pause " +
 				"needs the `budget` action to raise the cap before a resume; do not resume a " +
 				"budget-stopped campaign without it.",
@@ -594,9 +591,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"run `report`. Show the evidence summary and the delivery details to the user: " +
 				"for the `pull_request` mode the head branch, the base `main`, and the title; " +
 				"for the `local` mode the base branch and the coming local merge. Ask for " +
-				"confirmation one time. On a confirmation run `approve` and " +
-				"then `deliver` with the selected `mode`; on a decline stop and keep the " +
-				"campaign for a later attempt.",
+				"confirmation one time. On a confirmation run `deliver` with `confirm: true` and the " +
+				"selected `mode`; on a decline stop and keep the campaign for a later attempt.",
 			"The delivery mode is `pull_request` (push the branch and open a pull request) " +
 				"or `local` (merge the campaign branch into the local base branch and stop, " +
 				"so the user pushes later). The plane default comes from `start` with `mode`; " +
@@ -638,12 +634,15 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			short: Type.Optional(Type.Boolean({ description: "status: print only the unit name" })),
 			dense: Type.Optional(Type.Boolean({ description: "status: print the compact summary" })),
 			verbose: Type.Optional(Type.Boolean({ description: "status: print the full dump" })),
+			confirm: Type.Optional(
+				Type.Boolean({ description: "deliver: confirm the one campaign approval" }),
+			),
 			no_checks: Type.Optional(
 				Type.Boolean({ description: "deliver: skip the trusted checks" }),
 			),
 			narrative: Type.Optional(Type.String({ description: "report: what-changed text" })),
-			note: Type.Optional(Type.String({ description: "approve: approval note" })),
-			actor: Type.Optional(Type.String({ description: "approve: who recorded the approval" })),
+			note: Type.Optional(Type.String({ description: "deliver: approval note" })),
+			actor: Type.Optional(Type.String({ description: "deliver: who confirmed the delivery" })),
 			source: Type.Optional(Type.String({ description: "deliver: worktree branch" })),
 			cleanup: Type.Optional(
 				StringEnum(["none", "worktrees", "all"] as const, {
@@ -690,7 +689,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					`details to the user, and ask for confirmation one time. Ask which delivery ` +
 					`mode to use: "pull_request" (push the branch and open a pull request) or ` +
 					`"local" (merge the local base branch, then push later). On a ` +
-					`confirmation run "approve" and then "deliver" with the chosen "mode"; on a ` +
+					`confirmation run "deliver" with "confirm": true and the chosen "mode"; on a ` +
 					`decline stop and keep the campaign. Stop only at the human gates: an ` +
 					`explicit user suspension and the final confirmation before delivery.`,
 			);

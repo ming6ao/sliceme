@@ -147,7 +147,7 @@ class BootstrapVerbs:
             "default_branch": default_branch,
             "delivery_mode": delivery_mode,
             "checks": checks or [],
-            "policy": {"require_verification": True, "allow_auto_approve": [], "remote": "origin"},
+            "policy": {"remote": "origin"},
             "created_at": now(),
         }
         budget = _budget_values(budget_seconds, budget_usd)

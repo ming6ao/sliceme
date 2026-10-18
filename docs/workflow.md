@@ -78,8 +78,9 @@ COORDINATOR (this session)
   work branch. The engine writes the evidence document after the last phase.
   The coordinator shows the evidence summary and the pull request details to
   the user and asks for confirmation one time. On a confirmation the
-  coordinator records the approval and runs `deliver`, which opens one pull
-  request against the base branch (`main`) with the trusted checks.
+  coordinator runs `deliver --confirm`. Delivery records the one campaign
+  approval and opens one pull request against the base branch (`main`) with
+  the trusted checks.
 - `record` enforces **plan conformance**: it rejects a changed path
   outside the `dir` of its node, with a reason code. The
   coordinator then corrects the `dir` or adds a `depends_on` edge and runs the
@@ -157,8 +158,7 @@ shows the summary to the user, then runs:
 ```text
 sliceme evidence                    write the deterministic evidence document
 sliceme report                      the deterministic report (--narrative appends the summary)
-sliceme approve                     record the one campaign approval (after the user confirms)
-sliceme deliver [--mode MODE]       pull_request: push + open a PR against main
+sliceme deliver --confirm [--mode MODE]  pull_request: push + open a PR against main
                                     local: merge the local base branch
 ```
 
@@ -193,11 +193,10 @@ equals the default branch.
 | `doctor` | check git, `config.json`, and `state.db` health |
 | `ready` | the current-phase ready node ids, the phase index, and `paused` |
 | `plan` | the design's `sliceme-campaigns` split joined with the registry state, plus the next entry |
-| `deliver` | deliver the campaign; `mode` selects `pull_request` (push + PR) or `local` (merge the local base branch); `source`, `cleanup`, `no_checks` |
+| `deliver` | confirm and deliver the campaign; `confirm` records the one campaign approval; `mode` selects `pull_request` (push + PR) or `local` (merge the local base branch); `actor` and `note` join the approval row; `source`, `cleanup`, `no_checks` |
 | `check` | run the one combined-tree check runner for the current phase |
 | `open` | create or reuse the campaign worktree |
 | `record` | record the current phase: conformance + per-node commits |
-| `approve` | record one campaign approval |
 | `report` | write the deterministic report (`--narrative` appends the summary) |
 | `evidence` | write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs |
 

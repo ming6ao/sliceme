@@ -1,10 +1,11 @@
-"""The campaign approval gate after the review cut.
+"""The campaign approval after the review cut.
 
-The review surface records exactly one campaign-level approval.  Delivery
-proceeds only while the newest campaign decision is an unconsumed ``approve``
-(or an ``override`` with a note).  The browser client and the comment lifecycle
-are gone, so the gate no longer inspects comment state.  One human approval of
-the whole campaign is enough before delivery.
+The approval is folded into delivery: ``deliver`` records one campaign-level
+approval and consumes it when the delivery lands, so there is no separate
+approve step.  ``deliver`` refuses without the ``confirm`` token, and the token
+stands for the one human confirmation of the whole campaign.  The browser
+client and the comment lifecycle are gone, so the gate no longer inspects
+comment state.
 """
 
 import os
@@ -81,58 +82,33 @@ class ApprovalCase(unittest.TestCase):
 
 
 class ApprovalGateTests(ApprovalCase):
-    def test_deliver_refuses_without_approval(self):
+    def test_deliver_refuses_without_confirmation(self):
         self.record_phase0()
         with self.assertRaises(SlicemeError) as ctx:
             self.svc.deliver()
-        self.assertEqual(ctx.exception.reason, "not_approved")
+        self.assertEqual(ctx.exception.reason, "not_confirmed")
+        # A refused delivery records no approval and lands nothing.
+        self.assertIsNone(self.svc.campaign_approval())
+        self.assertEqual(self.svc.store.get_campaign("feat/x")["state"], "working")
 
-    def test_one_approval_covers_the_whole_campaign(self):
+    def test_confirm_delivers_and_records_one_campaign_approval(self):
         self.record_phase0()
         commits = [c["hash"] for c in self.svc.review_snapshot()["commits"]]
         self.assertGreaterEqual(len(commits), 2)
+        delivered = self.svc.deliver(confirm=True, actor="test", note="looks good")
+        self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
         # The decision is campaign-level: it does not bind to one commit.
-        decision = self.svc.record_approval(action="approve", actor="test")
+        decision = self.svc.campaign_approval()
         self.assertIsNone(decision["commit_hash"])
-        self.assertTrue(self.svc.campaign_approved())
-
-    def test_approve_admits_delivery_and_consumes_the_decision(self):
-        self.record_phase0()
-        self.svc.record_approval(action="approve", actor="test")
-        delivered = self.svc.deliver()
-        self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
-        self.assertIsNotNone(self.svc.campaign_approval()["consumed_at"])
-        self.assertFalse(self.svc.campaign_approved())
-        with self.assertRaises(SlicemeError) as ctx:
-            self.svc.require_all_approved()
-        self.assertEqual(ctx.exception.reason, "not_approved")
-
-    def test_override_admits_delivery_and_needs_a_note(self):
-        self.record_phase0()
-        with self.assertRaises(SlicemeError):
-            self.svc.record_approval(action="override")
-        self.svc.record_approval(action="override", note="accepted risk")
-        delivered = self.svc.deliver()
-        self.assertEqual([r["status"] for r in delivered["results"]], ["delivered"])
-
-    def test_request_changes_needs_a_note_and_supersedes_an_approval(self):
-        self.record_phase0()
-        self.svc.record_approval(action="approve", actor="test")
-        with self.assertRaises(SlicemeError):
-            self.svc.record_approval(action="request_changes")
-        self.svc.record_approval(action="request_changes", note="not yet")
-        self.assertFalse(self.svc.campaign_approved())
-        with self.assertRaises(SlicemeError) as ctx:
-            self.svc.deliver()
-        self.assertEqual(ctx.exception.reason, "not_approved")
-
-    def test_surface_dispatch_records_one_decision(self):
-        self.record_phase0()
-        decision = surface.dispatch(
-            self.svc, "approve", {"actor": "test"}
-        )
         self.assertEqual(decision["action"], "approve")
-        self.assertIsNone(decision["commit_hash"])
+        self.assertEqual(decision["actor"], "test")
+        self.assertEqual(decision["note"], "looks good")
+        # A landed delivery consumes the decision it used.
+        self.assertIsNotNone(decision["consumed_at"])
+        self.assertFalse(self.svc.campaign_approved())
+
+    def test_approve_is_no_longer_an_engine_action(self):
+        self.assertNotIn("approve", {action.name for action in surface.ACTIONS})
 
 
 class CommentVerbsAreGoneTests(ApprovalCase):

@@ -184,11 +184,10 @@ flowchart LR
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase ready node ids, the phase index, `paused`, and `pause_reason`. |
 | `plan` | The design's campaign split joined with the registry state. |
-| `deliver` | Deliver after the confirmation: `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
+| `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | The one combined-tree check runner for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase: conformance + per-node commits. |
-| `approve` | Record one campaign approval. |
 | `report` | Write the deterministic campaign report. |
 | `evidence` | The deterministic evidence document (commits, checks, diffs, logs). |
 
@@ -235,8 +234,8 @@ sequenceDiagram
   end
   C->>E: evidence + report
   U->>C: confirm the pull request one time
-  C->>E: approve
-  C->>E: deliver (pull_request: push + PR; local: merge the base branch)
+  C->>E: deliver --confirm (records the one approval;
+          pull_request: push + PR; local: merge the base branch)
 ```
 
 The coordinator is **not** a worktree. `start` records the campaign without
@@ -357,8 +356,8 @@ sequenceDiagram
   participant G as Git
   participant F as Forge (gh)
 
-  C->>E: deliver (when every phase is done and the user confirmed)
-  E->>E: require a newest unconsumed approve for the campaign
+  C->>E: deliver --confirm (when every phase is done and the user confirmed)
+  E->>E: require the confirm token and record the one campaign approval
   E->>E: refuse if the work branch is main, master, or the default branch
   E->>G: resolve the work branch (source)
   alt base branch already contains the source

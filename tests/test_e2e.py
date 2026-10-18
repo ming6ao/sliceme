@@ -112,13 +112,12 @@ class EndToEndCase(unittest.TestCase):
         check = svc.check_phase()
         self.assertEqual(check["status"], "passed")
 
-        svc.record_approval(action="approve", actor="reviewer")
         evidence = svc.evidence(design="DESIGN.md")
         self.assertTrue(Path(evidence["path"]).is_file())
         self.assertTrue(Path(evidence["json_path"]).is_file())
         self.assertIn("## Evidence", evidence["content"])
 
-        result = svc.deliver()
+        result = svc.deliver(confirm=True)
         self.assertEqual([r["status"] for r in result["results"]], ["delivered"])
         self.assertEqual(result["feature_branch"], "feat/design")
         pull = self.pr("feat/design")
@@ -143,7 +142,7 @@ class EndToEndCase(unittest.TestCase):
         self.assertEqual(svc.store.get_campaign("feat--design")["state"], "delivered")
 
         # Re-running delivery returns the same pull request, not a new one.
-        again = svc.deliver()
+        again = svc.deliver(confirm=True)
         self.assertEqual(again["pull_request"]["url"], result["pull_request"]["url"])
 
     def test_a_failed_check_blocks_the_pull_request(self):
@@ -157,9 +156,8 @@ class EndToEndCase(unittest.TestCase):
         unit = svc.create_campaign_workspace()
         (Path(unit["worktree"]) / "src" / "api" / "app.py").write_text("value = 2\n")
         svc.record_phase(0, messages={"w1": "add the endpoint"})
-        svc.record_approval(action="approve", actor="reviewer")
 
-        result = svc.deliver()
+        result = svc.deliver(confirm=True)
         self.assertEqual(result["results"][0]["status"], "failed")
         self.assertIn("checks failed", result["results"][0]["detail"])
         self.assertFalse((self.root / ".fake-gh.json").exists())

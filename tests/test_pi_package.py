@@ -129,7 +129,7 @@ class PiPackageTests(unittest.TestCase):
         # The tool forwards the engine verbs and their flags; it does not own a
         # scheduler.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for verb in ("start", "status", "ready", "plan", "open", "record", "check", "approve", "report", "evidence", "deliver"):
+        for verb in ("start", "status", "ready", "plan", "open", "record", "check", "report", "evidence", "deliver"):
             self.assertIn(f'"{verb}"', coordinator, verb)
         self.assertIn("ENGINE_ACTIONS", coordinator)
         self.assertIn("ACTION_FLAGS", coordinator)
@@ -139,12 +139,12 @@ class PiPackageTests(unittest.TestCase):
     def test_the_single_gate_is_documented(self):
         # After the campaign resource completes, the coordinator writes the
         # evidence and the report.  It then asks for the one confirmation
-        # before the approval and delivery.
+        # before it delivers with `confirm`.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn('"evidence"', coordinator)
         self.assertIn("run `report`", coordinator)
         self.assertIn("confirmation one time", coordinator)
-        self.assertIn("run `approve`", coordinator)
+        self.assertIn("`deliver` with `confirm: true`", coordinator)
 
     def test_the_coordinator_opens_the_worktree_before_the_resource(self):
         # The campaign resource has no `open` grant, so the coordinator must run
@@ -264,7 +264,7 @@ class PiPackageTests(unittest.TestCase):
             "progress",
         ):
             self.assertNotIn(gone, names)
-        for present in ("deliver", "approve", "report", "open", "record", "check", "ready", "status"):
+        for present in ("deliver", "report", "open", "record", "check", "ready", "status"):
             self.assertIn(present, names)
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
         for gone in ("spawn", "record", "verify", "exec", "progress"):
@@ -275,7 +275,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("deliver", names)
         self.assertIn("open", names)
         self.assertIn("record", names)
-        self.assertIn("approve", names)
+        self.assertNotIn("approve", names)
         self.assertIn("report", names)
         self.assertIn("check", names)
         # The workflow doc documents the campaign additions.
@@ -283,7 +283,6 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("`deliver`", workflow)
         self.assertIn("`open`", workflow)
         self.assertIn("`record`", workflow)
-        self.assertIn("`approve`", workflow)
         self.assertIn("--feature-branch", workflow)
 
     def test_session_suspend_resume_contract(self):

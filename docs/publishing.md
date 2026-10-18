@@ -77,8 +77,7 @@ sliceme open                      # fetch main; create the worktree from origin/
 subagent(workflow: "sliceme.campaign", async: true)   # the campaign loop
 sliceme evidence                  # write the deterministic evidence document
 sliceme report                    # the deterministic report
-sliceme approve                   # record the one campaign approval
-sliceme deliver                   # push the work branch and open a pull request
+sliceme deliver --confirm         # record the one approval, then push the work branch and open a pull request
 ```
 
 Local development without installing:

@@ -27,18 +27,23 @@ class DeliveryVerbs:
         cleanup: str = "none",
         run_checks_flag: bool = True,
         mode: str | None = None,
+        confirm: bool = False,
+        actor: str | None = None,
+        note: str | None = None,
     ) -> dict[str, Any]:
         """Deliver the campaign with the selected mode.
 
         ``pull_request`` pushes the campaign branch and opens a pull request.
         ``local`` merges the campaign branch into the local base branch and
-        stops, so the user pushes the base branch later.  Both modes run under
-        the one approval gate.  The campaign branch is never the default
-        branch and there is no override.
+        stops, so the user pushes the base branch later.  Delivery records one
+        campaign-level approval and consumes it when the delivery lands, so
+        there is no separate approve step.  ``confirm`` is the human
+        confirmation token: delivery refuses without it.  ``actor`` and
+        ``note`` are recorded on the approval row.  The campaign branch is
+        never the default branch and there is no override.
         """
         if cleanup not in {"none", "worktrees", "all"}:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
-        from ..review import packet
 
         key = self.campaign_key()
         stored = self.store.get_campaign(key) if key else None
@@ -50,9 +55,15 @@ class DeliveryVerbs:
         if done is not None:
             results = [done]
         else:
-            commits = packet.campaign_commits(self)
+            if not confirm:
+                error = SlicemeError(
+                    "not-confirmed: confirm the campaign review with the user, "
+                    "then run `sliceme deliver --confirm`"
+                )
+                error.reason = "not_confirmed"
+                raise error
             with workspace_lock(self.root):
-                override = self.require_all_approved(commits)
+                approval = self.record_delivery_approval(actor=actor, note=note)
                 if key:
                     self.store.set_campaign_delivery_mode(key, resolved_mode)
                 results = integrate.deliver(
@@ -65,10 +76,8 @@ class DeliveryVerbs:
                     mode=resolved_mode,
                 )
                 if results and all(result.status == "delivered" for result in results):
-                    self.consume_approvals(commits)
-                    if override:
-                        self.store.consume_approvals([int(override["id"])])
-                        self.store.conn.commit()
+                    self.store.consume_approvals([int(approval["id"])])
+                    self.store.conn.commit()
                     if key:
                         first = results[0]
                         pull_request = first.pull_request or {}

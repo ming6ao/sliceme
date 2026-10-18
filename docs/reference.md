@@ -24,11 +24,10 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase node ids, the phase index, `paused`, and `pause_reason`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
-| `deliver` | Deliver after the confirmation: `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
+| `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | Run the synchronous combined-tree checks for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase: conformance + per-node commits. |
-| `approve` | Record one campaign approval. |
 | `report` | Write the deterministic campaign report. |
 | `evidence` | Write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs. |
 
@@ -206,13 +205,19 @@ one owner per directory inside one campaign. See
 ### `deliver`
 
 ```bash
-sliceme deliver [--source BRANCH] [--mode pull_request|local]
+sliceme deliver --confirm [--source BRANCH] [--mode pull_request|local]
+                   [--actor A] [--note TEXT]
                    [--cleanup none|worktrees|all] [--no-checks] [--campaign REF]
 ```
 
 The delivery mode is the `--mode` value, then the campaign value, then the
 plane value. The default is `pull_request`. Both modes keep the campaign branch
 and the campaign evidence.
+
+Sliceme folds the approval into delivery. `--confirm` is the human confirmation
+token. Without it, `deliver` refuses with a `not_confirmed` finding. With it,
+`deliver` appends one campaign-level `approve` row (`--actor` and `--note` join
+the row), delivers, and consumes the row when the delivery lands.
 
 - The `pull_request` mode pushes the work branch (`--source`, default the
   recorded `work_branch`) to the remote (`policy.remote`, default `origin`).
@@ -233,8 +238,7 @@ and the campaign evidence.
 
 It is idempotent: Sliceme returns an open pull request as it is, and a delivery
 base that already contains the work branch is a no-op. Delivery needs the
-campaign work branch; run `open` first. It refuses until the newest
-campaign decision is an unconsumed `approve`, or an `override` records a note.
+campaign work branch; run `open` first. It refuses without `--confirm`.
 
 A `local` delivery refuses a base worktree with uncommitted changes, and it
 refuses when the remote base branch is ahead of or has diverged from the local
@@ -332,15 +336,6 @@ The Markdown document is the pull request body. The evidence holds:
 The narrative is deterministic and the engine writes it; there is no narrative
 agent. The evidence is not a gate.
 
-### `approve`
-
-```bash
-sliceme approve [--note TEXT] [--actor A]
-```
-
-Append one **campaign-level** approval (`commit_hash` is null). One approval
-covers the whole accumulated commit set.
-
 ### `report`
 
 ```bash
@@ -348,13 +343,12 @@ sliceme report [--narrative TEXT] [--design REF]
 ```
 
 Write `.sliceme/<branch-key>.report.md`: a deterministic skeleton plus an
-optional `--narrative`. See `docs/review.md` for the approval gate and the
+optional `--narrative`. See `docs/review.md` for the confirmation and the
 report.
 
-Delivery proceeds only while the newest campaign approval is an unconsumed
-`approve`, or an `override` that records a note. A successful delivery consumes
-the approval it used. A failed check or forge call leaves the approval
-unconsumed, so a retry needs no new review.
+The `deliver --confirm` action records one campaign-level `approve` row. A
+successful delivery consumes the row. A failed check or forge call leaves it
+unconsumed, and the next delivery appends a new row.
 
 ### Sandbox manifests
 
@@ -474,7 +468,7 @@ The suite covers these areas:
 - conformance-by-ownership at phase record time;
 - the combined-tree check runner and its cache;
 - campaign worktree recording and work-branch selection;
-- the campaign approval gate and the report;
+- the campaign confirmation and delivery, and the report;
 - the workflow resource grants and field rejection (Node harness);
 - end-to-end flows (delivery, idempotency, conflict atomicity, failing checks,
   cleanup, and reporting);
@@ -497,7 +491,7 @@ The suite covers these areas:
 | `tests/test_e2e.py` | the full flow from `start` to the delivery pull request |
 | `tests/test_pull_request.py` | the `gh` client, the evidence-backed body, the head/base, and the fail-closed rules |
 | `tests/test_local_merge.py` | the local delivery mode: the merge commit, the `landed` state, the safety rails, and the idempotent re-run |
-| `tests/test_review_approval.py` | the one campaign approval, the override, and the retired comment verbs |
+| `tests/test_review_approval.py` | the folded campaign approval: the `--confirm` refusal, the one approval row, and the retired comment verbs |
 | `tests/test_review_report.py` | the deterministic report and the packet |
 | `tests/test_sessions.py` | the descriptor round-trip, the resume plan, cleanup, and the additive `verdicts` table |
 | `tests/test_budget.py` | the caps, the pause reason, the `budget` action, and the spend file |

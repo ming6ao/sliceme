@@ -1,26 +1,26 @@
 # Sliceme campaign review
 
 Status: implemented. Commits accumulate while the campaign runs. A human
-approves the whole campaign commit set. Sliceme includes the report even though
-git ignores it.
+confirms the whole campaign commit set one time. Sliceme includes the report
+even though git ignores it.
 
 A human reviews the unmerged commits from the campaign worktree. The reviewer
-reads the diff and the report, then approves or requests changes on the
-campaign. The design has one safety goal: **no delivery without a human
-approval of the campaign.**
+reads the diff and the report, then confirms or declines the campaign. The
+design has one safety goal: **no delivery without a human confirmation of the
+campaign.** Delivery records the confirmation as one campaign-level approval.
 
 ## 1. Scope
 
 In:
 
-- One campaign-level approval for the whole commit set.
+- One campaign-level approval for the whole commit set. `deliver` records it.
 - Review of the accumulated campaign commits, at any time, before or after the
   last phase.
 - The generated report (`.sliceme/<branch-key>.report.md`), even though it is
   git-ignored, shown as a virtual file next to the diff.
 - The check evidence for each reviewed commit.
 - A non-blocking review: workers never wait for the human, and the coordinator
-  proceeds after a human approves the campaign.
+  proceeds after a human confirms the campaign.
 - Several campaigns in one plane, scoped by `--campaign`.
 
 Out:
@@ -38,7 +38,7 @@ Out:
 
 ```mermaid
 flowchart LR
-  H["Human"] -->|"approve"| S["Service"]
+  H["Human"] -->|"deliver --confirm"| S["Service"]
   S --> D[("state.db")]
   S --> G[("git")]
   S --> R[("report.md")]
@@ -64,11 +64,10 @@ file, so the review surface adds no second store.
   evidence. The diff base is the base branch, not the work branch: the
   work branch is the head.
 - The packet reads the diff from git and the report from disk.
-- The reviewer approves or requests changes on the whole campaign commit set.
+- The human confirms or declines the whole campaign commit set. A decline is
+  simply no `deliver` call, so the engine stores no decline row.
 - One approval is one row keyed by `(branch_key, commit_hash)` with a null
-  `commit_hash`. The newest unconsumed campaign decision wins, and a
-  `request_changes` supersedes an earlier `approve`. An `override` stays a
-  separate campaign-level decision.
+  `commit_hash`. `deliver` appends it and consumes it when the delivery lands.
 
 The **report** is a virtual file. It is git-ignored, so it is not a commit. The
 packet carries its path, its content, and its update time. The report is
@@ -79,8 +78,8 @@ the duration, the fingerprint, the command vector, and the output. Evidence is
 the main reason to read the packet.
 
 Review is **incremental and non-blocking**. A human can review after the first
-commit and approve as work lands. Workers keep editing; nothing waits on the
-review. The coordinator delivers only after a human approves the campaign.
+commit and confirm as work lands. Workers keep editing; nothing waits on the
+review. The coordinator delivers only after a human confirms the campaign.
 
 ## 4. State
 
@@ -89,33 +88,37 @@ EXISTS` pattern.
 
 **`approvals`** — `branch_key`, `commit_hash`, `action`, `actor`,
 `note`, `created_at`, `consumed_at`. Append-only. A campaign-level decision uses
-a null `commit_hash`; the newest unconsumed decision wins. The table also keeps
-the superseded rows, so the decision history stays auditable.
+a null `commit_hash`. `deliver` writes one `approve` row and consumes it when
+the delivery lands. The table keeps the older rows, so the decision history
+stays auditable.
 
 `gc` prunes rows for campaigns whose branch and delivery are gone and older than
 a retention window (`policy.review_retention_days`, default 30). It keeps every
 key in the campaign registry, every descriptor file, and the current campaign,
 so an active review never disappears.
 
-## 5. The approval gate
+## 5. The confirmation and delivery
 
-Delivery proceeds only when the newest campaign decision is an unconsumed
-`approve`, or a campaign-level `override` records a note. Otherwise delivery
-refuses with a `not-approved` finding. The engine never asks for approval again
-on its own.
+Sliceme folds the approval into `deliver`. There is no separate approve step.
 
-- A `request_changes` campaign decision supersedes an earlier `approve`.
-- A successful delivery consumes the campaign decision it used. A failed check
-  or a failed forge call leaves the decision unconsumed, so a retry needs no new
-  review.
+```bash
+sliceme deliver --confirm [--actor A] [--note TEXT] [--mode MODE]
+```
+
+- Without `--confirm`, `deliver` refuses with a `not_confirmed` finding.
+  `--confirm` is the human confirmation token.
+- With `--confirm`, `deliver` appends one campaign-level `approve` row, runs
+  the delivery, and consumes the row when the delivery lands.
+- A failed check or a failed forge call leaves the row unconsumed. The next
+  `deliver` call needs a new `--confirm` and appends a new row.
 
 The coordinator prompts for confirmation one time, after the last phase. It
 writes the evidence and the report. It shows the evidence summary and the
 delivery details to the user, then asks for one confirmation. The details are
 the selected mode, the branches, and the title for a pull request. On a
-confirmation it records the approval and runs `deliver`; on a decline it stops
-and keeps the campaign for a later try. The confirmation is the only pause;
-suspension stays an explicit user command.
+confirmation it runs `deliver --confirm`; on a decline it stops and keeps the
+campaign for a later try. The confirmation is the only pause; suspension stays
+an explicit user command.
 
 ## 6. The report
 
@@ -131,30 +134,30 @@ request; the report stays reviewable next to it.
 
 ## 7. Delivery
 
-The coordinator triggers delivery after every phase completes and a human approves
-the campaign. The delivery mode is `pull_request` or `local`. The design orders
-delivery to avoid a race with the campaign loop:
+The coordinator triggers delivery after every phase completes and a human
+confirms the campaign. The delivery mode is `pull_request` or `local`. The
+design orders delivery to avoid a race with the campaign loop:
 
 1. **Quiesce.** The resource records and checks one phase at a time, so no worker
    commits mid-delivery.
 2. **Lock.** Take the one workspace lock at `.sliceme/workspace.lock`.
-3. **Re-check the gate** under the lock and immediately before the merge or the
-   push.
+3. **Record the approval and re-check the gate** under the lock and immediately
+   before the merge or the push.
 4. Deliver in the selected mode: `pull_request` pushes the work branch and opens
    the pull request; `local` merges the work branch into the local base branch.
    Both modes mark the records delivered, set the campaign to `delivered` or
    `landed`, and consume the approval.
 
-Preconditions, enforced in `Service`:
+Preconditions, enforced in `Service` and `integrate`:
 
-- every phase reaches done, or an `override` decision records a note;
+- the `confirm` token is present;
+- the campaign branch is not the default branch, and it differs from the base
+  branch;
 - the campaign worktree has no uncommitted changes;
 - the base branch worktree is clean;
-- a human approved the campaign, or an override records a note;
-- if `policy.require_verification`, no record is `failed` or `blocked`,
-  unless an override records a note.
-
-Override is a human decision, not an agent action.
+- a `local` merge refuses when the remote base is ahead or has diverged;
+- the merge-tree pre-check refuses delivery on a conflict;
+- the trusted checks pass, unless you pass `--no-checks`.
 
 ## 8. Concurrency
 
@@ -163,8 +166,8 @@ Override is a human decision, not an agent action.
 - **Lock order.** The plane delivery lock, then the campaign lock, then SQLite
   row locks.
 
-`approve` and `report` join `ACTIONS`. Recording an approval and writing the
-report are both agent-callable, but a human owns the approval decision.
+`deliver` and `report` join `ACTIONS`. The coordinator records the approval
+inside `deliver`, and a human owns the `--confirm` decision.
 
 ## Related
 
