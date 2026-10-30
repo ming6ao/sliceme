@@ -371,6 +371,10 @@ class StatusVerbs:
         output; ``status --verbose`` still returns the full nested dump.  It
         never raises: a plane with no single campaign falls back to the plane
         summary.
+
+        The header names the phase count and the current phase, so the caller
+        does not count the phase lines.  The current phase is the cursor the
+        scheduler uses, so ``status`` and ``ready`` always agree.
         """
         # Normalization is required, so it runs before every projection.
         try:
@@ -405,12 +409,21 @@ class StatusVerbs:
         phase_size = (dag or {}).get("concurrency")
         if phase_size is None:
             phase_size = "?"
+        # The scheduler's cursor, so the header agrees with ``ready``.  A
+        # campaign with no DAG has no phase count and no current phase.  When
+        # every phase is recorded the cursor is the last phase, so the marker
+        # tells the reader that no phase is left to run.
+        current_phase = self._phase_cursor(branch).index if branch else None
+        current = "?" if current_phase is None else current_phase
+        if dag_phases and all(entry["status"] == "done" for entry in dag_phases):
+            current = f"{current} (done)"
 
         lines = [
             f"campaign:    {name}",
             f"work branch: {branch or '(unset)'}  worktree: {worktree or '(unset)'}  base: {base or '(unset)'}",
             f"design:      {design or '(unspecified)'}",
             f"nodes:       {len(node_ids)}  phase size: {phase_size}",
+            f"phases:      {len(dag_phases)}  current: {current}",
         ]
         node_rows: list[dict[str, Any]] = []
         for node in nodes:
@@ -447,6 +460,8 @@ class StatusVerbs:
             "design": design,
             "node_count": len(node_ids),
             "phase_size": phase_size,
+            "phase_count": len(dag_phases),
+            "current_phase": current_phase,
             "nodes": node_rows,
             "dag_phases": dag_phases,
             "paused": self.paused(),

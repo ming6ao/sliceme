@@ -63,6 +63,7 @@ campaign:    dense
 work branch: feat/x  worktree: /repo/.worktrees/feat-x  base: main
 design:      DESIGN.md
 nodes:       2  phase size: 2
+phases:      2  current: 1
   w0 w1 [build] done — parser
   w1 w2 [-] running
 phase 0 [done]: w1
@@ -73,6 +74,13 @@ phase 1 [pending]: w2
 `--json` the default is the nested dump, while `--dense --json` emits the
 summary as JSON (the `lines` array holds the same text). A plane with no single
 campaign falls back to a compact per-campaign plane list.
+
+The `phases:` line names the planned phase count and the current phase. The
+current phase is the scheduler's cursor. It is the first phase that still has
+an unrecorded member, or the last phase when every member has a record. It
+holds the same value as the `phase` key of `sliceme ready`. A campaign with a
+record for every phase adds `(done)` to the marker. The JSON form also carries
+`phase_count` and `current_phase`.
 
 ### 3.2 The nested dump
 

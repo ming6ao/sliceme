@@ -66,6 +66,8 @@ class StatusSummaryCase(unittest.TestCase):
         self.assertEqual(view["campaign"], "dense")
         self.assertEqual(view["node_count"], 2)
         self.assertEqual(view["phase_size"], 2)
+        self.assertEqual(view["phase_count"], 2)
+        self.assertEqual(view["current_phase"], 1)
         self.assertEqual([n["id"] for n in view["nodes"]], ["w1", "w2"])
         self.assertEqual(view["lines"][0], "campaign:    dense")
         self.assertEqual(
@@ -74,10 +76,11 @@ class StatusSummaryCase(unittest.TestCase):
         )
         self.assertEqual(view["lines"][2], "design:      DESIGN.md")
         self.assertEqual(view["lines"][3], "nodes:       2  phase size: 2")
-        self.assertEqual(view["lines"][4], "  w0 w1 recorded")
-        self.assertEqual(view["lines"][5], "  w1 w2 running")
-        self.assertEqual(view["lines"][6], "phase 0 [done]: w1")
-        self.assertEqual(view["lines"][7], "phase 1 [pending]: w2")
+        self.assertEqual(view["lines"][4], "phases:      2  current: 1")
+        self.assertEqual(view["lines"][5], "  w0 w1 recorded")
+        self.assertEqual(view["lines"][6], "  w1 w2 running")
+        self.assertEqual(view["lines"][7], "phase 0 [done]: w1")
+        self.assertEqual(view["lines"][8], "phase 1 [pending]: w2")
         self.assertEqual(
             view["dag_phases"],
             [
@@ -85,6 +88,19 @@ class StatusSummaryCase(unittest.TestCase):
                 {"phase": 1, "status": "pending", "members": ["w2"]},
             ],
         )
+
+    def test_a_finished_campaign_marks_the_current_phase_as_done(self):
+        # The cursor stays on the last phase when every phase is recorded, so
+        # the header marks that state instead of implying work remains.
+        for node in ("w1", "w2"):
+            self.svc.store.create_record(
+                head_commit="0" * 40, summary=None, node=node, campaign="feat--x"
+            )
+        self.svc.store.conn.commit()
+        view = self.svc.status_summary()
+        self.assertEqual(view["phase_count"], 2)
+        self.assertEqual(view["current_phase"], 1)
+        self.assertEqual(view["lines"][4], "phases:      2  current: 1 (done)")
 
     def test_node_label_is_rendered(self):
         write_json(
@@ -103,15 +119,17 @@ class StatusSummaryCase(unittest.TestCase):
             },
         )
         view = self.svc.status_summary()
-        self.assertEqual(view["lines"][4], "  w0 w1 pending — the parser")
+        self.assertEqual(view["lines"][5], "  w0 w1 pending — the parser")
 
     def test_phases_fall_back_to_the_dag_plan(self):
         # No state.json phases yet: the engine's DAG projection fills the gap.
         view = self.svc.status_summary()
         self.assertEqual([w["members"] for w in view["dag_phases"]], [["w1"], ["w2"]])
         self.assertEqual([w["status"] for w in view["dag_phases"]], ["pending", "pending"])
-        self.assertEqual(view["lines"][4], "  w0 w1 pending")
-        self.assertEqual(view["lines"][6], "phase 0 [pending]: w1")
+        self.assertEqual(view["current_phase"], 0)
+        self.assertEqual(view["lines"][4], "phases:      2  current: 0")
+        self.assertEqual(view["lines"][5], "  w0 w1 pending")
+        self.assertEqual(view["lines"][7], "phase 0 [pending]: w1")
 
     def test_ready_rejects_the_removed_gpu_field(self):
         write_json(
@@ -140,8 +158,10 @@ class StatusSummaryCase(unittest.TestCase):
         view = self.svc.status_summary()
         self.assertEqual(view["node_count"], 0)
         self.assertEqual(view["dag_phases"], [])
-        self.assertEqual(len(view["lines"]), 4)
+        self.assertIsNone(view["current_phase"])
+        self.assertEqual(len(view["lines"]), 5)
         self.assertEqual(view["lines"][3], "nodes:       0  phase size: ?")
+        self.assertEqual(view["lines"][4], "phases:      0  current: ?")
         self.assertFalse(any(line.startswith("  w") for line in view["lines"]))
         self.assertFalse(any(line.startswith("phase ") for line in view["lines"]))
 
@@ -152,7 +172,7 @@ class StatusSummaryCase(unittest.TestCase):
         view = self.svc.status_summary()
         self.assertEqual(view["node_count"], 0)
         self.assertEqual(view["dag_phases"], [])
-        self.assertEqual(len(view["lines"]), 4)
+        self.assertEqual(len(view["lines"]), 5)
 
     def test_plane_with_several_campaigns_summarizes_the_plane(self):
         self.svc.store.create_campaign(

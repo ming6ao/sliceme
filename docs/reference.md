@@ -96,9 +96,9 @@ sliceme status [--unit U] [--short] [--dense] [--verbose] [--campaign REF]
 
 The default human output is the **dense summary**. It has a header, one line per
 node in DAG order, and one line per phase. The header shows `campaign`, the work
-branch, the worktree path, and `base`, plus `design`, node count, and phase size.
-A node line shows `w<phase> <id> <status>` plus the node label. A phase line shows
-the index, the status, and the member ids.
+branch, the worktree path, and `base`, plus `design`, node count, phase size, and
+the phase count with the current phase. A node line shows `w<phase> <id> <status>`
+plus the node label. A phase line shows the index, the status, and the member ids.
 
 `--dense` asks for it explicitly and `--verbose` prints the full nested dump
 instead. With `--json` the default is the nested dump; `--dense --json` emits
@@ -109,7 +109,7 @@ The nested dump (`--verbose`, or `--json` without `--dense`) returns
 `dag_phases` (the scheduler's phase plan), `ready` (the ready node ids), `paused`,
 `checks` (check counts), and the campaign writer's columns (`node`, `log`,
 `record`, `verification`). The dense summary returns the header and the
-node/phase lines instead.
+node/phase lines instead, plus `phase_count` and `current_phase` as numbers.
 
 Every projection first **normalizes** `dag.json`. Sliceme contracts
 same-directory nodes, then computes the phases. A campaign can never schedule an
