@@ -164,6 +164,21 @@ def node_status(nodes: dict[str, Any], node: str) -> str:
     return "pending"
 
 
+def merge_node_status(
+    desc_nodes: dict[str, Any], recorded: set[str], node: str
+) -> str:
+    """One node's report status: a record wins over the descriptor.
+
+    A record is durable evidence that the node finished, so a stale descriptor
+    cannot show a recorded node as pending or running.  The report reads the
+    descriptor for a node with no record, because a suspended node's
+    ``running`` status lives there and nowhere else.
+    """
+    if node in recorded:
+        return "recorded"
+    return node_status(desc_nodes, node)
+
+
 def config_branch(config: dict[str, Any]) -> str:
     branch = config.get("work_branch") or config.get("main_branch")
     if not branch:
@@ -187,6 +202,7 @@ __all__ = [
     "load_control",
     "load_dag",
     "load_session",
+    "merge_node_status",
     "node_by_id",
     "node_status",
     "pull_request_content",
@@ -392,6 +408,10 @@ def build_skeleton(
     )
 
     per_node: list[dict[str, Any]] = []
+    # A record is the durable evidence that a node finished.  The descriptor
+    # supplies the status only for a node with no record, so a stale descriptor
+    # cannot hide a recorded node.
+    recorded = {str(c["node"]) for c in records if c.get("node")}
     # The campaign owns the worktree and the delivery state, so the report
     # reads the campaign row rather than a retired unit row.
     for node_id, node in nodes.items():
@@ -408,11 +428,12 @@ def build_skeleton(
             if latest is not None
             else None
         )
+        status = merge_node_status(desc_nodes, recorded, node_id) if dag else None
         per_node.append(
             {
                 "node": node_id,
                 "label": node.get("label"),
-                "status": node_status(desc_nodes, node_id) if dag else None,
+                "status": status,
                 "unit_state": (campaign_row or {}).get("state"),
                 "branch": (campaign_row or {}).get("work_branch"),
                 "log": str(worker_log_path(root, branch, node_id)),

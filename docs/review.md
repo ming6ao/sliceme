@@ -130,9 +130,12 @@ sliceme report [--narrative TEXT] [--design REF]
 
 `report` writes `.sliceme/<branch-key>.report.md`. The skeleton is
 deterministic: the design reference, the work branch, the nodes, the
-records, and the newest check per record. `--narrative` appends the
-coordinator's summary. The evidence document is the body of the delivery pull
-request; the report stays reviewable next to it.
+records, and the newest check per record. A node with a record shows
+`recorded`, because the record is the durable evidence that the node
+finished. A node with no record shows the session descriptor status, which
+is the only place a suspended node's `running` status lives.
+`--narrative` appends the coordinator's summary. The evidence document is the
+body of the delivery pull request; the report stays reviewable next to it.
 
 ## 7. Delivery
 

@@ -122,6 +122,29 @@ class EvidenceTests(EvidenceCase):
         self.assertIn(f"{500} characters omitted", content)
         self.assertNotIn(long_output, content)
 
+    def test_a_record_wins_over_a_stale_descriptor_status(self):
+        # The descriptor is written at suspend time, so it can still say
+        # ``pending`` after the node recorded.  The record is the durable
+        # evidence, so the report shows ``recorded``.
+        self.record()
+        write_json(
+            campaign.session_path(self.root, "feat/x"),
+            {"feature_branch": "feat/x", "nodes": {"w1": {"status": "pending"}}},
+        )
+        result = self.svc.evidence()
+        evidence = json.loads(Path(result["json_path"]).read_text())
+        self.assertEqual(evidence["nodes"][0]["status"], "recorded")
+        self.assertIn("| w1 | recorded |", result["content"])
+
+    def test_an_unrecorded_node_keeps_the_descriptor_status(self):
+        write_json(
+            campaign.session_path(self.root, "feat/x"),
+            {"feature_branch": "feat/x", "nodes": {"w1": {"status": "running"}}},
+        )
+        result = self.svc.evidence()
+        evidence = json.loads(Path(result["json_path"]).read_text())
+        self.assertEqual(evidence["nodes"][0]["status"], "running")
+
     def test_document_is_deterministic(self):
         self.record()
         self.write_check("ok\n")
