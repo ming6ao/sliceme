@@ -221,9 +221,16 @@ def delivered_result(
     pull_request: dict[str, Any] | None = None,
     *,
     checks: list[CheckResult] | None = None,
+    status: str = "delivered",
 ) -> DeliveryResult:
+    """A successful delivery result.
+
+    ``status`` is ``delivered`` for a pull request that this call opened,
+    ``already_contained`` when the base already holds the work, and
+    ``pull_request_already_open`` for an idempotent repeat.
+    """
     return DeliveryResult(
-        status="delivered",
+        status=status,
         detail=detail,
         pull_request=pull_request,
         checks=checks or [],
@@ -235,15 +242,27 @@ def local_result(
     *,
     merge_commit: str | None = None,
     checks: list[CheckResult] | None = None,
+    status: str = "delivered",
 ) -> DeliveryResult:
-    """A successful local merge result.  There is no pull request."""
+    """A successful local merge result.  There is no pull request.
+
+    ``status`` is ``delivered`` for a merge that this call applied, and
+    ``already_landed`` for an idempotent repeat.
+    """
     return DeliveryResult(
-        status="delivered",
+        status=status,
         detail=detail,
         checks=checks or [],
         mode="local",
         merge_commit=merge_commit,
     )
+
+
+def already_landed_result(
+    detail: str, *, merge_commit: str | None = None
+) -> DeliveryResult:
+    """The idempotent result for a campaign that is already landed locally."""
+    return local_result(detail, merge_commit=merge_commit, status="already_landed")
 
 
 def _conflict_detail(outcome: gitutil.MergeOutcome) -> str:
@@ -318,7 +337,11 @@ def deliver_pull_request(
     base_head = gitutil.rev_parse(root, base)
     if gitutil.merge_base(root, base_head, source_head) == source_head:
         _mark_delivered(store, campaign)
-        return [delivered_result(f"already contained in {base}")]
+        return [
+            delivered_result(
+                f"already contained in {base}", status="already_contained"
+            )
+        ]
 
     outcome = gitutil.merge_tree(root, base_head, source_head)
     if not outcome.clean:

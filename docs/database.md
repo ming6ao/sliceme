@@ -59,6 +59,14 @@ to add columns that predate the current schema:
 - `campaigns.worktree` (backfilled once from the retired campaign unit)
 - `records.node`
 - `records.campaign`
+- `verdicts.phase`
+
+The `verdicts.phase` entry restores a column that the schema once named
+`wave`. The migration renames `wave` to `phase` when `wave` exists. It adds a
+nullable `phase` when neither column exists, so old rows keep their value and
+new rows can write the phase. The retired `gpu` column stays; it is harmless.
+The legacy `checks` to `verdicts` copy reads `wave` or `phase` from the source
+table when the source has one.
 
 The pattern is additive only for columns: new columns must have a default or be
 nullable, because existing rows are not rewritten. One destructive migration is

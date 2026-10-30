@@ -247,7 +247,7 @@ accepts a small set of fields. It rejects every other field.
 | Field | Type | Rule |
 |---|---|---|
 | `campaign` | string, optional | `[A-Za-z0-9._-]{1,128}` |
-| `phaseCap` | integer, optional | 1 to 64 |
+| `phaseCap` | integer, optional | 1 to 10; the host allows at most 32 grants |
 | `nodeCap` | integer, optional | 1 to 256 |
 
 The `campaign` field is the only variable text in a command. `resolve` validates
@@ -543,4 +543,8 @@ one confirmation before `deliver`.
 
 Caps: `concurrency` (the phase size), the resource's `phaseCap` and `nodeCap`
 fields, the per-command check timeout, and the optional `budget` wall-clock and
-cost caps bound the cost of each campaign.
+cost caps bound the cost of each campaign. The phase cap is 10 because the host
+allows at most 32 authority grants and each phase needs three. A capped run
+returns `state: "capped"` with a `next` field. Run the resource again to
+continue a longer plan or to confirm completion of a plan with exactly 10
+phases.

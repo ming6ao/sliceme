@@ -80,12 +80,14 @@ class CheckRunner:
         sandbox: str | None = None,
         phase: int | None = None,
         timeout: int = 3600,
+        refresh: bool = False,
     ) -> dict[str, Any]:
         """Run one check set at *commit*, or return the cached terminal row.
 
         ``commands`` are bare acceptance command strings; ``checks`` passes a
         caller's :class:`~sliceme.verifier.CheckSpec` vector instead.  ``only``
         keeps just the named checks, so a re-verify can run one command.
+        ``refresh`` skips the cache lookup and always runs the checks.
 
         The returned row carries every stored column plus ``cached``: true when
         a terminal verdict for the fingerprint already existed.
@@ -126,8 +128,12 @@ class CheckRunner:
             sandbox_digest=profile.digest(),
             checks_digest=CHECKS_VERSION,
         )
-        cached = self.store.find_verdict(
-            fingerprint.fingerprint, statuses=VERDICT_STATUSES
+        cached = (
+            None
+            if refresh
+            else self.store.find_verdict(
+                fingerprint.fingerprint, statuses=VERDICT_STATUSES
+            )
         )
         if cached is not None:
             return {**cached, "cached": True}

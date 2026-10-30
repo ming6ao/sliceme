@@ -522,5 +522,87 @@ class CliTests(unittest.TestCase):
         self.assertEqual(set(sub.choices), expected)
 
 
+class CliExitCodeTests(unittest.TestCase):
+    """A terminal verdict sets the process exit code."""
+
+    checks = [{"name": "fail", "command": "false", "required": True}]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=self.root, check=True)
+        (self.root / "src" / "a").mkdir(parents=True)
+        (self.root / "src" / "a" / "x.py").write_text("a = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=self.root, check=True)
+        Service.init_plane(self.root, feature_branch="feat/x", checks=self.checks)
+        self.svc = Service(self.root)
+        write_json(
+            campaign.dag_path(self.root, "feat/x"),
+            {
+                "campaign": "cli",
+                "feature_branch": "feat/x",
+                "base": "main",
+                "nodes": [
+                    {
+                        "id": "w1",
+                        "label": "change",
+                        "owns": ["src/a"],
+                        "depends_on": [],
+                        "acceptance": ["true"],
+                    }
+                ],
+            },
+        )
+        unit = self.svc.create_campaign_workspace()
+        (Path(unit["worktree"]) / "src" / "a" / "x.py").write_text("a = 2\n")
+        self.svc.record_phase(0)
+        self.svc.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_failed_check_exits_one_and_prints_the_result(self):
+        out = run_cli(["--json", "check"], self.root)
+        self.assertEqual(out.returncode, 1, out.stderr)
+        self.assertEqual(json.loads(out.stdout)["status"], "failed")
+        self.assertIn("failed checks", out.stderr)
+        self.assertIn("false", out.stderr)
+
+    def test_the_exit_code_mapping_is_per_action(self):
+        import contextlib
+        import io
+
+        from sliceme import cli
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli._exit_code("check", {"status": "passed"}), 0)
+            self.assertEqual(
+                cli._exit_code("check", {"status": "failed", "commands": ["x"]}), 1
+            )
+            self.assertEqual(
+                cli._exit_code("check", {"status": "error", "commands": ["x"]}), 3
+            )
+            self.assertEqual(
+                cli._exit_code("deliver", {"results": [{"status": "delivered"}]}), 0
+            )
+            self.assertEqual(
+                cli._exit_code(
+                    "deliver",
+                    {"results": [{"status": "failed", "detail": "d", "mode": "local"}]},
+                ),
+                1,
+            )
+            self.assertEqual(
+                cli._exit_code(
+                    "deliver", {"results": [{"status": "error", "detail": "e"}]}
+                ),
+                3,
+            )
+            self.assertEqual(cli._exit_code("record", {"reason": "ok"}), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

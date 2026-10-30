@@ -109,8 +109,10 @@ sliceme deliver --confirm [--actor A] [--note TEXT] [--mode MODE]
   `--confirm` is the human confirmation token.
 - With `--confirm`, `deliver` appends one campaign-level `approve` row, runs
   the delivery, and consumes the row when the delivery lands.
-- A failed check or a failed forge call leaves the row unconsumed. The next
-  `deliver` call needs a new `--confirm` and appends a new row.
+- A failed check or a failed forge call leaves the row unconsumed. The engine
+  marks the row void (`action='void'` and `consumed_at`), so the next `deliver`
+  call needs a new `--confirm` and appends a new row. The void row stays for
+  audit evidence.
 
 The coordinator prompts for confirmation one time, after the last phase. It
 writes the evidence and the report. It shows the evidence summary and the

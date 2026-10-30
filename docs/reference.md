@@ -22,12 +22,12 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `budget` | Set, raise, or clear the campaign wall-clock and cost caps. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
-| `ready` | The current-phase node ids, the phase index, `paused`, and `pause_reason`. |
+| `ready` | The current-phase node ids, the node definitions, the worktree path, the phase index, `paused`, and `pause_reason`. |
 | `plan` | Parse the design's campaign split and join the registry state. |
 | `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
-| `check` | Run the synchronous combined-tree checks for the current phase. |
+| `check` | Run the synchronous combined-tree checks for a recorded phase (`--phase`), with `--refresh` to bypass the cache. |
 | `open` | Create or reuse the single campaign worktree. |
-| `record` | Record the current phase: conformance + per-node commits. |
+| `record` | Record the current phase, or reopen a recorded phase with `--reopen`. |
 | `report` | Write the deterministic campaign report. |
 | `evidence` | Write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs. |
 
@@ -39,6 +39,12 @@ work branch, a branch key, or a unit name. When a plane holds one campaign,
 `--campaign` is optional. When a plane holds several campaigns, a
 campaign-scoped call without `--campaign` returns the plane summary. See §3 for
 the layout.
+
+The command line prints the result before it exits. A raised `SlicemeError`
+exits with code 2. A terminal verdict sets a different code: `check` exits with
+1 for `failed` and 3 for `error`; `deliver` exits with 1 when a result is
+`failed` and 3 when a result is `error`. Every other action exits with 0. A
+failed check also prints the failed command names on standard error.
 
 ### `start`
 
@@ -178,13 +184,19 @@ sliceme ready [--campaign REF]
 ```
 
 Returns `campaign`, `ready` (the current-phase node ids that are neither
-recorded nor running), `phase` (the current phase index), `paused`,
-`pause_reason`, and `budget`. The
-workflow resource polls this verb, so its fields are the loop contract. The phase
-is the one scheduling gate. Every dependency lives in an earlier phase. A node
-is ready once the engine reaches its phase, and the node is neither
-recorded nor running. Sliceme scopes the result to the current phase, so a caller
-spawns and records one phase per call. A missing DAG reports no ready nodes.
+recorded nor running), `nodes` (the bounded definition of each ready node:
+`id`, `dir`, `label`, `goal`, and `tasks`), and `worktree` (the campaign
+worktree path, or null before `open`). It also returns `phase` (the current
+phase index), `paused`, `pause_reason`, and `budget`.
+
+The workflow resource polls this verb, so its
+fields are the loop contract. The phase is the one scheduling gate. Every
+dependency lives in an earlier phase. A node is ready once the engine reaches
+its phase, and the node is neither recorded nor running. Sliceme scopes the
+result to the current phase, so a caller spawns and records one phase per call.
+A missing DAG reports no ready nodes. The workflow has no file access, so the
+`nodes` and `worktree` fields let a worker start in the campaign worktree
+without reading the git-ignored `.sliceme/` state.
 
 ### `plan`
 
@@ -217,7 +229,9 @@ and the campaign evidence.
 Sliceme folds the approval into delivery. `--confirm` is the human confirmation
 token. Without it, `deliver` refuses with a `not_confirmed` finding. With it,
 `deliver` appends one campaign-level `approve` row (`--actor` and `--note` join
-the row), delivers, and consumes the row when the delivery lands.
+the row), delivers, and consumes the row when the delivery lands. A failed
+delivery marks the row void (`action='void'` and `consumed_at`), so the next call
+needs a new confirmation. The void row stays for audit evidence.
 
 - The `pull_request` mode pushes the work branch (`--source`, default the
   recorded `work_branch`) to the remote (`policy.remote`, default `origin`).
@@ -237,8 +251,17 @@ the row), delivers, and consumes the row when the delivery lands.
   local merge.
 
 It is idempotent: Sliceme returns an open pull request as it is, and a delivery
-base that already contains the work branch is a no-op. Delivery needs the
-campaign work branch; run `open` first. It refuses without `--confirm`.
+base that already contains the work branch is a no-op. The result status names
+the action:
+
+- `delivered` for a new delivery;
+- `already_landed` for a local merge that is already on the base;
+- `already_contained` for a base that already holds the work;
+- `pull_request_already_open` for an open pull request;
+- `failed` for a refused delivery.
+
+Delivery needs the campaign work branch; run `open` first. It refuses without
+`--confirm`.
 
 A `local` delivery refuses a base worktree with uncommitted changes, and it
 refuses when the remote base branch is ahead of or has diverged from the local
@@ -265,16 +288,17 @@ the forge.
 ### `check`
 
 ```bash
-sliceme check [--campaign REF]
+sliceme check [--phase N] [--refresh] [--campaign REF]
 ```
 
-Run the plane's trusted checks once over the current phase's combined tree. The
-phase tree is the campaign worktree head after `record`, so the checks run
-over the recorded nodes together. The verb reports `phase`, `members`, and the
-row (`fingerprint`, `status`, `duration`, `exit_code`, `output`, `results`,
-`cached`). The cache serves a fingerprint that already has a terminal verdict,
-so a resumed node reads the cache. The verb always acts on the current phase; the
-engine reads the phase index from its own state.
+Run the plane's trusted checks once over one recorded phase's combined tree.
+With no `--phase`, the verb uses the phase of the newest record and the current
+worktree head. With `--phase N`, the verb uses the newest record `head_commit`
+of phase N, so later phases do not change the tree under check. The verb
+reports `phase`, `members`, `commit`, and the row (`fingerprint`, `status`,
+`duration`, `exit_code`, `output`, `results`, `cached`). The cache serves a
+fingerprint that already has a terminal verdict, so a resumed node reads the
+cache. `--refresh` skips the cache and runs the checks again.
 
 ### `open`
 
@@ -285,13 +309,20 @@ sliceme open
 Create (or reuse) the single **campaign worktree** and its branch
 (`work_branch`, for example `feat/<name>`), idempotently. It fetches the base
 branch and bases the worktree on `origin/<base_branch>`, then reports a fallback
-when the remote or the base is absent. Sliceme uses the same worktree for every
-phase and never recreates it between phases.
+when the remote or the base is absent. When the campaign branch already exists,
+Sliceme compares it with the base:
+
+- a branch behind the base with no commit of its own is fast-forwarded;
+- a branch ahead of the base is accepted;
+- a diverged branch is refused with both tips (reason `diverged_branch`).
+
+Sliceme uses the same worktree for every phase and never recreates it between
+phases.
 
 ### `record`
 
 ```bash
-sliceme record
+sliceme record [--reopen N] [--campaign REF]
 ```
 
 Record the current phase. Ownership syntax is one repository-relative directory
@@ -304,6 +335,12 @@ per changed node. Sliceme rejects a stray, ambiguous, or cross-node-rename
 change, and records an explicit empty marker for a member that changed no file.
 It diffs against the current `HEAD`, so it never re-attributes an earlier phase's
 committed changes.
+
+`--reopen N` drops the records at or after phase N, resets the worktree to the
+parent of the first phase-N commit, and leaves the cursor at N. The next
+`record` records the phase again. The verb refuses a dirty worktree, a finished
+campaign, and a dropped commit that is already on the remote. Live approval rows
+become void.
 
 The commit subject falls back to the DAG node `label`. A node with changes and
 no `label` is an error. The subject never carries a phase prefix. The node and
@@ -486,7 +523,8 @@ The suite covers these areas:
 | `tests/test_sandbox_gate.py` | manifest discovery/validation, fail-closed gate, the removed `gpu` key, setup |
 | `tests/test_phase_scope.py` | campaign worktree reuse, conformance-by-ownership, per-node commits, delivery, default-branch refusal |
 | `tests/test_target_branch.py` | the design-derived work branch, the `--feature-branch` override, the base branch, default-branch refusal |
-| `tests/test_open_campaign.py` | the worktree from `origin/main` and the local-base fallback |
+| `tests/test_open_campaign.py` | the worktree from `origin/main`, the local-base fallback, and the stale, ahead, and diverged branch rules |
+| `tests/test_store_migration.py` | the `wave` to `phase` migration, the legacy `checks` copy, and the nullable `phase` fallback |
 | `tests/test_evidence.py` | the evidence document: commits, checks, diffs, logs, and the bounded Markdown |
 | `tests/test_e2e.py` | the full flow from `start` to the delivery pull request |
 | `tests/test_pull_request.py` | the `gh` client, the evidence-backed body, the head/base, and the fail-closed rules |

@@ -75,7 +75,11 @@ class DeliveryVerbs:
                     run_checks_flag=run_checks_flag,
                     mode=resolved_mode,
                 )
-                if results and all(result.status == "delivered" for result in results):
+                succeeded = bool(results) and all(
+                    result.status in {"delivered", "already_contained"}
+                    for result in results
+                )
+                if succeeded:
                     self.store.consume_approvals([int(approval["id"])])
                     self.store.conn.commit()
                     if key:
@@ -95,6 +99,14 @@ class DeliveryVerbs:
                         self.store.set_campaign_state(key, state)
                         self.store.conn.commit()
                     self._campaign = None
+                else:
+                    # The confirmation covered a delivery that did not land.
+                    # Keep the row for audit and mark it void, so the next call
+                    # needs a new confirmation.
+                    from ..review import packet
+
+                    self.store.void_approvals(packet.campaign_branch_key(self))
+                    self.store.conn.commit()
         cleanup_result: dict[str, Any] | None = None
         artifacts_removed: list[str] = []
         if cleanup in {"worktrees", "all"}:
@@ -124,8 +136,8 @@ class DeliveryVerbs:
             return None
         if mode == "local":
             if stored.get("state") == "landed":
-                return integrate.local_result(
-                    f"already merged into local "
+                return integrate.already_landed_result(
+                    f"already landed on local "
                     f"{stored.get('base_branch') or 'base'}",
                     merge_commit=stored.get("merge_commit"),
                 )
@@ -135,6 +147,7 @@ class DeliveryVerbs:
             return integrate.delivered_result(
                 f"pull request already open: {stored['pr_url']}",
                 {"url": stored["pr_url"], "number": stored.get("pr_number")},
+                status="pull_request_already_open",
             )
         return None
 

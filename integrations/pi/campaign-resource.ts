@@ -114,11 +114,18 @@ export function buildCampaignScript(
 		`  }`,
 		`  const ids = Array.isArray(ready.ready) ? ready.ready : [];`,
 		`  if (ids.length === 0) break;`,
+		`  const worktree = ready.worktree;`,
+		`  if (!worktree) throw new Error("sliceme: the campaign worktree is missing; run sliceme open first");`,
+		`  const definitions = Array.isArray(ready.nodes) ? ready.nodes : [];`,
+		`  const byId = new Map(definitions.map(function (node) { return [node.id, node]; }));`,
 		`  const workers = ids.map(function (id) {`,
+		`    const node = byId.get(id) || {};`,
+		`    const tasks = Array.isArray(node.tasks) && node.tasks.length ? "\\n- " + node.tasks.join("\\n- ") : "\\n- (none)";`,
 		`    return {`,
 		`      key: "node-" + id,`,
 		`      agent: "sliceme-worker",`,
-		`      task: "Implement Sliceme DAG node '" + id + "'. Read the campaign DAG under .sliceme/ to find the node, edit only files inside its owned directories, then stop. Do not run git, do not commit, and do not run the test suite."`,
+		`      cwd: worktree,`,
+		`      task: "Implement Sliceme DAG node '" + id + "'.\\nWorktree: " + worktree + "\\nOwned directory: " + (node.dir || "(none)") + "\\nGoal: " + (node.goal || "(none)") + "\\nTasks:" + tasks + "\\nEdit only files inside the owned directory. Do not run git, do not commit, and do not run the test suite."`,
 		`    };`,
 		`  });`,
 		`  await runs.all(workers);`,
@@ -127,11 +134,11 @@ export function buildCampaignScript(
 		`  const checkRes = await ${hostCall('"check-" + phases', commands.check)};`,
 		`  if (!checkRes.ok) throw new Error("sliceme check failed: " + (checkRes.error || checkRes.stderr || checkRes.exitCode));`,
 		`  const reviewTask = "Review the recorded phase evidence for Sliceme phase " + (ready.phase === undefined ? "?" : ready.phase) + ".\\nRecorded: " + recordRes.stdout + "\\nChecks: " + checkRes.stdout + "\\nReport concrete findings, or state that the phase is clean. Do not edit files.";`,
-		`  await runs.run("review-" + (ready.phase === undefined ? phases : ready.phase), { agent: "reviewer", task: reviewTask });`,
+		`  await runs.run("review-" + (ready.phase === undefined ? phases : ready.phase), { agent: "reviewer", cwd: worktree, task: reviewTask });`,
 		`  phases += 1;`,
 		`  nodes += ids.length;`,
 		`  if ((PHASE_CAP > 0 && phases >= PHASE_CAP) || (NODE_CAP > 0 && nodes >= NODE_CAP)) {`,
-		`    return { state: "capped", phases: phases, nodes: nodes };`,
+		`    return { state: "capped", phases: phases, nodes: nodes, next: "run the sliceme.campaign resource again to continue or confirm completion" };`,
 		`  }`,
 		`}`,
 		`const statusRes = await ${hostCall('"status"', commands.status)};`,
@@ -172,9 +179,11 @@ export function resolveCampaignResource(
 		(typeof phaseCap !== "number" ||
 			!Number.isInteger(phaseCap) ||
 			phaseCap < 1 ||
-			phaseCap > 64)
+			phaseCap > 10)
 	) {
-		return { error: `workflow '${CAMPAIGN_RESOURCE}' args.phaseCap must be an integer from 1 to 64.` };
+		return {
+			error: `workflow '${CAMPAIGN_RESOURCE}' args.phaseCap must be an integer from 1 to 10; the host allows at most 32 authority grants and each phase needs three. Run the resource again to continue a longer plan.`,
+		};
 	}
 	const nodeCap = args.nodeCap;
 	if (
@@ -184,7 +193,7 @@ export function resolveCampaignResource(
 		return { error: `workflow '${CAMPAIGN_RESOURCE}' args.nodeCap must be an integer from 1 to 256.` };
 	}
 	const commands = campaignCommands(engine, campaign);
-	const boundedPhaseCap = typeof phaseCap === "number" ? phaseCap : 64;
+	const boundedPhaseCap = typeof phaseCap === "number" ? phaseCap : 10;
 	return {
 		script: buildCampaignScript(
 			commands,

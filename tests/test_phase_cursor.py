@@ -10,9 +10,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sliceme import campaign
+from sliceme import campaign, gitutil
 from sliceme.service import Service
-from sliceme.util import write_json
+from sliceme.util import SlicemeError, write_json
 
 
 def run(*args, cwd):
@@ -59,8 +59,8 @@ class PhaseCursorCase(unittest.TestCase):
     def test_one_cursor_drives_ready_record_and_check(self):
         self.dag(
             [
-                {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
-                {"id": "w2", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
+                {"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+                {"id": "w2", "label": "two", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
             ]
         )
         before = self.svc.ready()
@@ -88,7 +88,7 @@ class PhaseCursorCase(unittest.TestCase):
         # so it records an explicit empty marker and phase 0 still completes.
         self.dag(
             [
-                {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+                {"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
                 {"id": "w2", "owns": ["src/b"], "depends_on": [], "acceptance": ["true"]},
                 {"id": "w3", "owns": ["src/c"], "depends_on": ["w1"], "acceptance": ["true"]},
             ]
@@ -109,14 +109,114 @@ class PhaseCursorCase(unittest.TestCase):
         # finishes phase 0.
         self.dag(
             [
-                {"id": "w1", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
-                {"id": "w2", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
+                {"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+                {"id": "w2", "label": "two", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
             ]
         )
         self.assertEqual(self.svc.ready()["ready"], ["w1"])
         self.edit("src/a/x.py", "a = 2\n")
         self.svc.record_phase(0, messages={"w1": "change"})
         self.assertEqual(self.svc.ready()["ready"], ["w2"])
+
+    def test_ready_carries_the_worktree_and_the_node_definition(self):
+        self.dag(
+            [
+                {
+                    "id": "w1",
+                    "label": "A node",
+                    "goal": "Change the file",
+                    "tasks": ["first", "second"],
+                    "owns": ["src/a"],
+                    "depends_on": [],
+                    "acceptance": ["true"],
+                }
+            ]
+        )
+        self.assertIsNone(self.svc.ready()["worktree"])
+        unit = self.svc.create_campaign_workspace()
+        reply = self.svc.ready()
+        self.assertEqual(reply["worktree"], unit["worktree"])
+        self.assertEqual(len(reply["nodes"]), 1)
+        node = reply["nodes"][0]
+        self.assertEqual(node["id"], "w1")
+        self.assertEqual(node["dir"], "src/a")
+        self.assertEqual(node["label"], "A node")
+        self.assertEqual(node["goal"], "Change the file")
+        self.assertEqual(node["tasks"], ["first", "second"])
+
+    def test_check_phase_selects_one_recorded_phase(self):
+        self.dag(
+            [
+                {"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+                {"id": "w2", "label": "two", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
+            ]
+        )
+        self.edit("src/a/x.py", "a = 2\n")
+        self.svc.record_phase(0)
+        first = self.svc.store.list_records(campaign=self.svc.campaign_key())[0]
+        self.edit("src/b/x.py", "b = 2\n")
+        self.svc.record_phase(1)
+        result = self.svc.check_phase(phase=0)
+        self.assertEqual(result["phase"], 0)
+        self.assertEqual(result["members"], ["w1"])
+        self.assertEqual(result["commit"], first["head_commit"])
+        self.assertEqual(result["commit_ref"], first["head_commit"])
+
+    def test_check_refresh_bypasses_the_cache(self):
+        self.dag(
+            [{"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]}]
+        )
+        self.edit("src/a/x.py", "a = 2\n")
+        self.svc.record_phase(0)
+        first = self.svc.check_phase(phase=0)
+        self.assertFalse(first["cached"])
+        cached = self.svc.check_phase(phase=0)
+        self.assertTrue(cached["cached"])
+        fresh = self.svc.check_phase(phase=0, refresh=True)
+        self.assertFalse(fresh["cached"])
+
+    def test_reopen_drops_later_records_and_resets_the_worktree(self):
+        self.dag(
+            [
+                {"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]},
+                {"id": "w2", "label": "two", "owns": ["src/b"], "depends_on": ["w1"], "acceptance": ["true"]},
+            ]
+        )
+        base = gitutil.rev_parse(self.root, "main")
+        self.edit("src/a/x.py", "a = 2\n")
+        self.svc.record_phase(0)
+        self.edit("src/b/x.py", "b = 2\n")
+        self.svc.record_phase(1)
+        result = self.svc.reopen_phase(0)
+        self.assertEqual(result["reopened"], 0)
+        self.assertEqual(result["dropped_records"], 2)
+        self.assertEqual(result["reset_to"], base)
+        records = self.svc.store.list_records(campaign=self.svc.campaign_key())
+        self.assertEqual(records, [])
+        self.assertEqual(gitutil.head_commit(self.svc.campaign_worktree()), base)
+        self.assertEqual(self.svc._phase_cursor("feat/x").index, 0)
+
+    def test_reopen_refuses_a_dirty_worktree(self):
+        self.dag(
+            [{"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]}]
+        )
+        self.edit("src/a/x.py", "a = 2\n")
+        self.svc.record_phase(0)
+        (self.svc.campaign_worktree() / "src" / "a" / "x.py").write_text("dirty\n")
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.reopen_phase(0)
+        self.assertIn("uncommitted", str(ctx.exception))
+
+    def test_reopen_refuses_a_finished_campaign(self):
+        self.dag(
+            [{"id": "w1", "label": "one", "owns": ["src/a"], "depends_on": [], "acceptance": ["true"]}]
+        )
+        self.edit("src/a/x.py", "a = 2\n")
+        self.svc.record_phase(0)
+        self.svc.store.set_campaign_state(self.svc.campaign_key(), "landed")
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.reopen_phase(0)
+        self.assertIn("landed", str(ctx.exception))
 
 
 if __name__ == "__main__":

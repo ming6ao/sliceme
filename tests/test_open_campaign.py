@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from sliceme.service import Service
+from sliceme.util import SlicemeError
 
 
 def run(*args, cwd):
@@ -81,6 +82,49 @@ class OpenCampaignCase(unittest.TestCase):
         unit = self.svc.create_campaign_workspace()
         self.assertFalse((Path(unit["worktree"]) / "remote-only.txt").exists())
         self.assertIn("using local main", unit["base_fallback"])
+
+    def commit_on_branch(self, branch, filename, content, *, create=False):
+        """Commit one file on *branch* through a temporary worktree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wt"
+            args = ["git", "worktree", "add", "-q"]
+            if create:
+                args += ["-b", branch, str(path), "main"]
+            else:
+                args += [str(path), branch]
+            run(*args, cwd=self.root)
+            run("git", "config", "user.email", "t@example.com", cwd=path)
+            run("git", "config", "user.name", "Tester", cwd=path)
+            (path / filename).write_text(content)
+            run("git", "add", "-A", cwd=path)
+            run("git", "commit", "-qm", filename, cwd=path)
+            tip = run("git", "rev-parse", "HEAD", cwd=path).stdout.strip()
+            run("git", "worktree", "remove", "--force", str(path), cwd=self.root)
+            return tip
+
+    def test_a_stale_branch_is_fast_forwarded(self):
+        run("git", "branch", "feat/x", "main", cwd=self.root)
+        pushed = self.advance_origin_main()
+        unit = self.svc.create_campaign_workspace()
+        self.assertTrue((Path(unit["worktree"]) / "remote-only.txt").is_file())
+        tip = run("git", "rev-parse", "feat/x", cwd=self.root).stdout.strip()
+        self.assertEqual(tip, pushed)
+
+    def test_an_ahead_branch_is_accepted(self):
+        tip = self.commit_on_branch("feat/x", "ahead.txt", "ahead\n", create=True)
+        unit = self.svc.create_campaign_workspace()
+        self.assertTrue((Path(unit["worktree"]) / "ahead.txt").is_file())
+        self.assertEqual(
+            run("git", "rev-parse", "feat/x", cwd=self.root).stdout.strip(), tip
+        )
+
+    def test_a_diverged_branch_is_refused(self):
+        self.commit_on_branch("feat/x", "branch-only.txt", "branch\n", create=True)
+        self.advance_origin_main()
+        with self.assertRaises(SlicemeError) as ctx:
+            self.svc.create_campaign_workspace()
+        self.assertEqual(getattr(ctx.exception, "reason", None), "diverged_branch")
+        self.assertIn("diverged", str(ctx.exception))
 
 
 if __name__ == "__main__":

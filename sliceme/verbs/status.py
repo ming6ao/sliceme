@@ -14,6 +14,7 @@ from ..campaign import dag_path as _campaign_dag_path
 from ..ownership import (
     DEFAULT_PHASE_SIZE,
     merge_same_own_nodes,
+    node_dir,
     plan_dag_phases,
     validate_dag,
 )
@@ -249,6 +250,8 @@ class StatusVerbs:
             return {
                 "campaign": None,
                 "ready": [],
+                "nodes": [],
+                "worktree": None,
                 "phase": None,
                 "paused": False,
                 "pause_reason": None,
@@ -265,9 +268,34 @@ class StatusVerbs:
             raise SlicemeError(error)
         cursor = self._phase_cursor(branch)
         pause = self.pause_state() or {}
+        ready_ids = self._ready_in_current_phase(branch)
+        # The workflow sandbox has no file access.  The ready reply carries the
+        # node definition and the worktree path, so a worker can start in the
+        # campaign worktree without reading the git-ignored `.sliceme/` state.
+        dag = campaign.load_dag(self.root, branch) or {}
+        by_id = {
+            str(node["id"]): node
+            for node in dag.get("nodes") or []
+            if node.get("id")
+        }
+        definitions = []
+        for node_id in ready_ids:
+            node = by_id.get(node_id) or {}
+            definitions.append(
+                {
+                    "id": node_id,
+                    "dir": node_dir(node),
+                    "label": node.get("label"),
+                    "goal": node.get("goal"),
+                    "tasks": [str(task) for task in node.get("tasks") or []],
+                }
+            )
+        worktree = self.campaign_worktree()
         return {
             "campaign": row.get("name") or row["key"],
-            "ready": self._ready_in_current_phase(branch),
+            "ready": ready_ids,
+            "nodes": definitions,
+            "worktree": str(worktree) if worktree else None,
             "phase": cursor.index,
             "paused": bool(pause.get("pause")),
             "pause_reason": pause.get("reason"),

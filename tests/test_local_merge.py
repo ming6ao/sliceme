@@ -134,6 +134,9 @@ class LocalMergeCase(unittest.TestCase):
         self.assertIn("conflict", result["results"][0]["detail"])
         self.assertEqual(self.campaign_row()["state"], "working")
         self.assertIsNone(self.campaign_row()["merge_commit"])
+        # The confirmation covered a delivery that did not land.  The row stays
+        # for audit but is void, so the next call needs a new confirmation.
+        self.assertFalse(self.svc.campaign_approved())
 
     def test_a_dirty_base_worktree_refuses(self):
         self.record_one()
@@ -161,9 +164,11 @@ class LocalMergeCase(unittest.TestCase):
         self.record_one()
         first = self.svc.deliver(confirm=True)
         self.assertEqual(first["results"][0]["status"], "delivered")
+        self.assertIn("merged", first["results"][0]["detail"])
+        self.assertNotIn("already", first["results"][0]["detail"])
         second = self.svc.deliver(confirm=True)
-        self.assertEqual(second["results"][0]["status"], "delivered")
-        self.assertIn("already merged", second["results"][0]["detail"])
+        self.assertEqual(second["results"][0]["status"], "already_landed")
+        self.assertIn("already landed", second["results"][0]["detail"])
         self.assertEqual(second["merge_commit"], first["merge_commit"])
         # One merge commit only.
         count = run("git", "rev-list", "--merges", "--count", "main", cwd=self.root)

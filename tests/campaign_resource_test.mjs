@@ -72,6 +72,15 @@ for (const key of ["status", "ready-0", "record-0", "check-0"]) {
 	);
 }
 assert.ok(resolved.script.includes('"sliceme-worker"'));
+// The worker starts in the campaign worktree. The reply carries the path and
+// the node definition, because the workflow sandbox cannot read `.sliceme/`.
+assert.ok(resolved.script.includes("ready.worktree"));
+assert.ok(resolved.script.includes("ready.nodes"));
+assert.ok(resolved.script.includes("cwd: worktree"));
+assert.ok(resolved.script.includes("Worktree: "));
+assert.ok(resolved.script.includes("Owned directory: "));
+assert.ok(resolved.script.includes("Goal: "));
+assert.ok(resolved.script.includes("Tasks:"));
 // A paused ready carries the engine's pause reason, so a budget stop and a
 // user suspension stay distinct.
 assert.ok(resolved.script.includes('state: "paused"'));
@@ -84,11 +93,16 @@ assert.ok(resolved.script.includes('"reviewer"'));
 assert.ok(resolved.script.includes("const PHASE_CAP = 3;"));
 assert.ok(resolved.script.includes("const NODE_CAP = 9;"));
 
-// An omitted bound falls back to the bounded default (64 phases / 256 nodes).
+// An omitted bound falls back to the bounded default (10 phases / 256 nodes).
+// The host accepts at most 32 grants, and each phase needs three plus the
+// final status grant: 3 * 10 + 1 = 31.
 const defaulted = resolveCampaignResource({}, ENGINE);
 assert.ok(!("error" in defaulted));
-assert.ok(defaulted.script.includes("const PHASE_CAP = 64;"));
+assert.ok(defaulted.script.includes("const PHASE_CAP = 10;"));
 assert.ok(defaulted.script.includes("const NODE_CAP = 256;"));
+assert.equal(defaulted.hostCommands.length, 31);
+assert.ok(defaulted.script.includes('state: "capped"'));
+assert.ok(defaulted.script.includes("run the sliceme.campaign resource again"));
 
 // Unknown fields are rejected.
 const unknown = resolveCampaignResource({ task: "review this" }, ENGINE);
@@ -100,10 +114,15 @@ for (const campaign of ["feat/x", "", "a b", "x".repeat(129)]) {
 	assert.ok("error" in bad, `accepted campaign ${JSON.stringify(campaign)}`);
 }
 
-// The caps are bounded.
-for (const phaseCap of [0, 65, 1.5, "3"]) {
+// The caps are bounded. The phase cap is 10 because of the host grant limit.
+for (const phaseCap of [0, 11, 1.5, "3"]) {
 	assert.ok("error" in resolveCampaignResource({ phaseCap }, ENGINE), String(phaseCap));
 }
+const atLimit = resolveCampaignResource({ phaseCap: 10 }, ENGINE);
+assert.ok(!("error" in atLimit));
+assert.equal(atLimit.hostCommands.length, 31);
+const overLimit = resolveCampaignResource({ phaseCap: 11 }, ENGINE);
+assert.ok("error" in overLimit && overLimit.error.includes("1 to 10"));
 for (const nodeCap of [0, 257, 1.5, "3"]) {
 	assert.ok("error" in resolveCampaignResource({ nodeCap }, ENGINE), String(nodeCap));
 }

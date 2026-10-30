@@ -143,8 +143,12 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="check",
-        summary="run the synchronous combined-tree checks for the current phase",
-        params=(Param("campaign", "string", CAMPAIGN_HELP),),
+        summary="run the synchronous combined-tree checks for a recorded phase",
+        params=(
+            Param("phase", "int", "re-run the checks of one recorded phase"),
+            Param("refresh", "boolean", "bypass the verdict cache"),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
     ),
     Action(
         name="open",
@@ -153,8 +157,16 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="record",
-        summary="record the current phase: conformance + per-node commits",
-        params=(Param("campaign", "string", CAMPAIGN_HELP),),
+        summary="record the current phase, or reopen a recorded phase",
+        params=(
+            Param(
+                "reopen",
+                "int",
+                "drop the records at or after this phase, reset the worktree, "
+                "and leave the cursor there",
+            ),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
     ),
     Action(
         name="report",
@@ -307,7 +319,9 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
 
 
 def _dispatch_check(service: "Service", p: dict[str, Any]) -> Any:
-    return service.check_phase()
+    return service.check_phase(
+        phase=p.get("phase"), refresh=bool(p.get("refresh"))
+    )
 
 
 def _dispatch_open(service: "Service", p: dict[str, Any]) -> Any:
@@ -315,11 +329,14 @@ def _dispatch_open(service: "Service", p: dict[str, Any]) -> Any:
 
 
 def _dispatch_record(service: "Service", p: dict[str, Any]) -> Any:
-    phase_index = service.current_phase_index()
     # Serialize git mutation with campaign creation and delivery.
     from .service import workspace_lock
 
     with workspace_lock(service.root):
+        reopen = p.get("reopen")
+        if reopen is not None:
+            return service.reopen_phase(int(reopen))
+        phase_index = service.current_phase_index()
         return service.record_phase(phase_index)
 
 

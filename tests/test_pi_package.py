@@ -182,7 +182,7 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("CAMPAIGN_TOKEN", resource)
         self.assertIn("CAMPAIGN_RESOURCE_FIELDS", resource)
         self.assertIn('new Set(["campaign", "phaseCap", "nodeCap"])', resource)
-        for bound in ("1 to 64", "1 to 256"):
+        for bound in ("1 to 10", "1 to 256"):
             self.assertIn(bound, resource, bound)
         self.assertIn("unsupported fields", resource)
         # The engine path comes from the captured closure, never a relative path.

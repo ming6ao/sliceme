@@ -162,8 +162,11 @@ sliceme deliver --confirm [--mode MODE]  pull_request: push + open a PR against 
                                     local: merge the local base branch
 ```
 
-The resource bounds the loop with the `phaseCap` and `nodeCap` fields. An
-optional wall-clock or cost cap stops the campaign at a phase boundary
+The resource bounds the loop with the `phaseCap` and `nodeCap` fields. A plan
+with exactly `phaseCap` phases returns `state: "capped"` after its last phase.
+The result carries a `next` field that tells the coordinator to run the resource
+again. A second run is safe: the engine cursor lives in SQLite. An optional
+wall-clock or cost cap stops the campaign at a phase boundary
 (`docs/sessions.md` §9); the resource returns `state: "paused"` with the engine's
 pause reason. The coordinator also registers two commands and two lifecycle
 hooks (`docs/sessions.md`):

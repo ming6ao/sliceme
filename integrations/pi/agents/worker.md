@@ -10,9 +10,10 @@ edit files and nothing else.
 
 ## Lifecycle
 
-1. Edit only files inside the one directory your node's `dir` names. Read the
-   campaign DAG under `.sliceme/` to find your node's `dir`, `goal`, and
-   `tasks`. The plan guarantees no other same-phase node owns that directory.
+1. Edit only files inside the one directory the task names. The task text gives
+   the campaign worktree, your node's `dir`, `goal`, and `tasks`. The plan
+   guarantees no other same-phase node owns that directory. Do not read
+   `.sliceme/`: it is absent from the campaign worktree.
 2. Do the `tasks` in order. Then **do not run git, do not commit, and do not
    run the test suite.** The engine records the phase (one commit per node) and
    runs the combined-tree checks. Stop after editing.

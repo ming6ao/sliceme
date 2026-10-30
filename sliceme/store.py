@@ -165,7 +165,32 @@ class Store:
         self._rename_branch_columns()
         self._backfill_base_branch()
         self._drop_unit_schema()
+        self._rename_verdict_phase_column()
+        self._ensure_columns("verdicts", {"phase": "INTEGER"})
         self._rename_state_tables()
+
+    def _rename_verdict_phase_column(self) -> None:
+        """Rename the retired ``verdicts.wave`` column to ``phase``.
+
+        The wave term is retired.  A plane created before the rename keeps its
+        verdict rows and gains the new column name.  A plane with neither
+        column gets a nullable ``phase`` from the follow-up
+        :meth:`_ensure_columns` call.  The retired ``gpu`` column stays: it is
+        harmless, and a column drop needs a table rebuild on older SQLite.
+        """
+        if "verdicts" not in {
+            row["name"]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }:
+            return
+        existing = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(verdicts)").fetchall()
+        }
+        if "wave" in existing and "phase" not in existing:
+            self.conn.execute("ALTER TABLE verdicts RENAME COLUMN wave TO phase")
 
     def _rename_state_tables(self) -> None:
         """Rename the retired state tables and their statuses.
@@ -192,15 +217,32 @@ class Store:
             )
             self.conn.execute("DROP TABLE candidates")
         if "checks" in tables:
+            # A very old plane named the phase column ``wave``.  Copy the
+            # phase value when the source has one; a plane with neither
+            # column copies no phase and keeps a null.
+            checks_columns = {
+                row["name"]
+                for row in self.conn.execute("PRAGMA table_info(checks)").fetchall()
+            }
+            source_phase = (
+                "wave" if "wave" in checks_columns else "phase" if "phase" in checks_columns else None
+            )
+            target_columns = (
+                "id, fingerprint, campaign, source, commit_ref, tree, commands,"
+                " checks, sandbox, sandbox_digest, status, duration, exit_code,"
+                " output, results, error, created_at, finished_at"
+            )
+            source_columns = target_columns
+            if source_phase:
+                target_columns = target_columns.replace(
+                    "fingerprint, campaign", f"fingerprint, phase, campaign", 1
+                )
+                source_columns = source_columns.replace(
+                    "fingerprint, campaign", f"fingerprint, {source_phase}, campaign", 1
+                )
             self.conn.execute(
-                "INSERT OR IGNORE INTO verdicts(id, fingerprint, campaign,"
-                " source, commit_ref, tree, commands, checks, sandbox, sandbox_digest,"
-                " status, duration, exit_code, output, results, error,"
-                " created_at, finished_at)"
-                " SELECT id, fingerprint, campaign, source, commit_ref, tree,"
-                " commands, checks, sandbox, sandbox_digest, status, duration,"
-                " exit_code, output, results, error, created_at, finished_at"
-                " FROM checks"
+                f"INSERT OR IGNORE INTO verdicts({target_columns})"
+                f" SELECT {source_columns} FROM checks"
             )
             self.conn.execute("DROP TABLE checks")
         if "review_decisions" in tables:
@@ -557,6 +599,23 @@ class Store:
         params.append(record_id)
         self.conn.execute(f"UPDATE records SET {', '.join(sets)} WHERE id=?", params)
 
+    def delete_records(self, record_ids: Sequence[int]) -> int:
+        """Delete record rows by id and return the number removed.
+
+        ``record --reopen`` uses this to drop one phase and every later phase.
+        The caller resets the worktree first, so a dropped row never points at
+        a missing commit.
+        """
+        ids = [int(item) for item in record_ids]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor = self.conn.execute(
+            f"DELETE FROM records WHERE id IN ({placeholders})", ids
+        )
+        self.conn.commit()
+        return int(cursor.rowcount)
+
     def get_record(self, name_or_id: str | int) -> dict[str, Any] | None:
         text = str(name_or_id)
         if text.isdigit():
@@ -761,6 +820,20 @@ class Store:
             params.append(branch_key)
         sql += " ORDER BY id ASC"
         return _dicts(self.conn.execute(sql, params).fetchall())
+
+    def void_approvals(self, branch_key: str) -> int:
+        """Mark every live campaign approval for *branch_key* as void.
+
+        A reopened phase changes the campaign history, so an earlier
+        confirmation no longer covers it.  The row stays for audit evidence.
+        """
+        cursor = self.conn.execute(
+            "UPDATE approvals SET action='void', consumed_at=?"
+            " WHERE branch_key=? AND action='approve' AND consumed_at IS NULL",
+            (now(), branch_key),
+        )
+        self.conn.commit()
+        return int(cursor.rowcount)
 
     def consume_approvals(self, approval_ids: Sequence[int]) -> None:
         ids = [int(item) for item in approval_ids]

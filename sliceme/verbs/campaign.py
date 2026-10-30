@@ -87,6 +87,7 @@ class CampaignVerbs:
         worktree = worktrees_dir(self.root) / f"campaign-{key}"
         gitutil.cleanup_worktree(self.root, worktree)
         if gitutil.branch_exists(self.root, branch):
+            self._sync_campaign_branch(branch, base_ref)
             gitutil.add_worktree(
                 self.root, worktree, branch=branch, base=branch, new_branch=False
             )
@@ -134,24 +135,68 @@ class CampaignVerbs:
             )
         return delivery_base, f"could not fetch {fetched}; using local {delivery_base}"
 
+    def _sync_campaign_branch(self, branch: str, base_ref: str) -> None:
+        """Fast-forward a stale branch, accept an ahead branch, refuse a diverged one.
+
+        A campaign branch that has no commit of its own is stale: the base
+        moved after the branch was created.  The engine fast-forwards it so the
+        plan runs against the base that ``open`` resolved.  A branch that
+        already contains the base is normal on a resumed campaign and stays
+        untouched.  A branch that diverged from the base needs a human
+        decision, so the engine refuses and prints both tips.
+        """
+        if not gitutil.branch_exists(self.root, branch):
+            return
+        branch_head = gitutil.rev_parse(self.root, branch)
+        try:
+            base_head = gitutil.rev_parse(self.root, base_ref)
+        except SlicemeError:
+            return
+        if branch_head == base_head:
+            return
+        common = gitutil.merge_base(self.root, branch_head, base_head)
+        if common == branch_head:
+            # Behind: every branch commit is already in the base.
+            result = gitutil.git(
+                self.root, "branch", "-f", branch, base_head, check=False
+            )
+            if not result.ok:
+                raise SlicemeError(
+                    f"cannot fast-forward campaign branch '{branch}' to "
+                    f"'{base_ref}': {result.stderr.strip() or result.stdout.strip()}"
+                )
+            return
+        if common == base_head:
+            # Ahead: the base is an ancestor of the branch.
+            return
+        error = SlicemeError(
+            f"refusing the campaign branch '{branch}': it has diverged from "
+            f"'{base_ref}'; branch tip {branch_head[:12]}, base tip "
+            f"{base_head[:12]}. Merge or rebase the base into the campaign "
+            "branch, or start a new campaign."
+        )
+        error.reason = "diverged_branch"
+        raise error
+
     def _recreate_campaign_worktree(
         self, row: dict[str, Any], *, base: str | None = None
     ) -> dict[str, Any]:
         """Recreate a campaign worktree whose directory was deleted by hand."""
         worktree = Path(row["worktree"])
         branch = str(row["work_branch"])
+        base_ref = (
+            base
+            or self.config.get("base_branch")
+            or self.config.get("work_branch")
+            or "main"
+        )
         gitutil.cleanup_worktree(self.root, worktree)
         if gitutil.branch_exists(self.root, branch):
+            self._sync_campaign_branch(branch, base_ref)
             gitutil.add_worktree(
                 self.root, worktree, branch=branch, base=branch, new_branch=False
             )
         else:
-            base_ref = (
-                base
-                or self.config.get("base_branch")
-                or self.config.get("work_branch")
-                or "main"
-            )
             gitutil.add_worktree(
                 self.root, worktree, branch=branch, base=gitutil.rev_parse(self.root, base_ref)
             )
@@ -376,34 +421,168 @@ class CampaignVerbs:
             raise SlicemeError("no current phase in this campaign")
         return int(index)
 
-    def check_phase(self) -> dict[str, Any]:
-        """Run the trusted checks on the recorded phase's combined tree.
+    def check_phase(
+        self, *, phase: int | None = None, refresh: bool = False
+    ) -> dict[str, Any]:
+        """Run the trusted checks on one phase's combined tree.
 
-        The phase tree is the campaign worktree head after ``record``, so
-        the checks run over the recorded nodes together.  The recorded phase is
-        the planned phase that the newest recorded record belongs to, not the
-        next phase that ``ready`` offers.  A fingerprint that already has a
-        terminal verdict is served from the cache.  The check vector is the
-        plane's trusted checks plus the union of the phase members'
-        ``acceptance`` commands.
+        With no ``phase``, the target is the recorded phase that the newest
+        record belongs to, and the commit is the current branch tip.  With
+        ``phase``, the target is that recorded phase, and the commit is the
+        newest record ``head_commit`` of the phase.  A fingerprint that already
+        has a terminal verdict is served from the cache unless ``refresh`` is
+        true.  The check vector is the plane's trusted checks plus the union of
+        the phase members' ``acceptance`` commands.
         """
         row = self.require_campaign()
         branch = str(row["work_branch"])
-        cursor = self._phase_cursor(branch)
-        index, members = cursor.recorded_index, cursor.recorded_members
-        if index is None:
-            raise SlicemeError("no current phase in this campaign")
+        source = str(self.config.get("work_branch") or branch)
+        if phase is None:
+            cursor = self._phase_cursor(branch)
+            index, members = cursor.recorded_index, cursor.recorded_members
+            if index is None:
+                raise SlicemeError("no current phase in this campaign")
+            commit = source
+        else:
+            index = int(phase)
+            planned, error = self._dag_phases(branch)
+            if error:
+                raise SlicemeError(error)
+            entry = next(
+                (
+                    item
+                    for item in planned
+                    if int(item.get("phase", 0)) == index
+                ),
+                None,
+            )
+            if entry is None:
+                raise SlicemeError(f"unknown phase: {index}")
+            planned_members = {str(m) for m in entry.get("members") or []}
+            records = [
+                record
+                for record in self.store.list_records(campaign=self.campaign_key())
+                if str(record.get("node")) in planned_members
+                and not record.get("empty")
+            ]
+            if not records:
+                raise SlicemeError(
+                    f"phase {index} has no recorded commit to check; record it first"
+                )
+            members = [str(record["node"]) for record in records]
+            commit = str(records[-1]["head_commit"])
         dag = campaign.load_dag(self.root, branch) or {}
         by_id = {str(node["id"]): node for node in dag.get("nodes") or []}
         member_nodes = [by_id[m] for m in members if m in by_id]
-        source = str(self.config.get("work_branch") or branch)
         result = self.checks().run(
             source=f"phase:{index}",
-            commit=source,
+            commit=commit,
             checks=self._phase_checks(member_nodes),
             phase=index,
+            refresh=refresh,
         )
-        return {"phase": index, "members": members, **result}
+        return {"phase": index, "members": members, "commit": commit, **result}
+
+    def reopen_phase(self, phase: int) -> dict[str, Any]:
+        """Drop phase *phase* and every later phase, then reset the worktree.
+
+        The reset target is the parent of the first commit in the reopened
+        phase.  The cursor then points at the reopened phase, so the next
+        ``record`` records the redone work.  The verb refuses a dirty worktree,
+        a finished campaign, and a dropped commit that is already on the
+        remote.  Live approval rows become void, because the history changed.
+        """
+        row = self.require_campaign()
+        branch = str(row["work_branch"])
+        # The service caches the bound row; re-read the delivery state.
+        row = self.store.get_campaign(str(row["key"])) or row
+        state = str(row.get("state") or "")
+        if state in {"landed", "delivered", "closed"}:
+            raise SlicemeError(
+                f"refusing to reopen phase {phase}: the campaign is {state}"
+            )
+        worktree = self.campaign_worktree()
+        if worktree is None or not worktree.exists():
+            raise SlicemeError(
+                "refusing to reopen: the campaign worktree is missing; "
+                "run `sliceme open` first"
+            )
+        if not gitutil.is_clean(worktree):
+            raise SlicemeError(
+                "refusing to reopen: the campaign worktree has uncommitted changes; "
+                "commit them or discard them first"
+            )
+        dag = campaign.load_dag(self.root, branch) or {}
+        phase_size = int(dag.get("concurrency") or DEFAULT_PHASE_SIZE)
+        planned = plan_dag_phases(
+            list(dag.get("nodes") or []), phase_size=phase_size
+        )
+        planned_indexes = {item.index for item in planned}
+        if int(phase) not in planned_indexes:
+            raise SlicemeError(f"unknown phase: {phase}")
+        phase_of = {
+            member: item.index for item in planned for member in item.members
+        }
+        dropped: list[dict[str, Any]] = []
+        for record in self.store.list_records(campaign=self.campaign_key()):
+            node = str(record.get("node") or "")
+            if not node:
+                continue
+            record_phase = phase_of.get(node)
+            if record_phase is None:
+                raise SlicemeError(
+                    f"record {record['id']} names node '{node}', which is not in the DAG"
+                )
+            if record_phase >= int(phase):
+                dropped.append(record)
+        if not dropped:
+            raise SlicemeError(f"phase {phase} has no records to reopen")
+        remote = (self.config.get("policy") or {}).get("remote") or "origin"
+        remote_ref = f"refs/remotes/{remote}/{branch}"
+        remote_res = gitutil.git(
+            self.root, "rev-parse", "--verify", f"{remote_ref}^{{commit}}", check=False
+        )
+        if remote_res.ok:
+            remote_tip = remote_res.stdout.strip()
+            for record in dropped:
+                commit = str(record.get("head_commit") or "")
+                if not commit or record.get("empty"):
+                    continue
+                on_remote = gitutil.git(
+                    self.root,
+                    "merge-base",
+                    "--is-ancestor",
+                    commit,
+                    remote_tip,
+                    check=False,
+                )
+                if on_remote.ok:
+                    raise SlicemeError(
+                        f"refusing to reopen phase {phase}: commit {commit[:12]} is on "
+                        f"{remote}/{branch}; a rewrite would need a force push"
+                    )
+        commit_records = [
+            record
+            for record in dropped
+            if not record.get("empty") and record.get("head_commit")
+        ]
+        reset_to = None
+        if commit_records:
+            reset_to = gitutil.rev_parse(
+                self.root, f"{commit_records[0]['head_commit']}^"
+            )
+            gitutil.git(worktree, "reset", "--hard", reset_to, check=True)
+        removed = self.store.delete_records(
+            [int(record["id"]) for record in dropped]
+        )
+        voided = self.store.void_approvals(campaign.branch_key(branch))
+        return {
+            "reopened": int(phase),
+            "dropped_records": removed,
+            "reset_to": reset_to,
+            "voided_approvals": voided,
+            "next": f"sliceme record --campaign {branch}",
+        }
 
     def _phase_checks(self, member_nodes: list[dict[str, Any]]) -> list[Any]:
         """The trusted checks plus the phase members' acceptance commands.

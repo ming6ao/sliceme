@@ -144,6 +144,71 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
+#: Exit codes for a terminal verdict.  A raised :class:`SlicemeError` stays at 2.
+_STATUS_EXIT = {"passed": 0, "failed": 1, "error": 3}
+
+
+def _report_check_failure(result: dict[str, Any]) -> None:
+    """Name the failed checks on standard error."""
+    commands = result.get("commands") or []
+    if isinstance(commands, str):
+        # The stored verdict row keeps the command vector as JSON text.
+        try:
+            commands = json.loads(commands)
+        except json.JSONDecodeError:
+            commands = [commands]
+    if not commands:
+        checks = result.get("checks") or []
+        if isinstance(checks, str):
+            try:
+                checks = json.loads(checks)
+            except json.JSONDecodeError:
+                checks = []
+        commands = [
+            str(check.get("name"))
+            for check in checks
+            if isinstance(check, dict)
+        ]
+    detail = ", ".join(str(command) for command in commands) or "(unknown)"
+    print(f"error: failed checks: {detail}", file=sys.stderr)
+
+
+def _report_delivery_failure(entries: list[dict[str, Any]]) -> None:
+    """Name the failed delivery results on standard error."""
+    for entry in entries:
+        if str(entry.get("status")) not in {"failed", "error"}:
+            continue
+        detail = entry.get("detail") or "delivery failed"
+        mode = entry.get("mode") or "delivery"
+        print(f"error: {mode}: {detail}", file=sys.stderr)
+
+
+def _exit_code(action: str, result: Any) -> int:
+    """Map one action result to a process exit code.
+
+    ``check`` carries a top-level ``status``.  ``deliver`` carries a
+    ``results`` list, because one delivery can report several outcomes.
+    Every other action has no terminal verdict and exits with 0.
+    """
+    if not isinstance(result, dict):
+        return 0
+    if action == "check":
+        code = _STATUS_EXIT.get(str(result.get("status") or ""), 0)
+        if code:
+            _report_check_failure(result)
+        return code
+    if action == "deliver":
+        entries = [item for item in result.get("results") or [] if isinstance(item, dict)]
+        statuses = [str(item.get("status") or "") for item in entries]
+        if "error" in statuses:
+            _report_delivery_failure(entries)
+            return 3
+        if "failed" in statuses:
+            _report_delivery_failure(entries)
+            return 1
+    return 0
+
+
 def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
     action = args.action
 
@@ -165,7 +230,8 @@ def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
         print("\n".join(result["lines"]))
     else:
         _print(result, as_json)
-    return 0
+    # Print the result first, so a caller can parse it on a nonzero exit.
+    return _exit_code(surface.resolve_action(action).name, result)
 
 
 if __name__ == "__main__":  # pragma: no cover
