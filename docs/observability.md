@@ -89,10 +89,13 @@ campaign falls back to a compact per-campaign plane list.
 ### 3.3 The loop read
 
 `ready` returns the small object the workflow resource polls: `campaign`,
-`ready`, `phase`, `paused`, `pause_reason`, and `budget`. The engine computes
-`paused` from the `<branch-key>.control.json` pause flag, so the sandbox needs no
-file access. The pi adapter writes the flag with `reason: user` for `/suspend`,
-or `reason: budget` when a wall-clock or cost cap trips.
+`ready`, `nodes`, `dag`, `phase`, `paused`, `pause_reason`, and `budget`. The
+resource reads the brief form (`ready --brief`), so `nodes` carries no goal or
+tasks and one reply stays under the 4096-byte standard output cap of the host.
+The engine computes `paused` from the `<branch-key>.control.json` pause flag, so
+the sandbox needs no file access. The pi adapter writes the flag with
+`reason: user` for `/suspend`, or `reason: budget` when a wall-clock or cost cap
+trips.
 
 ## 4. Where child state lives
 

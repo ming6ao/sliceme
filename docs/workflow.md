@@ -194,7 +194,7 @@ equals the default branch.
 | `budget` | set, raise, or clear the campaign wall-clock and cost caps |
 | `gc` | prune worktrees, delivered branches, scratch, and finished campaign files |
 | `doctor` | check git, `config.json`, and `state.db` health |
-| `ready` | the current-phase ready node ids, the phase index, and `paused` |
+| `ready` | the current-phase ready node ids, the phase index, and `paused`; `brief` omits the node text and names the plan file |
 | `plan` | the design's `sliceme-campaigns` split joined with the registry state, plus the next entry |
 | `deliver` | confirm and deliver the campaign; `confirm` records the one campaign approval; `mode` selects `pull_request` (push + PR) or `local` (merge the local base branch); `actor` and `note` join the approval row; `source`, `cleanup`, `no_checks` |
 | `check` | run the one combined-tree check runner for the current phase |
@@ -207,6 +207,11 @@ equals the default branch.
 
 The resource launches a worker for each ready node. The worker edits the shared
 campaign worktree and does nothing else:
+
+The task names the campaign worktree, the owned directory, and the plan file.
+The worker reads its own entry from the plan file, because one detailed node can
+cross the 4096-byte standard output cap of the host. The worker reads no other
+file under `.sliceme/`.
 
 ```text
 # ... edit only files under your node's owned directories ...

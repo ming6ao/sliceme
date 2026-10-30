@@ -236,7 +236,7 @@ class StatusVerbs:
             and campaign.node_status(states, node_id) != "running"
         ]
 
-    def ready(self) -> dict[str, Any]:
+    def ready(self, brief: bool = False) -> dict[str, Any]:
         """The current phase's ready node ids, its index, and the pause flag.
 
         The phase is the one scheduling gate: a node is ready when it is a
@@ -244,6 +244,11 @@ class StatusVerbs:
         running.  The result is scoped to the current phase, so a caller spawns
         and records one phase per call.  A missing or malformed DAG reports no
         ready nodes instead of crashing the read.
+
+        ``brief`` leaves the node ``goal`` and ``tasks`` out of the reply and
+        names the plan file in ``dag``.  The workflow sandbox has no file access
+        but it also receives at most 4096 bytes of standard output, so the loop
+        uses this form and a worker reads its own node from the plan file.
         """
         row = self.campaign
         if row is None:
@@ -251,6 +256,7 @@ class StatusVerbs:
                 "campaign": None,
                 "ready": [],
                 "nodes": [],
+                "dag": None,
                 "worktree": None,
                 "phase": None,
                 "paused": False,
@@ -269,9 +275,10 @@ class StatusVerbs:
         cursor = self._phase_cursor(branch)
         pause = self.pause_state() or {}
         ready_ids = self._ready_in_current_phase(branch)
-        # The workflow sandbox has no file access.  The ready reply carries the
-        # node definition and the worktree path, so a worker can start in the
-        # campaign worktree without reading the git-ignored `.sliceme/` state.
+        # The workflow sandbox has no file access, so the reply carries the
+        # paths a worker needs.  The brief form names the plan file instead of
+        # the node text, because the host returns at most 4096 bytes of standard
+        # output and one detailed node can exceed that.
         dag = campaign.load_dag(self.root, branch) or {}
         by_id = {
             str(node["id"]): node
@@ -281,20 +288,21 @@ class StatusVerbs:
         definitions = []
         for node_id in ready_ids:
             node = by_id.get(node_id) or {}
-            definitions.append(
-                {
-                    "id": node_id,
-                    "dir": node_dir(node),
-                    "label": node.get("label"),
-                    "goal": node.get("goal"),
-                    "tasks": [str(task) for task in node.get("tasks") or []],
-                }
-            )
+            definition: dict[str, Any] = {
+                "id": node_id,
+                "dir": node_dir(node),
+                "label": node.get("label"),
+            }
+            if not brief:
+                definition["goal"] = node.get("goal")
+                definition["tasks"] = [str(task) for task in node.get("tasks") or []]
+            definitions.append(definition)
         worktree = self.campaign_worktree()
         return {
             "campaign": row.get("name") or row["key"],
             "ready": ready_ids,
             "nodes": definitions,
+            "dag": str(campaign.dag_path(self.root, branch)),
             "worktree": str(worktree) if worktree else None,
             "phase": cursor.index,
             "paused": bool(pause.get("pause")),

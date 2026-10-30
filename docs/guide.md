@@ -263,7 +263,7 @@ is the target repository.
 | Key | Command | Use |
 |---|---|---|
 | `status` | `<python> <engine> --json status <campaign>` | read campaign state, phases, and `paused` |
-| `ready` | `<python> <engine> --json ready <campaign>` | get the ready node ids and the current phase |
+| `ready` | `<python> <engine> --json ready --brief <campaign>` | get the ready node ids, the current phase, and the plan file |
 | `record` | `<python> <engine> --json record <campaign>` | commit the finished nodes |
 | `check` | `<python> <engine> --json check <campaign>` | run the combined-tree checks |
 
@@ -303,12 +303,13 @@ evidence + report ──► user confirms ──► deliver --confirm
    repository default. The planner then writes `dag.json`, and the engine
    projects it into phases.
 2. **`ready`** returns the current phase's members that are neither recorded nor
-   running, plus the phase index and `paused`. The phase is the gate, so the
-   engine records and checks one phase at a time.
+   running, plus the phase index and `paused`. The resource reads the brief form,
+   so the reply names the plan file instead of the node text. The phase is the
+   gate, so the engine records and checks one phase at a time.
 3. **The resource** starts one worker per ready node with the `sliceme-worker`
    agent. A worker is a one-shot pure editor in the one shared campaign
-   worktree. Sliceme reuses the worktree, so it already contains every earlier
-   phase's files.
+   worktree. It reads its own node from the plan file the task names. Sliceme
+   reuses the worktree, so it already contains every earlier phase's files.
 4. **`record`** commits the current phase onto the campaign
    branch, with one commit per node. Sliceme attributes the commit by owned
    directories. Nothing lands on the base branch.

@@ -111,7 +111,7 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	resume: ["campaign"],
 	gc: [],
 	doctor: [],
-	ready: ["campaign"],
+	ready: ["campaign", "brief"],
 	plan: ["design", "campaign"],
 	open: ["campaign"],
 	record: ["reopen", "campaign"],

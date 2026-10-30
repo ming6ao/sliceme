@@ -162,10 +162,11 @@ class PiPackageTests(unittest.TestCase):
         self.assertIn("loadPiSubagents(\"workflow-resources\")", coordinator)
         self.assertIn("hostCommands", resource)
         self.assertIn('resolve: (args', coordinator)
-        # The four fixed host commands, built from literals.
+        # The four fixed host commands, built from literals. The loop reads the
+        # brief `ready` form: the host cuts standard output at 4096 bytes.
         for verb in (
             '["status"]',
-            '["ready"]',
+            '["ready", "--brief"]',
             '["record"]',
             '["check"]',
         ):

@@ -8,7 +8,16 @@
  */
 
 export const CAMPAIGN_RESOURCE = "sliceme.campaign";
-export const CAMPAIGN_RESOURCE_VERSION = 1;
+export const CAMPAIGN_RESOURCE_VERSION = 2;
+
+/** The pi-subagents preview cap for standard output and for standard error. */
+export const HOST_PREVIEW_BYTES = 4096;
+
+/** The marker pi-subagents appends when it cuts a host stream. */
+export const HOST_CUT_MARKER = "...";
+
+/** How much `record` or `check` text one reviewer task carries. */
+export const EVIDENCE_LIMIT = 1600;
 
 /** The only variable text in a generated command. */
 export const CAMPAIGN_TOKEN = /^[A-Za-z0-9._-]{1,128}$/;
@@ -55,7 +64,7 @@ export function engineCommand(
 export function campaignCommands(engine: string[], campaign?: string): CampaignCommands {
 	return {
 		status: engineCommand(engine, ["status"], campaign),
-		ready: engineCommand(engine, ["ready"], campaign),
+		ready: engineCommand(engine, ["ready", "--brief"], campaign),
 		record: engineCommand(engine, ["record"], campaign),
 		check: engineCommand(engine, ["check"], campaign),
 	};
@@ -86,11 +95,16 @@ export function campaignGrants(
  * The campaign loop, as a pi-subagents workflow script.
  *
  * The sandbox has no file access, so all engine state arrives as JSON from
- * `runs.host` and all work runs through `runs.run`. The loop verifies after
- * `record`: it records the node commits first, then checks and reviews the
- * recorded evidence. `HOST_TIMEOUT_MS` bounds each engine verb, including the
- * synchronous combined-tree `check`. A paused `ready` returns the engine's
- * pause reason, so a budget stop and a user suspension stay distinct.
+ * `runs.host` and all work runs through `runs.run`. The host returns at most
+ * `HOST_PREVIEW_BYTES` of each host stream, so the loop reads the `--brief`
+ * `ready` form, and each worker reads its own node from the plan file. Every
+ * reply passes one guard: a cut payload stops the loop with the verb name, the
+ * received size, and the capture path, and it never reaches a reviewer as
+ * complete evidence. The loop verifies after `record`: it records the node
+ * commits first, then checks and reviews the recorded evidence.
+ * `HOST_TIMEOUT_MS` bounds each engine verb, including the synchronous
+ * combined-tree `check`. A paused `ready` returns the engine's pause reason, so
+ * a budget stop and a user suspension stay distinct.
  */
 export function buildCampaignScript(
 	commands: CampaignCommands,
@@ -103,12 +117,34 @@ export function buildCampaignScript(
 		`const PHASE_CAP = ${phaseCap};`,
 		`const NODE_CAP = ${nodeCap};`,
 		`const HOST_TIMEOUT_MS = 3600000;`,
+		`const HOST_PREVIEW_BYTES = ${HOST_PREVIEW_BYTES};`,
+		`const HOST_CUT_MARKER = ${JSON.stringify(HOST_CUT_MARKER)};`,
+		`const EVIDENCE_LIMIT = ${EVIDENCE_LIMIT};`,
+		// The planner writes ASCII-escaped JSON, so the string length equals the
+		// byte count. The count is a diagnosis, not a limit test.
+		`function hostStdout(res) { return typeof res.stdout === "string" ? res.stdout : ""; }`,
+		`function hostCapturePath(res) { return typeof res.outputPath === "string" && res.outputPath ? res.outputPath : "(the host kept no capture path)"; }`,
+		`function hostCut(res) { return hostStdout(res).trimEnd().endsWith(HOST_CUT_MARKER); }`,
+		`function hostCutError(verb, res) {`,
+		`  return new Error("sliceme " + verb + " output is incomplete: the pi-subagents host returns at most " + HOST_PREVIEW_BYTES + " bytes of standard output, and this reply was cut. Received " + hostStdout(res).length + " characters. Full output: " + hostCapturePath(res) + ". Raise the preview cap in the installed pi-subagents bundle to keep a large reply inline.");`,
+		`}`,
+		`function hostJson(res, verb) {`,
+		`  if (hostCut(res)) throw hostCutError(verb, res);`,
+		`  try { return JSON.parse(hostStdout(res)); }`,
+		`  catch (error) { throw new Error("sliceme " + verb + " returned invalid JSON: " + (error && error.message ? error.message : String(error)) + ". Received " + hostStdout(res).length + " characters. Full output: " + hostCapturePath(res) + "."); }`,
+		`}`,
+		`function hostEvidence(verb, res) {`,
+		`  const text = hostStdout(res);`,
+		`  if (!hostCut(res) && text.length <= EVIDENCE_LIMIT) return text;`,
+		`  const shown = text.length > EVIDENCE_LIMIT ? text.slice(0, EVIDENCE_LIMIT) : text;`,
+		`  return shown + "\\n[" + verb + " output cut: received " + text.length + " characters; full output: " + hostCapturePath(res) + "]";`,
+		`}`,
 		`let phases = 0;`,
 		`let nodes = 0;`,
 		`while (true) {`,
 		`  const readyRes = await ${hostCall('"ready-" + phases', commands.ready)};`,
 		`  if (!readyRes.ok) throw new Error("sliceme ready failed: " + (readyRes.error || readyRes.stderr || readyRes.exitCode));`,
-		`  const ready = JSON.parse(readyRes.stdout);`,
+		`  const ready = hostJson(readyRes, "ready");`,
 		`  if (ready.paused) {`,
 		`    return { state: "paused", phase: ready.phase === undefined ? null : ready.phase, reason: ready.pause_reason === undefined ? null : ready.pause_reason, metric: ready.pause_metric === undefined ? null : ready.pause_metric, phases: phases, nodes: nodes };`,
 		`  }`,
@@ -116,16 +152,18 @@ export function buildCampaignScript(
 		`  if (ids.length === 0) break;`,
 		`  const worktree = ready.worktree;`,
 		`  if (!worktree) throw new Error("sliceme: the campaign worktree is missing; run sliceme open first");`,
+		`  const plan = typeof ready.dag === "string" ? ready.dag : "";`,
+		`  if (!plan) throw new Error("sliceme: the ready reply has no plan path; run sliceme start first");`,
 		`  const definitions = Array.isArray(ready.nodes) ? ready.nodes : [];`,
 		`  const byId = new Map(definitions.map(function (node) { return [node.id, node]; }));`,
 		`  const workers = ids.map(function (id) {`,
 		`    const node = byId.get(id) || {};`,
-		`    const tasks = Array.isArray(node.tasks) && node.tasks.length ? "\\n- " + node.tasks.join("\\n- ") : "\\n- (none)";`,
+		`    const label = node.label ? " (" + node.label + ")" : "";`,
 		`    return {`,
 		`      key: "node-" + id,`,
 		`      agent: "sliceme-worker",`,
 		`      cwd: worktree,`,
-		`      task: "Implement Sliceme DAG node '" + id + "'.\\nWorktree: " + worktree + "\\nOwned directory: " + (node.dir || "(none)") + "\\nGoal: " + (node.goal || "(none)") + "\\nTasks:" + tasks + "\\nEdit only files inside the owned directory. Do not run git, do not commit, and do not run the test suite."`,
+		`      task: "Implement Sliceme DAG node '" + id + "'" + label + ".\\nWorktree: " + worktree + "\\nOwned directory: " + (node.dir || "(none)") + "\\nPlan file: " + plan + "\\nRead the plan file and use the entry in its nodes array with id '" + id + "': its goal and its tasks are your instruction. Read no other file under .sliceme/.\\nEdit only files inside the owned directory. Do not run git, do not commit, and do not run the test suite."`,
 		`    };`,
 		`  });`,
 		`  await runs.all(workers);`,
@@ -133,7 +171,7 @@ export function buildCampaignScript(
 		`  if (!recordRes.ok) throw new Error("sliceme record failed: " + (recordRes.error || recordRes.stderr || recordRes.exitCode));`,
 		`  const checkRes = await ${hostCall('"check-" + phases', commands.check)};`,
 		`  if (!checkRes.ok) throw new Error("sliceme check failed: " + (checkRes.error || checkRes.stderr || checkRes.exitCode));`,
-		`  const reviewTask = "Review the recorded phase evidence for Sliceme phase " + (ready.phase === undefined ? "?" : ready.phase) + ".\\nRecorded: " + recordRes.stdout + "\\nChecks: " + checkRes.stdout + "\\nReport concrete findings, or state that the phase is clean. Do not edit files.";`,
+		`  const reviewTask = "Review the recorded phase evidence for Sliceme phase " + (ready.phase === undefined ? "?" : ready.phase) + ".\\nRecorded: " + hostEvidence("record", recordRes) + "\\nChecks: " + hostEvidence("check", checkRes) + "\\nReport concrete findings, or state that the phase is clean. Do not edit files.";`,
 		`  await runs.run("review-" + (ready.phase === undefined ? phases : ready.phase), { agent: "reviewer", cwd: worktree, task: reviewTask });`,
 		`  phases += 1;`,
 		`  nodes += ids.length;`,
@@ -143,8 +181,14 @@ export function buildCampaignScript(
 		`}`,
 		`const statusRes = await ${hostCall('"status"', commands.status)};`,
 		`let summary = null;`,
-		`if (statusRes.ok) { try { summary = JSON.parse(statusRes.stdout); } catch (error) { summary = statusRes.stdout; } }`,
-		`return { state: "complete", phases: phases, nodes: nodes, status: summary };`,
+		`let statusError = null;`,
+		`if (statusRes.ok) {`,
+		`  try { summary = hostJson(statusRes, "status"); }`,
+		`  catch (error) { statusError = error && error.message ? error.message : String(error); }`,
+		`} else {`,
+		`  statusError = "the status command failed: " + (statusRes.error || statusRes.stderr || statusRes.exitCode);`,
+		`}`,
+		`return { state: "complete", phases: phases, nodes: nodes, status: summary, status_error: statusError };`,
 	].join("\n");
 }
 

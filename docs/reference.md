@@ -22,7 +22,7 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `budget` | Set, raise, or clear the campaign wall-clock and cost caps. |
 | `gc` | Prune worktrees, delivered branches, scratch, and finished campaign files. |
 | `doctor` | Check git, `config.json`, and `state.db` health. |
-| `ready` | The current-phase node ids, the node definitions, the worktree path, the phase index, `paused`, and `pause_reason`. |
+| `ready` | The current-phase node ids, the node definitions, the plan file, the worktree path, the phase index, `paused`, and `pause_reason`; `--brief` leaves out the node text. |
 | `plan` | Parse the design's campaign split and join the registry state. |
 | `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
 | `check` | Run the synchronous combined-tree checks for a recorded phase (`--phase`), with `--refresh` to bypass the cache. |
@@ -180,23 +180,26 @@ and one `ok` flag.
 ### `ready`
 
 ```bash
-sliceme ready [--campaign REF]
+sliceme ready [--campaign REF] [--brief]
 ```
 
 Returns `campaign`, `ready` (the current-phase node ids that are neither
-recorded nor running), `nodes` (the bounded definition of each ready node:
-`id`, `dir`, `label`, `goal`, and `tasks`), and `worktree` (the campaign
-worktree path, or null before `open`). It also returns `phase` (the current
-phase index), `paused`, `pause_reason`, and `budget`.
+recorded nor running), `nodes` (the definition of each ready node: `id`, `dir`,
+`label`, `goal`, and `tasks`), `dag` (the plan file), and `worktree` (the
+campaign worktree path, or null before `open`). It also returns `phase` (the
+current phase index), `paused`, `pause_reason`, and `budget`.
 
-The workflow resource polls this verb, so its
-fields are the loop contract. The phase is the one scheduling gate. Every
-dependency lives in an earlier phase. A node is ready once the engine reaches
-its phase, and the node is neither recorded nor running. Sliceme scopes the
-result to the current phase, so a caller spawns and records one phase per call.
-A missing DAG reports no ready nodes. The workflow has no file access, so the
-`nodes` and `worktree` fields let a worker start in the campaign worktree
-without reading the git-ignored `.sliceme/` state.
+The workflow resource polls this verb, so its fields are the loop contract. The
+phase is the one scheduling gate. Every dependency lives in an earlier phase. A
+node is ready once the engine reaches its phase, and the node is neither
+recorded nor running. Sliceme scopes the result to the current phase, so a
+caller spawns and records one phase per call. A missing DAG reports no ready
+nodes.
+
+`--brief` leaves `goal` and `tasks` out of each `nodes` entry. The workflow host
+returns at most 4096 bytes of standard output, and one detailed node can exceed
+that, so the resource reads the brief form. The worker then reads its own node
+from the `dag` file, which is the only file it reads under `.sliceme/`.
 
 ### `plan`
 

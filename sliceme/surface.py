@@ -112,7 +112,14 @@ ACTIONS: tuple[Action, ...] = (
     Action(
         name="ready",
         summary="current-phase nodes ready to spawn, the phase index, and paused",
-        params=(Param("campaign", "string", CAMPAIGN_HELP),),
+        params=(
+            Param("campaign", "string", CAMPAIGN_HELP),
+            Param(
+                "brief",
+                "boolean",
+                "omit the node goal and tasks and name the plan file in `dag`",
+            ),
+        ),
     ),
     Action(
         name="plan",
@@ -295,7 +302,7 @@ def _dispatch_plan(service: "Service", p: dict[str, Any]) -> Any:
 
 
 def _dispatch_ready(service: "Service", p: dict[str, Any]) -> Any:
-    return service.ready()
+    return service.ready(brief=bool(p.get("brief")))
 
 
 def _dispatch_budget(service: "Service", p: dict[str, Any]) -> Any:
