@@ -26,9 +26,11 @@ never author the same files.
   and opens one pull request against the base branch (`main`). The `local`
   mode merges the work branch into the local base branch, and the user pushes
   it later. Sliceme never pushes the default branch.
-- **Deterministic evidence** — the engine writes the campaign commits, checks,
-  diffs, and worker logs to one evidence document. The document is the pull
-  request body. There is no narrative agent.
+- **Summary-first description** — the engine writes the pull request
+  description from the campaign commits and checks. It opens with the change
+  summary and the verification, and it takes an optional coordinator
+  narrative. The complete evidence document stays local. There is no narrative
+  agent.
 - **Two workflow resources** — the `sliceme.plan` resource owns the bounded
   planner re-pass loop, and the `sliceme.campaign` resource owns the campaign
   loop. The extension registers both, plus the plan and delivery steps.
@@ -64,7 +66,8 @@ sliceme record                    commit the finished nodes as per-node commits
 sliceme check                     run the combined-tree checks for the phase
 sliceme report                    write the deterministic campaign report
 sliceme evidence                  write the deterministic evidence document
-sliceme deliver --confirm --mode MODE   deliver: pull_request (push + PR) or local (merge the base branch)
+sliceme deliver --confirm --mode MODE [--narrative TEXT]
+                                    deliver: pull_request (push + PR) or local (merge the base branch)
 ```
 
 ## Docs

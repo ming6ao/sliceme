@@ -30,6 +30,7 @@ class DeliveryVerbs:
         confirm: bool = False,
         actor: str | None = None,
         note: str | None = None,
+        narrative: str | None = None,
     ) -> dict[str, Any]:
         """Deliver the campaign with the selected mode.
 
@@ -40,7 +41,8 @@ class DeliveryVerbs:
         there is no separate approve step.  ``confirm`` is the human
         confirmation token: delivery refuses without it.  ``actor`` and
         ``note`` are recorded on the approval row.  The campaign branch is
-        never the default branch and there is no override.
+        never the default branch and there is no override.  ``narrative`` is
+        the coordinator's summary and it leads the pull request body.
         """
         if cleanup not in {"none", "worktrees", "all"}:
             raise SlicemeError("cleanup must be one of: none, worktrees, all")
@@ -74,6 +76,7 @@ class DeliveryVerbs:
                     source=source,
                     run_checks_flag=run_checks_flag,
                     mode=resolved_mode,
+                    narrative=narrative,
                 )
                 succeeded = bool(results) and all(
                     result.status in {"delivered", "already_contained"}
@@ -169,7 +172,8 @@ class DeliveryVerbs:
 
         The engine writes ``.sliceme/<key>.evidence.json`` (the full check
         output) and ``.sliceme/<key>.evidence.md`` (the bounded output).  The
-        Markdown document is the pull request body.  This action is not a gate.
+        Markdown document is the local record of the campaign, and delivery
+        writes the shorter pull request body.  This action is not a gate.
         """
         return campaign.write_evidence(
             self.root,

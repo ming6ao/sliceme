@@ -33,8 +33,9 @@ The engine keeps one durable store and two files.
 - **The report.** `.sliceme/<branch-key>.report.md`, written by
   `report`.
 - **The evidence document.** `.sliceme/<branch-key>.evidence.json` (the complete
-  evidence) and `.sliceme/<branch-key>.evidence.md` (the bounded Markdown that
-  becomes the pull request body), written by `evidence`.
+  evidence) and `.sliceme/<branch-key>.evidence.md` (the bounded Markdown),
+  written by `evidence`. The pull request body is the shorter summary document,
+  not the evidence document.
 
 The engine keeps no per-child progress file, no `events.jsonl`, and no
 heartbeat. pi-subagents owns the live child status, the events, and the control

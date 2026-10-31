@@ -300,13 +300,16 @@ def deliver_pull_request(
     campaign: str | None = None,
     source: str | None = None,
     run_checks_flag: bool = True,
+    narrative: str | None = None,
 ) -> list[DeliveryResult]:
     """Push the campaign worktree branch and open the delivery pull request.
 
     Called once, after every phase is recorded and the user confirmed the campaign.
     The pull request head is the campaign worktree branch.  The pull request
     base is the delivery base (the repository default branch).  The campaign
-    branch is never the default branch: there is no override.
+    branch is never the default branch: there is no override.  ``narrative`` is
+    the coordinator's summary, and it leads the pull request body under the
+    deterministic summary.
     """
     campaign_branch = target_branch_of(config)
     if is_default_branch(root, campaign_branch, config):
@@ -384,7 +387,7 @@ def deliver_pull_request(
         from .campaign import pull_request_content
 
         title, body = pull_request_content(
-            root, config, store, campaign=campaign
+            root, config, store, campaign=campaign, narrative=narrative
         )
         found = pullrequest.create(
             root, head=source, base=base, title=title, body=body
@@ -409,12 +412,14 @@ def deliver(
     source: str | None = None,
     run_checks_flag: bool = True,
     mode: str | None = None,
+    narrative: str | None = None,
 ) -> list[DeliveryResult]:
     """Deliver the campaign with the selected mode.
 
     ``local`` merges the campaign branch into the local base branch and stops.
     ``pull_request`` pushes the branch and opens a pull request.  Both modes
-    keep the campaign branch and the campaign evidence.
+    keep the campaign branch and the campaign evidence.  ``narrative`` reaches
+    the pull request body only, so the local mode ignores it.
     """
     resolved = resolve_delivery_mode(config, mode=mode)
     if resolved == "local":
@@ -433,6 +438,7 @@ def deliver(
         campaign=campaign,
         source=source,
         run_checks_flag=run_checks_flag,
+        narrative=narrative,
     )
 
 

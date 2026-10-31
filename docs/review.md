@@ -103,6 +103,7 @@ Sliceme folds the approval into `deliver`. There is no separate approve step.
 
 ```bash
 sliceme deliver --confirm [--actor A] [--note TEXT] [--mode MODE]
+                 [--narrative TEXT]
 ```
 
 - Without `--confirm`, `deliver` refuses with a `not_confirmed` finding.
@@ -115,12 +116,12 @@ sliceme deliver --confirm [--actor A] [--note TEXT] [--mode MODE]
   audit evidence.
 
 The coordinator prompts for confirmation one time, after the last phase. It
-writes the evidence and the report. It shows the evidence summary and the
-delivery details to the user, then asks for one confirmation. The details are
-the selected mode, the branches, and the title for a pull request. On a
-confirmation it runs `deliver --confirm`; on a decline it stops and keeps the
-campaign for a later try. The confirmation is the only pause; suspension stays
-an explicit user command.
+writes the evidence and the report. It shows the summary and the delivery
+details to the user, then asks for one confirmation. The details are the
+selected mode, the branches, and the title for a pull request. On a
+confirmation it runs `deliver --confirm --narrative TEXT`; on a decline it
+stops and keeps the campaign for a later try. The confirmation is the only
+pause; suspension stays an explicit user command.
 
 ## 6. The report
 
@@ -134,8 +135,30 @@ records, and the newest check per record. A node with a record shows
 `recorded`, because the record is the durable evidence that the node
 finished. A node with no record shows the session descriptor status, which
 is the only place a suspended node's `running` status lives.
-`--narrative` appends the coordinator's summary. The evidence document is the
-body of the delivery pull request; the report stays reviewable next to it.
+`--narrative` adds the coordinator's summary under the leading summary. The
+report leads with the summary, then the change rows, then the verification, and
+then the complete detail: the nodes, the per-commit evidence, and the artifact
+paths.
+
+### 6.1 The pull request body
+
+The body of the delivery pull request is the summary document. The engine
+writes it from the campaign state at delivery time:
+
+- **Summary**: the deterministic digest (the design, the commit and node
+  counts, and the whole-campaign diffstat) and the `--narrative` text.
+- **What changed**: one row per campaign commit with the short hash, the
+  owned directory, the commit subject, and the diffstat.
+- **Verification**: one row per recorded check with the status, the duration,
+  the fingerprint, the commands that ran, and the commit range the checked
+  tree covers. A trailing list names the commits that no check covers.
+
+The body carries no node goals, no task lists, no check output, no worker
+logs, and no local paths. A reviewer reads the diff for that detail. The
+complete record stays in `.sliceme/<branch-key>.evidence.md` and
+`.sliceme/<branch-key>.evidence.json`.
+
+The footer names the campaign branch and the delivery base.
 
 ## 7. Delivery
 

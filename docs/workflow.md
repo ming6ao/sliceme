@@ -157,8 +157,9 @@ shows the summary to the user, then runs:
 
 ```text
 sliceme evidence                    write the deterministic evidence document
-sliceme report                      the deterministic report (--narrative appends the summary)
-sliceme deliver --confirm [--mode MODE]  pull_request: push + open a PR against main
+sliceme report --narrative TEXT     the report and the coordinator's summary
+sliceme deliver --confirm [--mode MODE] [--narrative TEXT]
+                                    pull_request: push + open a PR against main
                                     local: merge the local base branch
 ```
 
@@ -196,7 +197,7 @@ equals the default branch.
 | `doctor` | check git, `config.json`, and `state.db` health |
 | `ready` | the current-phase ready node ids, the phase index, and `paused`; `brief` omits the node text and names the plan file |
 | `plan` | the design's `sliceme-campaigns` split joined with the registry state, plus the next entry |
-| `deliver` | confirm and deliver the campaign; `confirm` records the one campaign approval; `mode` selects `pull_request` (push + PR) or `local` (merge the local base branch); `actor` and `note` join the approval row; `source`, `cleanup`, `no_checks` |
+| `deliver` | confirm and deliver the campaign; `confirm` records the one campaign approval; `mode` selects `pull_request` (push + PR) or `local` (merge the local base branch); `narrative` is the summary paragraph of the pull request body; `actor` and `note` join the approval row; `source`, `cleanup`, `no_checks` |
 | `check` | run the one combined-tree check runner for the current phase |
 | `open` | create or reuse the campaign worktree |
 | `record` | record the current phase: conformance + per-node commits |

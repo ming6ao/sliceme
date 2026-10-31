@@ -118,7 +118,17 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	check: ["phase", "refresh", "campaign"],
 	report: ["narrative", "design", "campaign"],
 	evidence: ["design", "campaign"],
-	deliver: ["source", "mode", "confirm", "actor", "note", "cleanup", "no_checks", "campaign"],
+	deliver: [
+		"source",
+		"mode",
+		"confirm",
+		"actor",
+		"note",
+		"narrative",
+		"cleanup",
+		"no_checks",
+		"campaign",
+	],
 };
 
 /** Render one engine verb plus its selected params as CLI arguments. */
@@ -588,12 +598,14 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				"needs the `budget` action to raise the cap before a resume; do not resume a " +
 				"budget-stopped campaign without it.",
 			"After the campaign resource returns `complete`, run `evidence`, then " +
-				"run `report`. A `capped` return is not complete: run the resource again before " +
-				"`evidence`. Show the evidence summary and the delivery details to the user: " +
-				"for the `pull_request` mode the head branch, the base `main`, and the title; " +
-				"for the `local` mode the base branch and the coming local merge. Ask for " +
-				"confirmation one time. On a confirmation run `deliver` with `confirm: true` and the " +
-				"selected `mode`; on a decline stop and keep the campaign for a later attempt.",
+				"run `report` with `narrative`: a short paragraph that says what the campaign " +
+				"changed and how it verified the change. A `capped` return is not complete: run " +
+				"the resource again before `evidence`. Show the summary and the delivery details " +
+				"to the user: for the `pull_request` mode the head branch, the base `main`, and " +
+				"the title; for the `local` mode the base branch and the coming local merge. Ask " +
+				"for confirmation one time. On a confirmation run `deliver` with `confirm: true`, " +
+				"the selected `mode`, and the same `narrative`, so the pull request description " +
+				"opens with that summary; on a decline stop and keep the campaign for a later attempt.",
 			"The delivery mode is `pull_request` (push the branch and open a pull request) " +
 				"or `local` (merge the campaign branch into the local base branch and stop, " +
 				"so the user pushes later). The plane default comes from `start` with `mode`; " +
@@ -653,7 +665,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 						"record: drop the records at or after this phase, reset the worktree, and leave the cursor there",
 				}),
 			),
-			narrative: Type.Optional(Type.String({ description: "report: what-changed text" })),
+			narrative: Type.Optional(
+				Type.String({
+					description:
+						"report/deliver: the summary paragraph of the report and the pull request body",
+				}),
+			),
 			note: Type.Optional(Type.String({ description: "deliver: approval note" })),
 			actor: Type.Optional(Type.String({ description: "deliver: who confirmed the delivery" })),
 			source: Type.Optional(Type.String({ description: "deliver: worktree branch" })),

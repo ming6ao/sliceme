@@ -12,9 +12,13 @@ never committed to the repository.  The adapter-written session descriptor is
 the one place a suspended node's status lives; there is no ``state.json``.
 
 This module also renders the deterministic report skeleton
-(``.sliceme/<branch-key>.report.md``): design ref, feature branch, nodes,
-worker ids, commits, fingerprints/verifications, and artifact paths, with an
-optional narrative appended by the coordinator.
+(``.sliceme/<branch-key>.report.md``) and the body of the delivery pull
+request.  Both documents lead with a summary and a verification list.  The
+report then carries every detail: the design ref, the feature branch, the
+nodes, the commits, the fingerprints, and the artifact paths.  The pull
+request body carries only the summary, the per-commit change rows, and the
+checks, because a reviewer reads the diff for the rest.  The optional
+narrative is the coordinator's prose under the summary.
 """
 
 from __future__ import annotations
@@ -207,6 +211,7 @@ __all__ = [
     "node_status",
     "pull_request_content",
     "render",
+    "render_pull_request",
     "report_path",
     "session_path",
     "worker_log_path",
@@ -221,13 +226,6 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Deterministic campaign report
 # ---------------------------------------------------------------------------
-def _verification_line(verification: dict[str, Any]) -> str:
-    source = verification.get("source") or "plane"
-    status = verification.get("status")
-    fingerprint = (verification.get("fingerprint") or "")[:12]
-    return f"{source}: {status} (fp {fingerprint})"
-
-
 def _commands_text(commands: Any) -> str:
     """One check command vector as a readable ``a && b`` line."""
     if isinstance(commands, str):
@@ -252,31 +250,73 @@ def _bounded_output(output: Any) -> str:
     return packet.bound_output(str(output or ""))
 
 
+def _count(number: int, noun: str) -> str:
+    """One count with its noun, pluralized by the count."""
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
 def evidence_narrative(skeleton: dict[str, Any]) -> str:
-    """The deterministic engine-written narrative of the evidence document.
+    """The deterministic summary paragraph of the campaign documents.
 
     The engine writes this summary; there is no narrative agent.  It names the
-    commit count, the nodes, and the file change totals.
+    design, the commit count, the node count, and the whole-campaign change
+    totals.  The ``What changed`` rows carry the detail, and the optional
+    narrative carries the coordinator's prose.
     """
     commits = skeleton.get("commits") or []
-    files = 0
-    additions = 0
-    deletions = 0
+    totals = skeleton.get("totals") or {}
     nodes: list[str] = []
     for commit in commits:
-        diffstat = commit.get("diffstat") or {}
-        files += int(diffstat.get("files") or 0)
-        additions += int(diffstat.get("additions") or 0)
-        deletions += int(diffstat.get("deletions") or 0)
         node = commit.get("node")
         if node and node not in nodes:
             nodes.append(str(node))
-    nodes_text = ", ".join(nodes) if nodes else "(none)"
-    return (
-        f"The engine recorded {len(commits)} campaign commit(s) across "
-        f"{len(nodes)} node(s): {nodes_text}. The campaign changed {files} file(s), "
-        f"with {additions} addition(s) and {deletions} deletion(s)."
+    sentences: list[str] = []
+    design = skeleton.get("design")
+    if design:
+        sentences.append(f"The campaign implements `{design}`.")
+    sentences.append(
+        f"The campaign records {_count(len(commits), 'commit')} across "
+        f"{_count(len(nodes), 'node')}."
     )
+    if totals:
+        sentences.append(
+            "The change set is {files} (+{additions} -{deletions}).".format(
+                files=_count(int(totals.get("files") or 0), "file"),
+                additions=int(totals.get("additions") or 0),
+                deletions=int(totals.get("deletions") or 0),
+            )
+        )
+    return " ".join(sentences)
+
+
+def _duration_text(duration: Any) -> str:
+    """One check duration as a short ``N.Ns`` text."""
+    try:
+        return f"{float(duration):.1f}s"
+    except (TypeError, ValueError):
+        return "?s"
+
+
+def _command_list(commands: Any) -> list[str]:
+    """One check command vector as a list of command strings."""
+    if isinstance(commands, str):
+        commands = _json_value(commands)
+    if isinstance(commands, list):
+        return [str(item) for item in commands if str(item).strip()]
+    return [str(commands)] if commands else []
+
+
+def _split_subject(subject: str) -> tuple[str | None, str]:
+    """Split a commit subject ``dir: text`` into the directory and the text.
+
+    A worker names its directory first.  The prefix counts as a directory only
+    when it holds no space, so an ordinary sentence keeps its whole subject.
+    """
+    text = " ".join(str(subject or "").split())
+    head, sep, tail = text.partition(": ")
+    if sep and head and " " not in head and len(head) <= 60:
+        return head, tail
+    return None, text
 
 
 #: The worker-log lines that the evidence document keeps from the log end.
@@ -386,6 +426,59 @@ def _commit_evidence(
     return rows
 
 
+def _totals(root: Path, config: dict[str, Any], branch: str) -> dict[str, Any]:
+    """The whole-campaign change totals, from one diff against the base.
+
+    A sum of per-commit diffstats counts a file twice when two nodes touch it.
+    One diff of the delivery base against the campaign tip is the true total.
+    """
+    from .review import diff, packet  # lazy: packet imports this module
+
+    base = config.get("base_branch") or config.get("default_branch") or "main"
+    source = config.get("work_branch") or branch
+    base_tip = _rev(root, base)
+    source_tip = _rev(root, source)
+    if not base_tip or not source_tip:
+        return {}
+    return packet.diffstat(diff.file_index(root, base_tip, source_tip))
+
+
+def _phase_checks(
+    store: Store, commits: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """One verification row for each check the campaign ran, oldest first.
+
+    Only a verdict whose commit is a campaign commit counts, so a report never
+    shows another campaign's check.  The commit filter is the whole test: an
+    older plane wrote a verdict before the campaign column existed, and a
+    commit belongs to one campaign only.  A repeated check of one phase
+    replaces the earlier row, because the newest terminal verdict is the
+    evidence.  The ``covered`` count is how many campaign commits the checked
+    tree contains.
+    """
+    from .store import VERDICT_STATUSES
+
+    index_of = {str(row.get("hash")): i for i, row in enumerate(commits)}
+    newest: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for row in store.list_verdicts(statuses=sorted(VERDICT_STATUSES)):
+        commit = str(row.get("commit_ref") or "")
+        if commit not in index_of:
+            continue
+        newest[(row.get("phase"), row.get("source"))] = {
+            "phase": row.get("phase"),
+            "source": row.get("source"),
+            "status": row.get("status"),
+            "duration": row.get("duration"),
+            "fingerprint": row.get("fingerprint"),
+            "commands": _json_value(row.get("commands")),
+            "commit": commit,
+            "covered": index_of[commit] + 1,
+        }
+    rows = list(newest.values())
+    rows.sort(key=lambda item: (item.get("phase") is None, item.get("phase") or 0))
+    return rows
+
+
 def build_skeleton(
     root: Path,
     config: dict[str, Any],
@@ -444,6 +537,7 @@ def build_skeleton(
             }
         )
 
+    commits = _commit_evidence(root, config, store, nodes, records, branch)
     return {
         "campaign": (dag or {}).get("campaign") or config.get("campaign", {}).get("name"),
         "design": design or (dag or {}).get("design") or config.get("campaign", {}).get("design"),
@@ -459,11 +553,114 @@ def build_skeleton(
         },
         "report_path": str(report_path(root, branch)),
         "nodes": per_node,
-        "commits": _commit_evidence(root, config, store, nodes, records, branch),
+        "commits": commits,
+        "totals": _totals(root, config, branch),
+        "checks": _phase_checks(store, commits),
     }
 
 
+def _summary_block(skeleton: dict[str, Any], narrative: str | None) -> list[str]:
+    """The leading summary: the deterministic digest, then the narrative."""
+    lines = ["## Summary", "", evidence_narrative(skeleton), ""]
+    if narrative and narrative.strip():
+        lines.append(narrative.strip())
+        lines.append("")
+    return lines
+
+
+def _directory_label(directory: Any) -> str | None:
+    """A node directory as a display label; the repository root is ``None``."""
+    text = str(directory or "").strip().strip("/")
+    if text in {"", ".", "./"}:
+        return None
+    return text
+
+
+def _changes_block(skeleton: dict[str, Any]) -> list[str]:
+    """One row per campaign commit: the directory, the subject, the diffstat."""
+    lines = ["## What changed", ""]
+    commits = skeleton.get("commits") or []
+    if not commits:
+        lines.extend(["(no campaign commits)", ""])
+        return lines
+    for commit in commits:
+        short = commit.get("short") or str(commit.get("hash") or "")[:12]
+        directory = _directory_label(commit.get("dir"))
+        subject = str(commit.get("subject") or "")
+        prefix, tail = _split_subject(subject)
+        names_the_directory = bool(prefix) and (
+            directory is None
+            or prefix == directory
+            or prefix.startswith(directory + "/")
+        )
+        if names_the_directory:
+            label, text = directory or prefix or "", tail
+        else:
+            label, text = directory or prefix or "(repository root)", subject
+        if not text:
+            text = "(no subject)"
+        diffstat = commit.get("diffstat") or {}
+        lines.append(
+            "- `{short}` — **{label}**: {text} ("
+            "{files}, +{additions} -{deletions})".format(
+                short=short,
+                label=label,
+                text=text,
+                files=_count(int(diffstat.get("files") or 0), "file"),
+                additions=int(diffstat.get("additions") or 0),
+                deletions=int(diffstat.get("deletions") or 0),
+            )
+        )
+    lines.append("")
+    return lines
+
+
+def _verification_block(skeleton: dict[str, Any]) -> list[str]:
+    """One row per recorded check: the status, the commands, the coverage."""
+    lines = ["## Verification", ""]
+    checks = skeleton.get("checks") or []
+    commits = skeleton.get("commits") or []
+    if not checks:
+        lines.extend(["(no check was recorded)", ""])
+        return lines
+    covered = 0
+    for check in checks:
+        phase = check.get("phase")
+        where = f"Phase {phase}" if phase is not None else str(
+            check.get("source") or "check"
+        )
+        parts = [f"- **{where}**: {check.get('status')}"]
+        if check.get("duration") is not None:
+            parts.append(f"in {_duration_text(check.get('duration'))}")
+        fingerprint = str(check.get("fingerprint") or "")[:12]
+        if fingerprint:
+            parts.append(f"(fingerprint `{fingerprint}`)")
+        count = int(check.get("covered") or 0)
+        covered = max(covered, count)
+        if count == 1:
+            parts.append("covering commit 1")
+        elif count > 1:
+            parts.append(f"covering commits 1-{count}")
+        lines.append(" ".join(parts))
+        for command in _command_list(check.get("commands")):
+            lines.append(f"  - `{command}`")
+    missing = commits[covered:]
+    if missing:
+        names = [
+            f"`{row.get('short') or str(row.get('hash') or '')[:12]}` {row.get('subject') or ''}".strip()
+            for row in missing
+        ]
+        lines.append("")
+        lines.append("No check covers these commits:")
+        lines.append("")
+        for name in names:
+            lines.append(f"- {name}")
+    lines.append("")
+    return lines
+
+
 def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
+    """The campaign report: the summary first, then the complete detail."""
     lines: list[str] = []
     lines.append("# Campaign report: " + str(skeleton.get("campaign") or "(unnamed)"))
     lines.append("")
@@ -473,6 +670,9 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
     if skeleton.get("concurrency") is not None:
         lines.append(f"- Concurrency: {skeleton['concurrency']}")
     lines.append("")
+    lines.extend(_summary_block(skeleton, narrative))
+    lines.extend(_changes_block(skeleton))
+    lines.extend(_verification_block(skeleton))
     lines.append("## Nodes")
     lines.append("")
     lines.append("| node | status | unit | branch | record | commit | verification |")
@@ -496,13 +696,6 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
                 verification=verification_text,
             )
         )
-    lines.append("")
-    lines.append("## Verifications")
-    lines.append("")
-    for node in skeleton.get("nodes", []):
-        verification = node.get("verification")
-        if verification:
-            lines.append(f"- {node['node']}: " + _verification_line(verification))
     lines.append("")
     lines.append("## Evidence")
     lines.append("")
@@ -568,10 +761,6 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
     for name, path in sorted((skeleton.get("artifact_paths") or {}).items()):
         lines.append(f"- {name}: {path}")
     lines.append("")
-    lines.append("## What changed / risks")
-    lines.append("")
-    lines.append(narrative.strip() if narrative and narrative.strip() else "(no narrative supplied)")
-    lines.append("")
     return "\n".join(lines)
 
 
@@ -596,6 +785,44 @@ def write_report(
     return {"path": str(path), "content": content, "skeleton": skeleton}
 
 
+def render_pull_request(
+    skeleton: dict[str, Any], narrative: str | None = None
+) -> str:
+    """The body of the delivery pull request.
+
+    The body answers two reviewer questions: what changed, and how the campaign
+    verified it.  It carries no goals, no worker logs, no local paths, and no
+    check output.  The complete evidence stays in the local evidence document,
+    because a reviewer reads the diff for the detail.
+    """
+    lines = _summary_block(skeleton, narrative)
+    lines.extend(_changes_block(skeleton))
+    lines.extend(_verification_block(skeleton))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_evidence(
+    root: Path, branch: str, skeleton: dict[str, Any]
+) -> dict[str, Any]:
+    """Write both evidence files for one already-built skeleton.
+
+    The digest is the summary of the document itself, so the evidence carries
+    no narrative: the narrative belongs to the report and the pull request.
+    """
+    content = render(skeleton)
+    json_path = evidence_json_path(root, branch)
+    md_path = evidence_md_path(root, branch)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(json_path, skeleton)
+    md_path.write_text(content, encoding="utf-8")
+    return {
+        "path": str(md_path),
+        "json_path": str(json_path),
+        "content": content,
+        "evidence": skeleton,
+    }
+
+
 def write_evidence(
     root: Path,
     config: dict[str, Any],
@@ -610,25 +837,15 @@ def write_evidence(
     ``.sliceme/<key>.evidence.json`` holds the complete evidence: the full
     check output, the changed files, and the diffstat for every commit.
     ``.sliceme/<key>.evidence.md`` holds the same evidence with the check
-    output bounded, so the document stays a manageable size.  The Markdown
-    document is the pull request body.  The evidence is not a gate.
+    output bounded, so the document stays a manageable size.  The evidence is
+    the local record of the campaign, and it is not a gate.  The pull request
+    body is the shorter summary document (:func:`render_pull_request`).
     """
     branch = branch or config_branch(config)
     skeleton = build_skeleton(
         root, config, store, branch=branch, campaign=campaign, design=design
     )
-    content = render(skeleton, evidence_narrative(skeleton))
-    json_path = evidence_json_path(root, branch)
-    md_path = evidence_md_path(root, branch)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(json_path, skeleton)
-    md_path.write_text(content, encoding="utf-8")
-    return {
-        "path": str(md_path),
-        "json_path": str(json_path),
-        "content": content,
-        "evidence": skeleton,
-    }
+    return _write_evidence(root, branch, skeleton)
 
 
 def pull_request_content(
@@ -637,21 +854,20 @@ def pull_request_content(
     store: Store,
     *,
     campaign: str | None = None,
+    narrative: str | None = None,
 ) -> tuple[str, str]:
     """The title and body of the delivery pull request.
 
-    The body is the deterministic evidence document.  When it is missing,
-    generate it first.  A short footer names the campaign branch and the
-    delivery base.
+    The body is the summary and the verification (:func:`render_pull_request`),
+    with the coordinator's narrative when it passed one.  Delivery also
+    refreshes the local evidence document, so the complete record stays beside
+    the campaign.  A short footer names the campaign branch and the delivery
+    base.
     """
     branch = config_branch(config)
-    path = evidence_md_path(root, branch)
-    if not path.is_file():
-        write_evidence(root, config, store, branch=branch, campaign=campaign)
-    try:
-        body = path.read_text(encoding="utf-8")
-    except OSError:
-        body = ""
+    skeleton = build_skeleton(root, config, store, branch=branch, campaign=campaign)
+    _write_evidence(root, branch, skeleton)
+    body = render_pull_request(skeleton, narrative)
     name = (
         config.get("campaign_name")
         or (load_dag(root, branch) or {}).get("campaign")

@@ -289,8 +289,8 @@ a `pull_request` delivery and `landed` for a `local` delivery. It records
   Sliceme keeps no `events.jsonl`, no per-node heartbeat, and no `jobs` table.
 - Worker logs are files, one per node.
 - The report and the evidence document are Markdown files. The report is
-  included in the review packet; the evidence document is the pull request
-  body.
+  included in the review packet; the evidence document is the local, complete
+  record. The pull request body is the shorter summary and verification.
 
 ## 11. Suspend/resume
 

@@ -24,7 +24,7 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase node ids, the node definitions, the plan file, the worktree path, the phase index, `paused`, and `pause_reason`; `--brief` leaves out the node text. |
 | `plan` | Parse the design's campaign split and join the registry state. |
-| `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
+| `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. `--narrative` is the summary paragraph of the pull request body. |
 | `check` | Run the synchronous combined-tree checks for a recorded phase (`--phase`), with `--refresh` to bypass the cache. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase, or reopen a recorded phase with `--reopen`. |
@@ -221,6 +221,7 @@ one owner per directory inside one campaign. See
 
 ```bash
 sliceme deliver --confirm [--source BRANCH] [--mode pull_request|local]
+                 [--narrative TEXT]
                    [--actor A] [--note TEXT]
                    [--cleanup none|worktrees|all] [--no-checks] [--campaign REF]
 ```
@@ -239,8 +240,9 @@ needs a new confirmation. The void row stays for audit evidence.
 - The `pull_request` mode pushes the work branch (`--source`, default the
   recorded `work_branch`) to the remote (`policy.remote`, default `origin`).
   It opens one pull request against the **base branch** (the repository
-  default branch, `main`) with the `gh` program. The body is the evidence
-  document.
+  default branch, `main`) with the `gh` program. The body is the summary and
+  the verification (see `docs/review.md` §6). The complete evidence document
+  stays local.
 - The `local` mode merges the work branch into the local **base branch** with
   one merge commit. It pushes nothing and calls no forge. The user pushes the
   base branch later.
@@ -362,7 +364,9 @@ sliceme evidence [--design REF] [--campaign REF]
 Write the deterministic evidence document for the campaign. The engine writes
 `.sliceme/<branch-key>.evidence.json` (the complete evidence, with the full check
 output) and `.sliceme/<branch-key>.evidence.md` (the check output is bounded).
-The Markdown document is the pull request body. The evidence holds:
+The Markdown document is the local, complete record of the campaign. The
+delivery pull request body is the shorter summary document (see `deliver`).
+The evidence holds:
 
 - the design reference, the work branch, and the base branch;
 - every campaign commit, oldest first;
@@ -373,8 +377,8 @@ The Markdown document is the pull request body. The evidence holds:
 - the worker log path, and the tail of the log when a writer recorded one;
 - the artifact paths and the report path.
 
-The narrative is deterministic and the engine writes it; there is no narrative
-agent. The evidence is not a gate.
+The summary of the evidence is deterministic and the engine writes it; there
+is no narrative agent. The evidence is not a gate.
 
 ### `report`
 
@@ -446,7 +450,7 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
   feat--x.dag.json                 # canonical plan (never committed)
   feat--x.report.md                # deterministic report (kept on cleanup)
   feat--x.evidence.json            # complete evidence (full check output)
-  feat--x.evidence.md              # human evidence; the pull request body
+  feat--x.evidence.md              # human evidence (the complete record)
   feat--x.session.json             # adapter-written suspend/resume descriptor
   feat--x.control.json             # cooperative pause flag (reason: user | budget)
   feat--x.budget.json              # adapter-written budget spend (active seconds, cost)

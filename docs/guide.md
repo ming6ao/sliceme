@@ -290,7 +290,7 @@ resource loop
   9. caps?    -> stop      phaseCap or nodeCap reached
         │  repeat
         ▼
-evidence + report ──► user confirms ──► deliver --confirm
+evidence + report ──► user confirms ──► deliver --confirm --narrative TEXT
                                                         (records the one approval,
                                                          pull_request: push the work branch + open a PR
                                                          local: merge the local base branch)
@@ -321,15 +321,18 @@ evidence + report ──► user confirms ──► deliver --confirm
    pi-subagents acceptance gate would test the mixed phase worktree.
 7. **`evidence`** writes the deterministic evidence document (the commits, the
    checks, the diffs, and the worker logs). The coordinator runs it after the
-   resource returns `complete`; the Markdown document is the pull request body.
+   resource returns `complete`. The document is the local, complete record.
 8. **`report`** writes the deterministic skeleton plus the narrative of
    the coordinator. The coordinator runs it before the gate, so the report is
-   reviewable. The coordinator shows the evidence summary and the delivery
+   reviewable. The coordinator shows the summary and the delivery
    details: for `pull_request` the head branch, the base `main`, and the title;
    for `local` the base branch and the coming local merge. The coordinator asks
    the user to confirm one time.
 9. **`deliver`** runs after every phase completes and the user confirms. The
-    `confirm` flag is the confirmation token. Delivery records the one
+    `confirm` flag is the confirmation token. The `narrative` value is the
+    summary paragraph of the pull request body, and the body also carries the
+    change rows and the verification. The body carries no goals, no worker
+    logs, and no check output. Delivery records the one
     campaign-level approval, runs the trusted checks, and then delivers in the
     selected mode. The `pull_request` mode pushes the work branch and opens one
     pull request against the base branch (`main`). The `local` mode merges the
@@ -434,8 +437,9 @@ record                        -> conformance-by-ownership -> per-node commits
 check                         -> the one check runner over the combined tree
 (no merge per phase)           -> open N+1 in the same worktree
 evidence + report             -> the deterministic evidence and report
-deliver --confirm             -> records the one campaign approval, then pushes the work branch
-                                 and opens a pull request against main
+deliver --confirm --narrative -> records the one campaign approval, then pushes the work branch
+                                 and opens a pull request against main. The body is the summary,
+                                 the change rows, and the verification.
 ```
 
 The recorder (`Service.record_phase`) stages the worktree and attributes every
@@ -525,10 +529,12 @@ resource launches the builtin `reviewer` for the phase review.
 Start a campaign with `/sliceme [DESIGN.md]` in pi. Run `start`, `plan`, and
 `open`, then start the `sliceme.campaign` resource with `async: true`.
 The resource drives `ready`, `record`, and `check`
-for each phase. When it returns `complete`, run `evidence` and `report`,
-show the summary and the pull request details to the user, and ask for
-confirmation one time. Stop at the human gates: an explicit suspension and the
-one confirmation before `deliver`.
+for each phase. When it returns `complete`, run `evidence`, then `report`
+with `narrative`: a short paragraph that says what the campaign changed and how
+it verified the change. Show the summary and the pull request details to the
+user, and ask for confirmation one time. Pass the same `narrative` to
+`deliver`. Stop at the human gates: an explicit suspension and the one
+confirmation before `deliver`.
 
 ## 8. Failure and resume
 

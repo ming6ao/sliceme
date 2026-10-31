@@ -1,9 +1,9 @@
-"""Pull request delivery: the forge call, the report body, and failure modes.
+"""Pull request delivery: the forge call, the summary body, and failure modes.
 
 The local merge path is gone.  Delivery pushes the campaign worktree branch and
 opens one pull request with ``gh``.  These tests pin the forge behavior, the
-report-backed body, and the fail-closed rule: a push or forge failure leaves the
-campaign working.
+summary description, and the fail-closed rule: a push or forge failure leaves
+the campaign working.
 """
 
 import json
@@ -106,19 +106,51 @@ class PullRequestCase(unittest.TestCase):
         self.assertIn(unit["branch"], self.remote_heads())
         self.assertEqual(self.pr_state(unit["branch"])["base"], "main")
 
-    def test_pr_body_is_the_evidence_document(self):
+    def test_pr_body_is_the_summary_and_the_verification(self):
         unit = self.record_one()
         self.svc.deliver(confirm=True)
         pr = self.pr_state(unit["branch"])
-        # The evidence document is the pull request body.  Delivery writes it
-        # when the coordinator did not.
+        body = pr["body"]
+        # The body answers two questions: what changed, and how it was checked.
+        self.assertIn("## Summary", body)
+        self.assertIn("## What changed", body)
+        self.assertIn("## Verification", body)
+        self.assertIn("**deliver**: passed", body)
+        self.assertIn("`true`", body)
+        self.assertIn("Campaign branch: `feat/x`", body)
+        self.assertIn("Delivery base: `main`", body)
+        self.assertEqual(pr["title"], "sliceme: pr")
+
+    def test_pr_body_carries_no_raw_evidence(self):
+        # A reviewer reads the diff for the detail.  The goals, the tasks, the
+        # check output, the worker logs, and the local paths stay out of the
+        # description; the local evidence document keeps them.
+        unit = self.record_one()
+        self.svc.deliver(confirm=True)
+        body = self.pr_state(unit["branch"])["body"]
+        self.assertNotIn("## Evidence", body)
+        self.assertNotIn("- Goal:", body)
+        self.assertNotIn("- Tasks:", body)
+        self.assertNotIn("- Changed files:", body)
+        self.assertNotIn(".worker_", body)
+        self.assertNotIn(".sliceme/", body)
+        self.assertNotIn("src/a/x.py", body)
+        self.assertNotIn("## Artifacts", body)
+        # The complete record is still written beside the campaign.
         evidence = self.root / ".sliceme" / "feat--x.evidence.md"
         self.assertTrue(evidence.is_file())
-        self.assertIn("## Evidence", pr["body"])
-        self.assertIn("Campaign branch: `feat/x`", pr["body"])
-        self.assertIn("Delivery base: `main`", pr["body"])
-        self.assertIn(unit["branch"], pr["body"])
-        self.assertEqual(pr["title"], "sliceme: pr")
+        self.assertIn("## Evidence", evidence.read_text(encoding="utf-8"))
+
+    def test_the_delivery_narrative_leads_the_pr_body(self):
+        unit = self.record_one()
+        summary = "Adds the second value and keeps the check green."
+        self.svc.deliver(confirm=True, narrative=summary)
+        body = self.pr_state(unit["branch"])["body"]
+        self.assertIn(summary, body)
+        # The digest stays, and the narrative follows it under one summary.
+        self.assertIn("The campaign records 1 commit across 1 node", body)
+        self.assertLess(body.index("The campaign records"), body.index(summary))
+        self.assertLess(body.index(summary), body.index("## What changed"))
 
     def test_missing_gh_is_a_clear_error(self):
         self.record_one()

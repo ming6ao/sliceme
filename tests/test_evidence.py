@@ -108,8 +108,52 @@ class EvidenceTests(EvidenceCase):
         self.assertEqual(commit["diffstat"]["deletions"], 1)
         self.assertEqual([row["path"] for row in commit["files"]], ["src/a.py"])
         self.assertTrue(commit["log"]["path"].endswith("feat--x.worker_w1.log"))
-        # The narrative is deterministic and the engine writes it.
-        self.assertIn("recorded 1 campaign commit(s)", result["content"])
+        # The digest is deterministic and the engine writes it.
+        self.assertIn("records 1 commit across 1 node", result["content"])
+        # The summary leads the document, and the full detail follows it.
+        self.assertLess(
+            result["content"].index("## Summary"),
+            result["content"].index("## What changed"),
+        )
+        self.assertLess(
+            result["content"].index("## Verification"),
+            result["content"].index("## Evidence"),
+        )
+
+    def test_the_digest_is_the_only_summary_of_the_evidence(self):
+        # The evidence carries no narrative, so the digest never repeats.
+        self.record()
+        result = self.svc.evidence()
+        self.assertEqual(result["content"].count("## Summary"), 1)
+        self.assertEqual(result["content"].count("The campaign records"), 1)
+
+    def test_the_check_rows_cover_the_campaign_commits(self):
+        self.record()
+        self.write_check("ok\n")
+        result = self.svc.evidence()
+        evidence = json.loads(Path(result["json_path"]).read_text())
+        self.assertEqual(len(evidence["checks"]), 1)
+        check = evidence["checks"][0]
+        self.assertEqual(check["source"], "phase:0")
+        self.assertEqual(check["status"], "passed")
+        self.assertEqual(check["commands"], ["true"])
+        self.assertEqual(check["covered"], 1)
+        self.assertIn("covering commit 1", result["content"])
+
+    def test_a_verdict_outside_the_campaign_is_not_evidence(self):
+        # A report never shows another campaign's check.
+        self.record()
+        self.svc.store.create_verdict(
+            fingerprint="fp-other",
+            source="phase:0",
+            commit_ref="0" * 40,
+            status="failed",
+            commands=["false"],
+        )
+        result = self.svc.evidence()
+        evidence = json.loads(Path(result["json_path"]).read_text())
+        self.assertEqual(evidence["checks"], [])
+        self.assertIn("(no check was recorded)", result["content"])
 
     def test_markdown_bounds_the_check_output_and_the_json_keeps_it(self):
         self.record()

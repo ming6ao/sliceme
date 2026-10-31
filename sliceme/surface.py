@@ -143,6 +143,11 @@ ACTIONS: tuple[Action, ...] = (
             Param("confirm", "boolean", "confirm the one campaign approval and deliver"),
             Param("actor", "string", "who confirmed the delivery"),
             Param("note", "string", "approval note"),
+            Param(
+                "narrative",
+                "string",
+                "deliver: the summary paragraph that leads the pull request body",
+            ),
             Param("cleanup", "string", "cleanup after delivery", choices=("none", "worktrees", "all")),
             Param("no_checks", "boolean", "skip the plane's trusted checks"),
             Param("campaign", "string", CAMPAIGN_HELP),
@@ -322,6 +327,7 @@ def _dispatch_deliver(service: "Service", p: dict[str, Any]) -> Any:
         confirm=bool(p.get("confirm")),
         actor=p.get("actor"),
         note=p.get("note"),
+        narrative=p.get("narrative"),
     )
 
 

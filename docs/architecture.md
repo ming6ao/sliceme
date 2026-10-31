@@ -184,7 +184,7 @@ flowchart LR
 | `doctor` | Check git, `config.json`, and `state.db` health. |
 | `ready` | The current-phase ready node ids, the phase index, `paused`, and `pause_reason`. |
 | `plan` | The design's campaign split joined with the registry state. |
-| `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. |
+| `deliver` | Confirm and deliver: `--confirm` records the one campaign approval, then `pull_request` pushes the work branch and opens a pull request; `local` merges the work branch into the local base branch. `--narrative` is the summary paragraph of the pull request body. |
 | `check` | The one combined-tree check runner for the current phase. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase: conformance + per-node commits. |
@@ -376,7 +376,7 @@ sequenceDiagram
         E-->>C: failed: pull request not opened
       else checks pass
         E->>G: git push origin source
-        E->>F: gh pr create (body = evidence document)
+        E->>F: gh pr create (body = summary + verification)
         E->>D: record=delivered, state=delivered
         E-->>C: delivered with the pull request URL
       end
@@ -442,7 +442,7 @@ erDiagram
   <branch-key>.dag.json            # canonical plan (never committed)
   <branch-key>.report.md           # deterministic report (kept on cleanup)
   <branch-key>.evidence.json       # complete evidence (full check output)
-  <branch-key>.evidence.md         # human evidence; the pull request body
+  <branch-key>.evidence.md         # human evidence (the complete record)
   <branch-key>.session.json        # adapter-written suspend/resume descriptor
   <branch-key>.control.json        # cooperative pause flag (reason: user | budget)
   <branch-key>.budget.json         # adapter-written budget spend (active seconds, cost)

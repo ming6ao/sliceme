@@ -181,6 +181,12 @@ class ReportTests(CampaignCase):
         self.assertIn("w1", first["content"])
         self.assertIn("Did the thing.", first["content"])
         self.assertEqual(Path(first["path"]).name, "feat--x.report.md")
+        # The report leads with the summary, then the detail follows it.
+        content = first["content"]
+        self.assertLess(content.index("## Summary"), content.index("## What changed"))
+        self.assertLess(content.index("## What changed"), content.index("## Verification"))
+        self.assertLess(content.index("## Verification"), content.index("## Nodes"))
+        self.assertLess(content.index("## Nodes"), content.index("## Evidence"))
 
     def test_status_exposes_campaign_fields(self):
         self.campaign_plane()
