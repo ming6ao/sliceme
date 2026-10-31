@@ -17,7 +17,8 @@ The database holds what git and the plane files cannot express quickly:
 
 - the work units and the commits they offer;
 - the one check runner's fingerprints and terminal results;
-- the campaign review decisions.
+- the campaign review decisions;
+- the timing steps of the campaign child runs.
 
 It deliberately does **not** hold the plan. `dag.json` is a file under
 `.sliceme/`; the plan is authoritative there, and the engine reads it. Node
@@ -216,6 +217,41 @@ legacy plane gets one row on first open. `Service.deliver` sets `delivered` for
 a `pull_request` delivery and `landed` for a `local` delivery. It records
 `pr_url` / `pr_number` for a pull request and `merge_commit` for a local merge.
 
+### 5.5 `timings`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `campaign` | TEXT | the owning campaign key |
+| `step_id` | TEXT NOT NULL | `run:thinking:<n>` or `run:tool:<call id>` |
+| `run` | TEXT | the pi-subagents run id |
+| `agent` | TEXT | `sliceme-planner`, `sliceme-worker`, or `reviewer` |
+| `child_index` | INTEGER NOT NULL DEFAULT 0 | the child index of the run |
+| `kind` | TEXT NOT NULL | `thinking` or `tool` |
+| `tool` | TEXT | the tool name for a tool step |
+| `command` | TEXT | the bounded command text (bash only) |
+| `command_truncated` | INTEGER NOT NULL DEFAULT 0 | 1 when the store cut the command |
+| `is_error` | INTEGER NOT NULL DEFAULT 0 | 1 for a failed tool call |
+| `duration` | REAL NOT NULL | measured seconds |
+| `started_at` | REAL | start time (epoch seconds) |
+| `ended_at` | REAL | end time (epoch seconds) |
+| `source` | TEXT | the child transcript path |
+| `created_at` | REAL NOT NULL | row write time |
+
+Unique key: `(campaign, step_id)`. Indexes: `idx_timings_campaign`,
+`idx_timings_kind(campaign, kind, duration)`.
+
+Created by `timings.ingest` from the pi-subagents child transcripts. The
+engine ingests at `record`, `check`, and `report`, so the rows survive the
+seven-day artifact cleanup. A thinking step is one assistant message with the
+model-call duration. A tool step is one `tool_start`/`tool_end` pair. The
+unique key makes a repeated ingest idempotent.
+
+Read by `timings.summarize` and `Service.report`. The rows are a derived
+snapshot, not child execution state: pi-subagents remains the owner of a live
+run. `gc` keeps the rows with the report, and `remove_campaign_artifacts`
+deletes them only when it removes the report.
+
 ## 6. Row lifecycle
 
 1. **Plane bootstrap.** `start` writes `.sliceme/config.json` and opens
@@ -287,6 +323,8 @@ a `pull_request` delivery and `landed` for a `local` delivery. It records
   `campaign_sessions` projection.
 - Child events, per-child progress, and run control belong to pi-subagents.
   Sliceme keeps no `events.jsonl`, no per-node heartbeat, and no `jobs` table.
+  The `timings` table is a derived snapshot of finished child steps, not a
+  second run-control plane.
 - Worker logs are files, one per node.
 - The report and the evidence document are Markdown files. The report is
   included in the review packet; the evidence document is the local, complete

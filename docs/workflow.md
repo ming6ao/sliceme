@@ -153,11 +153,11 @@ runs.run reviewer           one builtin reviewer reads the recorded evidence
 ```
 
 When the resource returns `complete`, the coordinator writes the evidence and
-shows the summary to the user, then runs:
+shows the summary and the timing statistics to the user, then runs:
 
 ```text
 sliceme evidence                    write the deterministic evidence document
-sliceme report --narrative TEXT     the report and the coordinator's summary
+sliceme report --narrative TEXT     the report, the timing report, and the summary
 sliceme deliver --confirm [--mode MODE] [--narrative TEXT]
                                     pull_request: push + open a PR against main
                                     local: merge the local base branch
@@ -201,7 +201,7 @@ equals the default branch.
 | `check` | run the one combined-tree check runner for the current phase |
 | `open` | create or reuse the campaign worktree |
 | `record` | record the current phase: conformance + per-node commits |
-| `report` | write the deterministic report (`--narrative` appends the summary) |
+| `report` | write the deterministic report and the timing report (`--narrative` appends the summary; `--slow-seconds` sets the slow-command threshold) |
 | `evidence` | write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs |
 
 ## Worker workflow

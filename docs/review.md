@@ -126,7 +126,7 @@ pause; suspension stays an explicit user command.
 ## 6. The report
 
 ```bash
-sliceme report [--narrative TEXT] [--design REF]
+sliceme report [--narrative TEXT] [--design REF] [--slow-seconds N]
 ```
 
 `report` writes `.sliceme/<branch-key>.report.md`. The skeleton is
@@ -136,9 +136,16 @@ records, and the newest check per record. A node with a record shows
 finished. A node with no record shows the session descriptor status, which
 is the only place a suspended node's `running` status lives.
 `--narrative` adds the coordinator's summary under the leading summary. The
-report leads with the summary, then the change rows, then the verification, and
-then the complete detail: the nodes, the per-commit evidence, and the artifact
-paths.
+report leads with the summary and the change rows. It then shows the
+verification and the timing summary. The complete detail follows: the nodes,
+the per-commit evidence, and the artifact paths.
+
+The action also writes `.sliceme/<branch-key>.timings.md` and prints it in the
+terminal. The timing report groups the thinking steps by agent, the tool calls
+by tool name, and the longest commands by duration. A command at or above the
+slow threshold (`--slow-seconds`, default 120) is shown in full. The engine
+ingests the child transcripts at `record`, `check`, and `report`, so the report
+covers the whole campaign.
 
 ### 6.1 The pull request body
 

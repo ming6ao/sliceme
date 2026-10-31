@@ -53,6 +53,7 @@ import {
 	controlPath,
 	loadPiSubagents,
 	packageDir,
+	piSessionPath,
 	readActiveCampaign,
 	readJson,
 	resolveSlicemeInvocation,
@@ -116,7 +117,7 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	open: ["campaign"],
 	record: ["reopen", "campaign"],
 	check: ["phase", "refresh", "campaign"],
-	report: ["narrative", "design", "campaign"],
+	report: ["narrative", "design", "campaign", "slow_seconds"],
 	evidence: ["design", "campaign"],
 	deliver: [
 		"source",
@@ -383,6 +384,31 @@ function writeSessionDescriptor(
 	return descriptor;
 }
 
+/**
+ * Record the pi session that drives a campaign.
+ *
+ * The engine reads the child transcripts beside the session file to ingest
+ * the timing statistics.  The binding is separate from the suspend/resume
+ * descriptor, so a running campaign has one before its first suspend.  A
+ * `--no-session` run has no session file, so it writes nothing.
+ */
+function writePiSessionBinding(ctx: ExtensionContext, branch: string): void {
+	let sessionId: string | undefined;
+	let sessionFile: string | undefined;
+	try {
+		sessionId = ctx.sessionManager.getSessionId();
+		sessionFile = ctx.sessionManager.getSessionFile();
+	} catch {
+		return;
+	}
+	if (!sessionFile) return;
+	writeJson(piSessionPath(ctx.cwd, branch), {
+		campaign: branch,
+		pi: { session_id: sessionId, session_file: sessionFile, cwd: ctx.cwd },
+		updated_at: Date.now() / 1000,
+	});
+}
+
 /** Whether a node status counts as finished for suspend/resume reporting. */
 function isFinishedStatus(status: string): boolean {
 	return status === "recorded";
@@ -600,7 +626,8 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"After the campaign resource returns `complete`, run `evidence`, then " +
 				"run `report` with `narrative`: a short paragraph that says what the campaign " +
 				"changed and how it verified the change. A `capped` return is not complete: run " +
-				"the resource again before `evidence`. Show the summary and the delivery details " +
+				"the resource again before `evidence`. Show the summary, the timing statistics " +
+				"from the report, and the delivery details " +
 				"to the user: for the `pull_request` mode the head branch, the base `main`, and " +
 				"the title; for the `local` mode the base branch and the coming local merge. Ask " +
 				"for confirmation one time. On a confirmation run `deliver` with `confirm: true`, " +
@@ -671,6 +698,12 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 						"report/deliver: the summary paragraph of the report and the pull request body",
 				}),
 			),
+			slow_seconds: Type.Optional(
+				Type.Number({
+					description:
+						"report: a tool command at or above this many seconds is slow (default 120)",
+				}),
+			),
 			note: Type.Optional(Type.String({ description: "deliver: approval note" })),
 			actor: Type.Optional(Type.String({ description: "deliver: who confirmed the delivery" })),
 			source: Type.Optional(Type.String({ description: "deliver: worktree branch" })),
@@ -686,6 +719,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			const { json, text } = await sliceme(ctx, engineArgs(action, flags, params), signal);
 			// Update the active pointer and mark a successful delivery completed.
 			const branch = applyEngineReply(ctx.cwd, action, json);
+			if (branch) writePiSessionBinding(ctx, branch);
 			// A raised cap clears the budget pause, so the campaign can continue.
 			if (action === "budget") {
 				const target = branch ?? activeCampaign(ctx.cwd);
@@ -716,8 +750,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 					`loop through the sliceme.campaign workflow resource: call the subagent tool ` +
 					`with workflow "sliceme.campaign" and async true. If it returns state capped, ` +
 					`run the same resource again; a capped run is not a failure. When it completes, run ` +
-					`"evidence" and "report", show the evidence summary and the delivery ` +
-					`details to the user, and ask for confirmation one time. Ask which delivery ` +
+					`"evidence" and "report", show the evidence summary, the timing ` +
+					`statistics, and the delivery details to the user, and ask for confirmation ` +
+					`one time. Ask which delivery ` +
 					`mode to use: "pull_request" (push the branch and open a pull request) or ` +
 					`"local" (merge the local base branch, then push later). On a ` +
 					`confirmation run "deliver" with "confirm": true and the chosen "mode"; on a ` +

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gitutil
+from . import timings
 from .ownership import node_dir
 from .store import Store
 from .util import (
@@ -50,6 +51,11 @@ def dag_path(root: Path, branch: str) -> Path:
 
 def report_path(root: Path, branch: str) -> Path:
     return state_dir(root) / f"{branch_key(branch)}.report.md"
+
+
+def timing_path(root: Path, branch: str) -> Path:
+    """The dedicated timing statistics report for a campaign."""
+    return state_dir(root) / f"{branch_key(branch)}.timings.md"
 
 
 def evidence_json_path(root: Path, branch: str) -> Path:
@@ -214,6 +220,7 @@ __all__ = [
     "render_pull_request",
     "report_path",
     "session_path",
+    "timing_path",
     "worker_log_path",
     "write_budget",
     "write_control",
@@ -550,6 +557,7 @@ def build_skeleton(
             "report": str(report_path(root, branch)),
             "evidence_json": str(evidence_json_path(root, branch)),
             "evidence_md": str(evidence_md_path(root, branch)),
+            "timings": str(timing_path(root, branch)),
         },
         "report_path": str(report_path(root, branch)),
         "nodes": per_node,
@@ -659,7 +667,13 @@ def _verification_block(skeleton: dict[str, Any]) -> list[str]:
     return lines
 
 
-def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
+def render(
+    skeleton: dict[str, Any],
+    narrative: str | None = None,
+    *,
+    timing: dict[str, Any] | None = None,
+    timing_file: str | None = None,
+) -> str:
     """The campaign report: the summary first, then the complete detail."""
     lines: list[str] = []
     lines.append("# Campaign report: " + str(skeleton.get("campaign") or "(unnamed)"))
@@ -673,6 +687,13 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
     lines.extend(_summary_block(skeleton, narrative))
     lines.extend(_changes_block(skeleton))
     lines.extend(_verification_block(skeleton))
+    if timing is not None:
+        lines.extend(
+            timings.render_section(
+                timing,
+                path=timing_file or str(skeleton.get("artifact_paths", {}).get("timings")),
+            )
+        )
     lines.append("## Nodes")
     lines.append("")
     lines.append("| node | status | unit | branch | record | commit | verification |")
@@ -764,6 +785,30 @@ def render(skeleton: dict[str, Any], narrative: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def _timing_threshold(config: dict[str, Any], override: float | None) -> float:
+    """The slow-command threshold: the flag, then the plane config, then 120s."""
+    if override is not None:
+        try:
+            value = float(override)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    declared_block = config.get("timings")
+    declared = (
+        declared_block.get("slow_seconds")
+        if isinstance(declared_block, dict)
+        else None
+    )
+    try:
+        value = float(declared)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    return timings.SLOW_SECONDS
+
+
 def write_report(
     root: Path,
     config: dict[str, Any],
@@ -773,16 +818,49 @@ def write_report(
     branch: str | None = None,
     campaign: str | None = None,
     design: str | None = None,
+    slow_seconds: float | None = None,
 ) -> dict[str, Any]:
     branch = branch or config_branch(config)
+    key = campaign
+    if key is None:
+        row = store.get_campaign(branch)
+        key = str(row["key"]) if row else None
+    threshold = _timing_threshold(config, slow_seconds)
+    rows = store.list_timings(campaign=key) if key else []
+    timing = timings.summarize(rows, slow_seconds=threshold)
+    campaign_row = (store.get_campaign(key) if key else None) or {}
+    timing_doc = timings.render(
+        timing,
+        campaign=str(campaign_row.get("name") or branch),
+        branch=branch,
+        worktree=str(campaign_row.get("worktree") or "") or None,
+        slow_seconds=threshold,
+    )
+    file = timing_path(root, branch)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(timing_doc, encoding="utf-8")
     skeleton = build_skeleton(
         root, config, store, branch=branch, campaign=campaign, design=design
     )
-    content = render(skeleton, narrative)
+    content = render(
+        skeleton,
+        narrative,
+        timing=timing,
+        timing_file=str(file),
+    )
     path = report_path(root, branch)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return {"path": str(path), "content": content, "skeleton": skeleton}
+    return {
+        "path": str(path),
+        "content": content,
+        "skeleton": skeleton,
+        "timing": {
+            "path": str(file),
+            "content": timing_doc,
+            "summary": timing,
+        },
+    }
 
 
 def render_pull_request(

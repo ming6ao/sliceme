@@ -228,6 +228,12 @@ def _dispatch(args: argparse.Namespace, as_json: bool) -> int:
         print(result["unit"] if isinstance(result, dict) else result)
     elif action == "status" and not as_json and isinstance(result, dict) and result.get("lines"):
         print("\n".join(result["lines"]))
+    elif action == "report" and not as_json and isinstance(result, dict) and result.get("timing"):
+        # Show the timing statistics in the terminal; the campaign report
+        # stays on disk because it is long.
+        print(str(result["timing"].get("content") or "").rstrip())
+        print()
+        print(f"Campaign report: {result.get('path')}")
     else:
         _print(result, as_json)
     # Print the result first, so a caller can parse it on a nonzero exit.

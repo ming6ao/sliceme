@@ -80,6 +80,29 @@ CREATE INDEX IF NOT EXISTS idx_verdicts_fingerprint ON verdicts(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_verdicts_campaign ON verdicts(campaign);
 CREATE INDEX IF NOT EXISTS idx_verdicts_commit ON verdicts(commit_ref, id);
 
+CREATE TABLE IF NOT EXISTS timings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign TEXT,
+  step_id TEXT NOT NULL,
+  run TEXT,
+  agent TEXT,
+  child_index INTEGER,
+  kind TEXT NOT NULL,
+  tool TEXT,
+  command TEXT,
+  command_truncated INTEGER NOT NULL DEFAULT 0,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  duration REAL NOT NULL,
+  started_at REAL,
+  ended_at REAL,
+  source TEXT,
+  created_at REAL NOT NULL,
+  UNIQUE (campaign, step_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_timings_campaign ON timings(campaign);
+CREATE INDEX IF NOT EXISTS idx_timings_kind ON timings(campaign, kind, duration);
+
 CREATE TABLE IF NOT EXISTS approvals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   branch_key TEXT NOT NULL,
@@ -769,6 +792,67 @@ class Store:
                 (campaign,),
             ).fetchall()
         return {str(r["status"]): int(r["c"]) for r in rows}
+
+    # ---- timings (one row per thinking step or tool call) -------------
+    def add_timings(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Insert timing rows, skipping steps that already exist.
+
+        A step id is stable across a transcript re-read, so the ingest can run
+        at every phase boundary without a duplicate row.
+        """
+        if not rows:
+            return 0
+        before = self.conn.total_changes
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO timings(campaign, step_id, run, agent,"
+            " child_index, kind, tool, command, command_truncated, is_error,"
+            " duration, started_at, ended_at, source, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    row.get("campaign"),
+                    row.get("step_id"),
+                    row.get("run"),
+                    row.get("agent"),
+                    int(row.get("child_index") or 0),
+                    row.get("kind"),
+                    row.get("tool"),
+                    row.get("command"),
+                    int(bool(row.get("command_truncated"))),
+                    int(bool(row.get("is_error"))),
+                    float(row.get("duration") or 0.0),
+                    row.get("started_at"),
+                    row.get("ended_at"),
+                    row.get("source"),
+                    float(row.get("created_at") or now()),
+                )
+                for row in rows
+            ],
+        )
+        self.conn.commit()
+        return self.conn.total_changes - before
+
+    def list_timings(self, *, campaign: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM timings"
+        params: list[Any] = []
+        if campaign is not None:
+            sql += " WHERE campaign=?"
+            params.append(campaign)
+        sql += " ORDER BY started_at ASC, id ASC"
+        return _dicts(self.conn.execute(sql, params).fetchall())
+
+    def timing_runs(self, *, campaign: str) -> set[str]:
+        """The run ids that already have timing rows for one campaign."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT run FROM timings WHERE campaign=? AND run IS NOT NULL",
+            (campaign,),
+        ).fetchall()
+        return {str(row["run"]) for row in rows}
+
+    def delete_timings(self, *, campaign: str) -> int:
+        cursor = self.conn.execute("DELETE FROM timings WHERE campaign=?", (campaign,))
+        self.conn.commit()
+        return int(cursor.rowcount)
 
     # ---- approvals (one campaign approval) ----------------------------
     def add_approval(

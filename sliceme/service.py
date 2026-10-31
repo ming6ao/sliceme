@@ -105,6 +105,32 @@ class Service(
         campaign = self.campaign
         return campaign["key"] if campaign else None
 
+    def ingest_timings(self) -> dict[str, Any]:
+        """Store the timing steps of the campaign child runs.
+
+        Pi-subagents keeps one transcript for each child run.  The engine
+        reads them at each phase boundary and at report time, so the timing
+        rows survive the artifact cleanup.  A timing failure never fails the
+        calling verb: the record is diagnostic, not a gate.
+        """
+        from . import timings
+
+        campaign = self.campaign
+        if campaign is None:
+            return {"runs": 0, "thinking": 0, "tools": 0, "inserted": 0}
+        branch = str(campaign.get("work_branch") or "")
+        if not branch:
+            return {"runs": 0, "thinking": 0, "tools": 0, "inserted": 0}
+        try:
+            return timings.ingest(
+                self.root,
+                self.store,
+                campaign=str(campaign["key"]),
+                branch=branch,
+            )
+        except Exception as exc:  # a diagnostic read must not fail a campaign
+            return {"error": str(exc)}
+
     @property
     def config(self) -> dict[str, Any]:
         """The effective config: plane fields plus the bound campaign fields.

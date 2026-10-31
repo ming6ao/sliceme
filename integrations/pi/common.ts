@@ -116,6 +116,17 @@ export function sessionPath(cwd: string, branch: string): string {
 	return path.join(stateDir(cwd), `${branchKey(branch)}.session.json`);
 }
 
+/**
+ * The adapter-written pi session binding for a campaign.
+ *
+ * The engine reads the child transcripts beside the session file to ingest
+ * the timing statistics.  A campaign that spans several sessions keeps the
+ * latest binding; the earlier rows are already in the store.
+ */
+export function piSessionPath(cwd: string, branch: string): string {
+	return path.join(stateDir(cwd), `${branchKey(branch)}.pi-session.json`);
+}
+
 /** The cooperative pause flag for a campaign. */
 export function controlPath(cwd: string, branch: string): string {
 	return path.join(stateDir(cwd), `${branchKey(branch)}.control.json`);

@@ -269,7 +269,7 @@ class CampaignVerbs:
         by_id = {str(node["id"]): node for node in dag["nodes"]}
         members = [by_id[node_id] for node_id in phase.members if node_id in by_id]
         all_dirs = {str(node["id"]): node_dir(node) for node in dag["nodes"]}
-        return self._record_phase_commits(
+        result = self._record_phase_commits(
             unit,
             int(phase_index),
             members,
@@ -277,6 +277,9 @@ class CampaignVerbs:
             messages=messages,
             summary=summary,
         )
+        # The worker transcripts for this phase are complete now.
+        self.ingest_timings()
+        return result
 
     def _record_phase_commits(
         self,
@@ -481,6 +484,8 @@ class CampaignVerbs:
             phase=index,
             refresh=refresh,
         )
+        # The reviewer of the previous phase has finished by now.
+        self.ingest_timings()
         return {"phase": index, "members": members, "commit": commit, **result}
 
     def reopen_phase(self, phase: int) -> dict[str, Any]:

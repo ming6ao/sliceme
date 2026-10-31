@@ -28,7 +28,7 @@ The CLI and the pi `sliceme` tool derive from one action registry
 | `check` | Run the synchronous combined-tree checks for a recorded phase (`--phase`), with `--refresh` to bypass the cache. |
 | `open` | Create or reuse the single campaign worktree. |
 | `record` | Record the current phase, or reopen a recorded phase with `--reopen`. |
-| `report` | Write the deterministic campaign report. |
+| `report` | Write the deterministic campaign and timing reports. |
 | `evidence` | Write the deterministic evidence document: the commits, the checks, the diffs, and the worker logs. |
 
 The pi extension forwards these verbs through one tool. The campaign loop lives
@@ -383,12 +383,37 @@ is no narrative agent. The evidence is not a gate.
 ### `report`
 
 ```bash
-sliceme report [--narrative TEXT] [--design REF]
+sliceme report [--narrative TEXT] [--design REF] [--slow-seconds N]
 ```
 
 Write `.sliceme/<branch-key>.report.md`: a deterministic skeleton plus an
 optional `--narrative`. See `docs/review.md` for the confirmation and the
 report.
+
+The action also writes `.sliceme/<branch-key>.timings.md`: one section for the
+thinking steps, one for the tool calls, and one for the longest commands. The
+main report carries a short `Timing` section that points to the detail. The
+human command line prints the timing report, and `--json` returns it in the
+`timing` field.
+
+The engine ingests the pi-subagents child transcripts before it writes, so the
+report includes the last phase. Before it writes, it reads the timing steps
+from the `timings` table (`docs/database.md` §5.5).
+
+- A thinking step is one assistant message. Its duration is the model-call
+  duration that pi recorded.
+- A tool step is one tool call. A `bash` call keeps its command text, bounded
+  to 2000 characters.
+- `--slow-seconds N` sets the threshold for a slow command. The report shows
+  the full command when the call reaches the threshold. The default is 120
+  seconds. The plane config key `timings.slow_seconds` can set the default, and
+  the flag wins over the config.
+
+The report groups the steps by agent and by tool name. It shows the count,
+the total, the mean, the median, the 90th percentile, and the maximum for each
+group. The command table shows the slow commands and the longest commands. The
+totals sum every child run, so parallel workers can make a total larger than
+the active span.
 
 The `deliver --confirm` action records one campaign-level `approve` row. A
 successful delivery consumes the row. A failed check or forge call leaves it
@@ -444,14 +469,16 @@ Let `branch-key` replace `/` with `--` (`feat/x` → `feat--x`):
 ```text
 .sliceme/
   config.json                      # plane config (default_branch, checks, policy)
-  state.db                         # campaigns, records, verdicts, approvals (SQLite, WAL)
+  state.db                         # campaigns, records, verdicts, timings, approvals (SQLite, WAL)
   workspace.lock                   # the one workspace lock (campaign create, record, delivery)
   active.<pid>.campaign            # per-process pointer to the session's campaign
   feat--x.dag.json                 # canonical plan (never committed)
   feat--x.report.md                # deterministic report (kept on cleanup)
+  feat--x.timings.md               # thinking and tool-call timing report
   feat--x.evidence.json            # complete evidence (full check output)
   feat--x.evidence.md              # human evidence (the complete record)
   feat--x.session.json             # adapter-written suspend/resume descriptor
+  feat--x.pi-session.json          # adapter-written pi session binding (timing ingest)
   feat--x.control.json             # cooperative pause flag (reason: user | budget)
   feat--x.budget.json              # adapter-written budget spend (active seconds, cost)
   feat--x.worker_<id>.log          # one log per worker id

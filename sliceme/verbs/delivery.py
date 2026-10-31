@@ -155,9 +155,19 @@ class DeliveryVerbs:
         return None
 
     def report(
-        self, *, narrative: str | None = None, design: str | None = None
+        self,
+        *,
+        narrative: str | None = None,
+        design: str | None = None,
+        slow_seconds: float | None = None,
     ) -> dict[str, Any]:
-        """Write the deterministic campaign report plus an optional narrative."""
+        """Write the deterministic campaign report plus an optional narrative.
+
+        The report also writes the dedicated timing report and a short timing
+        section.  The engine ingests the child transcripts first, so the timing
+        rows include the last phase.
+        """
+        self.ingest_timings()
         return campaign.write_report(
             self.root,
             self.config,
@@ -165,6 +175,7 @@ class DeliveryVerbs:
             campaign=self.campaign_key(),
             narrative=narrative,
             design=design,
+            slow_seconds=slow_seconds,
         )
 
     def evidence(self, *, design: str | None = None) -> dict[str, Any]:
@@ -199,8 +210,10 @@ class DeliveryVerbs:
         ]
         if not keep_report:
             paths.append(campaign.report_path(self.root, branch))
+            paths.append(campaign.timing_path(self.root, branch))
             paths.append(campaign.evidence_json_path(self.root, branch))
             paths.append(campaign.evidence_md_path(self.root, branch))
+            self.store.delete_timings(campaign=key)
         return self._remove_files(paths)
 
     @staticmethod

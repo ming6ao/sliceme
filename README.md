@@ -37,6 +37,11 @@ never author the same files.
 - **Optional budget stop** — `start --budget-seconds N --budget-usd USD` stops
   the campaign at a phase boundary when the wall clock or the cost cap is
   reached. The campaign then suspends and resumes through the session path.
+- **Timing report** — the engine records each thinking step and each tool call
+  of the planner, the workers, and the reviewers. `report` writes the timing
+  statistics grouped by thinking step, tool call, and longest command, prints
+  them in the terminal, and adds a short section to the campaign report. The
+  default slow-command threshold is 120 seconds.
 
 ## Install
 
@@ -64,7 +69,7 @@ sliceme budget --seconds N --usd USD   set, raise, or clear the campaign caps
 sliceme plan DESIGN.md            show the campaign split declared in the design
 sliceme record                    commit the finished nodes as per-node commits
 sliceme check                     run the combined-tree checks for the phase
-sliceme report                    write the deterministic campaign report
+sliceme report                    write the campaign report and the timing report
 sliceme evidence                  write the deterministic evidence document
 sliceme deliver --confirm --mode MODE [--narrative TEXT]
                                     deliver: pull_request (push + PR) or local (merge the base branch)

@@ -182,10 +182,15 @@ ACTIONS: tuple[Action, ...] = (
     ),
     Action(
         name="report",
-        summary="write the deterministic campaign report",
+        summary="write the deterministic campaign and timing reports",
         params=(
             Param("narrative", "string", "what-changed/risks text"),
             Param("design", "string", "design document reference"),
+            Param(
+                "slow_seconds",
+                "number",
+                "report: a tool command at or above this many seconds is slow (default 120)",
+            ),
             Param("campaign", "string", CAMPAIGN_HELP),
         ),
     ),
@@ -357,6 +362,7 @@ def _dispatch_report(service: "Service", p: dict[str, Any]) -> Any:
     return service.report(
         narrative=p.get("narrative"),
         design=p.get("design"),
+        slow_seconds=p.get("slow_seconds"),
     )
 
 

@@ -14,15 +14,16 @@ questions from the engine:
 2. Which nodes are ready, running, done, or failed?
 3. Is the campaign paused?
 4. How many checks passed, failed, or stopped with an error?
-5. What do the final report and the evidence document say?
+5. How much time did each thinking step and each tool call take?
+6. What do the final report and the evidence document say?
 
-The engine answers questions 1 to 4 through the `status` and `ready` verbs. The
-report and the evidence document answer question 5. Child execution detail
-belongs to pi-subagents.
+The engine answers questions 1 to 4 through the `status` and `ready` verbs. It
+answers question 5 through `report`. The report and the evidence document
+answer question 6. Child execution detail belongs to pi-subagents.
 
 ## 2. The data
 
-The engine keeps one durable store and two files.
+The engine keeps one durable store and the per-campaign files.
 
 - **`verdicts` table.** One terminal row per check run: the fingerprint, the
   source, the commit, the status, the duration, the exit code, and the output.
@@ -32,6 +33,12 @@ The engine keeps one durable store and two files.
   is no `state.json`; git plus `state.db` are authoritative.
 - **The report.** `.sliceme/<branch-key>.report.md`, written by
   `report`.
+- **The timing report.** `.sliceme/<branch-key>.timings.md`, written by
+  `report`. The main report carries a short `Timing` section that points to
+  this file.
+- **The `timings` table.** One row per thinking step and per tool call. The
+  engine ingests the pi-subagents child transcripts at `record`, `check`, and
+  `report`, so the rows survive the artifact cleanup.
 - **The evidence document.** `.sliceme/<branch-key>.evidence.json` (the complete
   evidence) and `.sliceme/<branch-key>.evidence.md` (the bounded Markdown),
   written by `evidence`. The pull request body is the shorter summary document,
@@ -47,6 +54,27 @@ surface.
 number of terminal rows per status. The block is the cache health of one
 campaign, not a queue. A `cached` result on a `check` reply means the
 fingerprint already had a terminal row.
+
+### 2.2 Timing steps
+
+pi-subagents writes one transcript for each child run at
+`<session-dir>/subagent-artifacts/<run>_<agent>_transcript.jsonl`. The engine
+reads two record kinds:
+
+- a `message` record for an assistant turn, with the model-call duration;
+- a `tool_start`/`tool_end` pair for one tool call, with the start time, the end
+  time, and the tool arguments.
+
+The adapter writes `.sliceme/<branch-key>.pi-session.json` on each engine tool
+call. The engine reads the session file from that binding, then the transcripts
+beside it. A run belongs to the campaign when its working directory is inside
+the campaign worktree. A planner run belongs when its working directory is the
+repository root and its time falls inside the campaign window.
+
+The `timings` table keeps one row per step, and the unique key
+`(campaign, step_id)` makes a repeated ingest idempotent. The engine keeps the
+command text of a tool call (bounded to 2000 characters), so the report can
+show the full command of a slow call at any threshold.
 
 ## 3. The status projections
 
@@ -125,8 +153,8 @@ and the next `record` attributes the changes that exist.
 - **Rebuildable.** Node statuses derive from the recorded records in
   `state.db` and the adapter's session descriptor. Git and `state.db` win on
   conflict, so a stale `status` read self-corrects on the next call.
-- **Private.** The check output, the report, and the evidence document stay
-  under the git-excluded `.sliceme/`.
+- **Private.** The check output, the report, the timing report, the evidence
+  document, and the timing rows stay under the git-excluded `.sliceme/`.
 
 ## 6. Tests
 
@@ -134,7 +162,8 @@ and the next `record` attributes the changes that exist.
 - `tests/test_checks.py` drives the check cache and `status` check counts.
 - `tests/test_sessions.py` covers the `verdicts` columns and the migration.
 - `tests/test_evidence.py` drives the evidence document.
-- `tests/test_cli.py` drives the `status` modes.
+- `tests/test_timings.py` drives the transcript ingest and both timing reports.
+- `tests/test_cli.py` drives the `status` modes and the terminal timing report.
 - `tests/test_pi_package.py` checks the wiring and the resource grants.
 
 ## 7. Related work
