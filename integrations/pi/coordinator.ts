@@ -33,6 +33,14 @@ import {
 } from "./campaign-resource.ts";
 import type { BudgetSpend } from "./budget.ts";
 import {
+	ProgressWriter,
+	parseProgressBindings,
+} from "./progress.ts";
+import {
+	STALL_AFTER_MS,
+	measureStallWave,
+} from "./stall-wave.ts";
+import {
 	budgetWindowChanged,
 	evaluateBudget,
 	hasCampaignBudget,
@@ -48,6 +56,7 @@ import {
 } from "./plan-resource.ts";
 import {
 	applyEngineReply,
+	branchKey,
 	budgetPath,
 	clearActiveCampaign,
 	controlPath,
@@ -83,8 +92,10 @@ const ENGINE_ACTIONS = [
 	"ready",
 	"plan",
 	"open",
+	"recover",
 	"record",
 	"check",
+	"progress",
 	"report",
 	"evidence",
 	"deliver",
@@ -117,6 +128,8 @@ const ACTION_FLAGS: Record<EngineAction, readonly string[]> = {
 	open: ["campaign"],
 	record: ["reopen", "campaign"],
 	check: ["phase", "refresh", "campaign"],
+	progress: ["node", "campaign"],
+	recover: ["node", "campaign"],
 	report: ["narrative", "design", "campaign", "slow_seconds"],
 	evidence: ["design", "campaign"],
 	deliver: [
@@ -470,10 +483,104 @@ function resumePrompt(branch: string, descriptor: any, plan: any): string {
 }
 
 // ---------------------------------------------------------------------------
+// Child progress writer (docs/progress-watchdog.md §3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Start the child progress writer when this session is a bound campaign
+ * child.
+ *
+ * The launcher passes `options.extensionBindings` (a `sliceme/1` namespace
+ * with the campaign branch key, the node id, and the child run key).
+ * Background children load this extension, so the factory runs inside the
+ * child: it registers the write-only `sliceme_progress` tool (the fallback
+ * path) and subscribes to `tool_result`, throttled to one line per second.
+ * A session without bindings (the coordinator's own session) registers
+ * nothing.
+ */
+function startChildProgressWriter(pi: ExtensionAPI): ProgressWriter | undefined {
+	const binding = parseProgressBindings(
+		process.env.PI_SUBAGENT_EXTENSION_BINDINGS,
+	);
+	if (!binding) return undefined;
+	const writer = new ProgressWriter(binding);
+	pi.registerTool({
+		name: "sliceme_progress",
+		label: "Sliceme progress",
+		description:
+			"Write-only: report that one worker task completed, so the engine " +
+			"keeps per-node child progress (step counters and the last event " +
+			"time). It reads nothing back and changes no file; call it once per " +
+			"completed task. The automatic tool-result hook writes the same " +
+			"channel, so a call here is a belt-and-braces fallback.",
+		parameters: Type.Object({
+			name: Type.String({
+				description: "one short line: what task just completed",
+			}),
+			detail: Type.Optional(Type.String({ description: "optional extra note" })),
+		}),
+		async execute(_toolCallId, params) {
+			const step = writer.record(String(params.name), params.detail ? String(params.detail) : "");
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							step === null
+								? "progress throttled (one line per second); continue with the next task"
+								: `progress step ${step} recorded`,
+					},
+				],
+				details: step === null ? undefined : { step },
+			};
+		},
+	});
+	pi.on("tool_result", (event) => {
+		// The tool's own results feed the channel through `execute`; the hook
+		// would double-count them.
+		if (event.toolName === "sliceme_progress") return;
+		writer.observe(event.toolName, event.input, event.isError === true);
+		return;
+	});
+	return writer;
+}
+
+const stallMarks = new Map<string, number>();
+
+/**
+ * Read the progress mirrors, mark stalled children in the descriptor, and
+ * notify the session (docs/progress-watchdog.md §4.3).
+ *
+ * The wave's logic lives in `./stall-wave.ts` (the plain-Node module the
+ * harness drives); the tick owns only the branch plumbing. The marks are the
+ * tick's adapter-owned descriptor updates, so `status`, `report`, and
+ * `resume` can count the stalls. One frozen `last_ts` notifies once: the
+ * next mark needs a new event first.
+ */
+function measureStalls(ctx: ExtensionContext, branch: string): void {
+	measureStallWave({
+		progressDir: path.join(stateDir(ctx.cwd), `${branchKey(branch)}.progress`),
+		descriptorFile: sessionPath(ctx.cwd, branch),
+		nowMs: Date.now(),
+		marks: stallMarks,
+		notify:
+			ctx.hasUI && ctx.ui
+				? (message) => {
+						ctx.ui.notify(message, "warning");
+					}
+				: undefined,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
 export default function coordinatorExtension(pi: ExtensionAPI) {
+	// A bound campaign child (the launcher passes extension bindings) writes
+	// its own progress channel; the coordinator's own session ignores this.
+	startChildProgressWriter(pi);
+
 	/** The absolute engine invocation, captured once per session. */
 	let engine: string[] = [];
 	let resourceRegistration: { dispose(): void } | undefined;
@@ -512,6 +619,7 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				const control = readJson<any>(controlPath(ctx.cwd, branch), null);
 				if (control?.pause) return;
 				updateBudget(ctx, branch);
+				measureStalls(ctx, branch);
 			} catch {
 				/* a watchdog tick must never break the session */
 			}
@@ -598,7 +706,9 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 			"(design split), status (campaign state), sessions (registered campaigns), resume " +
 			"(resume plan), gc (prune), doctor (health), ready " +
 			"(current-phase node ids and paused), open (create the campaign worktree), record " +
-			"(the current phase as per-node commits), check (combined-tree checks), budget (set, " +
+			"(the current phase as per-node commits), check (combined-tree checks), progress " +
+			"(the per-node child progress channel), recover (print one node's progress tail and " +
+			"restore that node's directory), budget (set, " +
 			"raise, or clear the campaign caps), report (the deterministic report), evidence (the " +
 			"deterministic evidence document), and deliver (confirm the one approval, then push + " +
 			"pull request, or a local merge). The planning loop runs in " +
@@ -702,6 +812,11 @@ export default function coordinatorExtension(pi: ExtensionAPI) {
 				Type.Number({
 					description:
 						"report: a tool command at or above this many seconds is slow (default 120)",
+				}),
+			),
+			node: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "progress/recover: node ids (repeatable)",
 				}),
 			),
 			note: Type.Optional(Type.String({ description: "deliver: approval note" })),

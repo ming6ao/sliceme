@@ -588,4 +588,8 @@ The suite covers these areas:
 - Promotion from the work branch to the default branch is a human act on
   the forge.
 - Child status, events, and control belong to pi-subagents. Sliceme reads the
-  engine's own state and does not keep a per-child progress file.
+  engine's own state. The one exception is the per-node progress channel: the
+  pi package extension writes one bounded event file and one append-only tail
+  per node under ``.sliceme/<key>.progress/``, and the engine reads them for
+  ``progress``, ``recover``, ``report``, and the retry counts at ``record``.
+  There is no live progress UI.

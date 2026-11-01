@@ -58,6 +58,8 @@ class SessionVerbs:
             "blocked": [],
         }
         statuses: dict[str, str] = {}
+        tries: dict[str, int] = {}
+        stalls: dict[str, int] = {}
         for node in node_ids:
             entry = self._descriptor_entry(descriptor_nodes, node)
             recorded_commit = entry.get("commit")
@@ -72,6 +74,14 @@ class SessionVerbs:
                 entry, record, recorded_commit, worktree_present
             )
             statuses[node] = status
+            # The per-node counts a resumed campaign restarts from: the try
+            # count comes from the records (or 1 when none), the stall count
+            # from the descriptor the budget tick kept.
+            try:
+                tries[node] = max(1, int((record or {}).get("tries") or 1))
+            except (TypeError, ValueError):
+                tries[node] = 1
+            stalls[node] = int(entry.get("stalls") or 0)
             if status == "recorded":
                 # A delivered node is finished; an undelivered one re-verifies
                 # from the check cache.
@@ -96,6 +106,8 @@ class SessionVerbs:
             "worktree_dirty": worktree_dirty,
             "current_phase": current_phase,
             "nodes": statuses,
+            "tries": tries,
+            "stalls": stalls,
             "resume_plan": plan,
             "descriptor": descriptor or None,
         }

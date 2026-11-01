@@ -163,9 +163,35 @@ ACTIONS: tuple[Action, ...] = (
         ),
     ),
     Action(
+        name="progress",
+        summary="report the per-node child progress channel of the campaign",
+        params=(
+            Param(
+                "node",
+                "list",
+                "show one node instead of every node (repeatable)",
+                flag="node",
+            ),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
+    ),
+    Action(
         name="open",
         summary="create or reuse the single campaign worktree",
         params=(Param("campaign", "string", CAMPAIGN_HELP),),
+    ),
+    Action(
+        name="recover",
+        summary="print one node's progress tail and restore that node's directory",
+        params=(
+            Param(
+                "node",
+                "list",
+                "node id to print and restore (repeatable)",
+                flag="node",
+            ),
+            Param("campaign", "string", CAMPAIGN_HELP),
+        ),
     ),
     Action(
         name="record",
@@ -342,6 +368,19 @@ def _dispatch_check(service: "Service", p: dict[str, Any]) -> Any:
     )
 
 
+def _dispatch_progress(service: "Service", p: dict[str, Any]) -> Any:
+    nodes = p.get("node") or None
+    return service.progress(nodes=[str(item) for item in nodes] if nodes else None)
+
+
+def _dispatch_recover(service: "Service", p: dict[str, Any]) -> Any:
+    # Serialize git mutation with campaign creation, record, and delivery.
+    from .service import workspace_lock
+
+    with workspace_lock(service.root):
+        return service.recover_nodes([str(item) for item in p.get("node") or []])
+
+
 def _dispatch_open(service: "Service", p: dict[str, Any]) -> Any:
     return {"unit": service.create_campaign_workspace()}
 
@@ -382,6 +421,8 @@ _HANDLERS = {
     "deliver": _dispatch_deliver,
     "check": _dispatch_check,
     "open": _dispatch_open,
+    "recover": _dispatch_recover,
+    "progress": _dispatch_progress,
     "record": _dispatch_record,
     "report": _dispatch_report,
     "evidence": _dispatch_evidence,

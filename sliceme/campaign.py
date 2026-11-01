@@ -72,6 +72,25 @@ def worker_log_path(root: Path, branch: str, node: str) -> Path:
     return state_dir(root) / f"{branch_key(branch)}.worker_{node}.log"
 
 
+def progress_dir(root: Path, branch: str) -> Path:
+    """The per-node child progress channel of one campaign.
+
+    The pi package extension writes ``<node>.json`` (the last event) and
+    ``<node>.jsonl`` (the append-only tail) here; the engine only reads
+    (``sliceme.progress`` module).  The files are plane state: never
+    committed, never written by the workflow sandbox.
+    """
+    return state_dir(root) / f"{branch_key(branch)}.progress"
+
+
+def progress_event_path(root: Path, branch: str, node: str) -> Path:
+    return progress_dir(root, branch) / f"{node}.json"
+
+
+def progress_tail_path(root: Path, branch: str, node: str) -> Path:
+    return progress_dir(root, branch) / f"{node}.jsonl"
+
+
 def session_path(root: Path, branch: str) -> Path:
     """The adapter-written suspend/resume descriptor for a campaign."""
     return state_dir(root) / f"{branch_key(branch)}.session.json"
@@ -215,6 +234,9 @@ __all__ = [
     "merge_node_status",
     "node_by_id",
     "node_status",
+    "progress_dir",
+    "progress_event_path",
+    "progress_tail_path",
     "pull_request_content",
     "render",
     "render_pull_request",
@@ -546,6 +568,7 @@ def build_skeleton(
 
     commits = _commit_evidence(root, config, store, nodes, records, branch)
     return {
+        "progress": _progress_rows(records, desc_nodes, node_ids=list(nodes)),
         "campaign": (dag or {}).get("campaign") or config.get("campaign", {}).get("name"),
         "design": design or (dag or {}).get("design") or config.get("campaign", {}).get("design"),
         "feature_branch": branch,
@@ -565,6 +588,70 @@ def build_skeleton(
         "totals": _totals(root, config, branch),
         "checks": _phase_checks(store, commits),
     }
+
+
+def _progress_rows(
+    records: list[dict[str, Any]],
+    desc_nodes: dict[str, Any],
+    *,
+    node_ids: list[str],
+) -> list[dict[str, Any]]:
+    """The report's per-node rows: tries beside the timing statistics.
+
+    Tries come from the records (``record`` derives them from the progress
+    channel's run ids); stalls and the waited total come from the descriptor
+    node entries the coordinator's budget tick writes when it marks a stall.
+    """
+    counts: dict[str, dict[str, int]] = {
+        node: {"tries": 1, "stalls": 0, "waited_ms": 0} for node in node_ids
+    }
+    for record in records:
+        node = str(record.get("node") or "")
+        if not node or node not in counts:
+            continue
+        try:
+            counts[node]["tries"] = max(1, int(record.get("tries") or 1))
+        except (TypeError, ValueError):
+            pass
+    for node, raw in desc_nodes.items():
+        entry = counts.get(str(node))
+        if not isinstance(raw, dict) or entry is None:
+            continue
+        try:
+            entry["stalls"] = max(entry["stalls"], int(raw.get("stalls") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            entry["waited_ms"] = max(
+                entry["waited_ms"], int(raw.get("waited_ms") or 0)
+            )
+        except (TypeError, ValueError):
+            pass
+    return [
+        {"node": node, **counts[node]}
+        for node in node_ids
+        if counts[node]["tries"] > 1 or counts[node]["stalls"] > 0
+    ]
+
+
+def _progress_block(skeleton: dict[str, Any]) -> list[str]:
+    """Per-node try and stall lines, beside the timing statistics."""
+    lines = ["## Progress", ""]
+    rows = skeleton.get("progress") or []
+    if not rows:
+        lines.extend(["(no retry or stall marks)", ""])
+        return lines
+    for row in rows:
+        tries = int(row.get("tries") or 1)
+        parts = [f"node {row['node']}: {tries} try" if tries == 1 else f"node {row['node']}: {tries} tries"]
+        if row.get("stalls"):
+            parts.append(f"{_count(int(row['stalls']), 'stall')}")
+        waited = int(row.get("waited_ms") or 0)
+        if waited > 0:
+            parts.append(f"waited {waited // 60000}m")
+        lines.append("- " + ", ".join(parts))
+    lines.append("")
+    return lines
 
 
 def _summary_block(skeleton: dict[str, Any], narrative: str | None) -> list[str]:
@@ -694,6 +781,7 @@ def render(
                 path=timing_file or str(skeleton.get("artifact_paths", {}).get("timings")),
             )
         )
+    lines.extend(_progress_block(skeleton))
     lines.append("## Nodes")
     lines.append("")
     lines.append("| node | status | unit | branch | record | commit | verification |")

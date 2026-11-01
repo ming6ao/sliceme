@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS records (
   summary TEXT,
   node TEXT,
   empty INTEGER NOT NULL DEFAULT 0,
+  tries INTEGER NOT NULL DEFAULT 1,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -181,6 +182,9 @@ class Store:
         self._ensure_columns(
             "campaigns", {"delivery_mode": "TEXT", "merge_commit": "TEXT"}
         )
+        # The per-node try count that `record` derives from the progress
+        # channel: a node with a salvage retake records `tries = 2`.
+        self._ensure_columns("records", {"tries": "INTEGER NOT NULL DEFAULT 1"})
         self._ensure_columns("candidates", {"node": "TEXT"})
         self._ensure_columns("candidates", {"empty": "INTEGER NOT NULL DEFAULT 0"})
         self._ensure_columns("candidates", {"campaign": "TEXT"})
@@ -594,13 +598,25 @@ class Store:
         node: str | None = None,
         campaign: str | None = None,
         empty: bool = False,
+        tries: int = 1,
     ) -> int:
         ts = now()
         with self.tx() as c:
             c.execute(
                 "INSERT INTO records(campaign, head_commit, status, summary,"
-                " node, empty, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (campaign, head_commit, "recorded", summary, node, int(empty), ts, ts),
+                " node, empty, tries, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    campaign,
+                    head_commit,
+                    "recorded",
+                    summary,
+                    node,
+                    int(empty),
+                    max(1, int(tries)),
+                    ts,
+                    ts,
+                ),
             )
             return int(c.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 

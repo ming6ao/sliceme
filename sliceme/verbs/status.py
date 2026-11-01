@@ -141,6 +141,41 @@ class StatusVerbs:
             merged[node] = {**merged.get(node, {}), "status": "recorded"}
         return merged
 
+    def _node_counts(self, branch: str) -> dict[str, dict[str, int]]:
+        """Per-node try counts and stall marks (``docs/progress-watchdog.md``).
+
+        Tries come from the records: ``record`` derives them from the
+        progress channel's run ids before it writes the row.  Stalls and the
+        waited total come from the descriptor node entries the coordinator's
+        budget tick writes when it marks a stalled child.
+        """
+        counts: dict[str, dict[str, int]] = {}
+        for record in self.store.list_records(campaign=self.campaign_key()):
+            node = record.get("node")
+            if not node:
+                continue
+            entry = counts.setdefault(str(node), {"tries": 1, "stalls": 0, "waited_ms": 0})
+            try:
+                entry["tries"] = max(1, int(record.get("tries") or 1))
+            except (TypeError, ValueError):
+                pass
+        descriptor = campaign.load_session(self.root, branch) or {}
+        for node, raw in campaign.descriptor_nodes(descriptor).items():
+            if not isinstance(raw, dict):
+                continue
+            entry = counts.setdefault(str(node), {"tries": 1, "stalls": 0, "waited_ms": 0})
+            try:
+                entry["stalls"] = max(entry.get("stalls", 0), int(raw.get("stalls") or 0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                entry["waited_ms"] = max(
+                    entry.get("waited_ms", 0), int(raw.get("waited_ms") or 0)
+                )
+            except (TypeError, ValueError):
+                pass
+        return counts
+
     def _phase_rows(self, branch: str) -> list[dict[str, Any]]:
         """The phase projection for the ``status_summary`` reads.
 
@@ -236,6 +271,37 @@ class StatusVerbs:
             and campaign.node_status(states, node_id) != "running"
         ]
 
+    def progress(
+        self,
+        *,
+        nodes: list[str] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """The per-node child progress channel (``docs/progress-watchdog.md`` §3).
+
+        One row per node: ``{node, step, last_ts, stalled_ms, attention}``.
+        ``step`` counts the child's tool events, ``stalled_ms`` is the age of
+        the last event, and ``attention`` marks a node that has been silent
+        for longer than the engine's stall threshold.  A node the child never
+        wrote an event for has ``None`` counters, never an error.
+        """
+        from .. import progress as progress_channel
+
+        row = self.campaign
+        if row is None:
+            return {"campaign": None, "nodes": []}
+        branch = str(row["work_branch"])
+        self.normalize_dag()
+        dag = campaign.load_dag(self.root, branch) or {}
+        known = [str(n["id"]) for n in dag.get("nodes") or [] if n.get("id")]
+        rows = progress_channel.rows(
+            self.root, branch, [str(n) for n in nodes] if nodes else known, now=now
+        )
+        return {
+            "campaign": row.get("name") or row["key"],
+            "nodes": rows,
+        }
+
     def ready(self, brief: bool = False) -> dict[str, Any]:
         """The current phase's ready node ids, its index, and the pause flag.
 
@@ -285,14 +351,41 @@ class StatusVerbs:
             for node in dag.get("nodes") or []
             if node.get("id")
         }
+        from .. import progress as progress_channel
+
+        progress_rows = {}
+        if ready_ids:
+            progress_rows = {
+                entry["node"]: entry
+                for entry in progress_channel.rows(self.root, branch, ready_ids, now=None)
+            }
+        # The brief reply names the progress channel once as one
+        # directory-relative path, and each per-node row keeps only the
+        # counters: a wide phase (~15 nodes) with absolute per-node tail
+        # paths can cross the host's 4096-byte preview cap, and a cut reply
+        # stops the loop with an error it cannot act on.
+        progress_dir = campaign.progress_dir(self.root, branch)
+        progress_dir_relative = progress_dir.relative_to(campaign.state_dir(self.root)).as_posix()
         definitions = []
         for node_id in ready_ids:
             node = by_id.get(node_id) or {}
+            channel_row = progress_rows.get(node_id) or {}
             definition: dict[str, Any] = {
                 "id": node_id,
                 "dir": node_dir(node),
                 "label": node.get("label"),
             }
+            if brief:
+                definition["progress"] = {
+                    "step": channel_row.get("step"),
+                    "last_ts": channel_row.get("last_ts"),
+                    "stalled_ms": channel_row.get("stalled_ms"),
+                }
+            else:
+                definition["progress"] = channel_row or None
+                definition["progress_tail"] = str(
+                    campaign.progress_tail_path(self.root, branch, node_id)
+                )
             if not brief:
                 definition["goal"] = node.get("goal")
                 definition["tasks"] = [str(task) for task in node.get("tasks") or []]
@@ -300,6 +393,9 @@ class StatusVerbs:
         worktree = self.campaign_worktree()
         return {
             "campaign": row.get("name") or row["key"],
+            "branch_key": row["key"],
+            "progress_dir": progress_dir_relative,
+            "spend": self.spend_state(),
             "ready": ready_ids,
             "nodes": definitions,
             "dag": str(campaign.dag_path(self.root, branch)),
@@ -309,6 +405,44 @@ class StatusVerbs:
             "pause_reason": pause.get("reason"),
             "pause_metric": pause.get("metric"),
             "budget": self.config.get("budget"),
+        }
+
+    def spend_state(self) -> dict[str, Any]:
+        """The campaign spend verdict the retry loop reads from ``ready``.
+
+        The campaign resource has no filesystem access, so the reply carries
+        the spend verdict instead of a budget file path.  ``retry`` is false
+        only when a cap exists and the spend stands close to it: a campaign
+        near its cap runs one try, not two (``docs/progress-watchdog.md`` §6).
+        """
+        row = self.campaign
+        if row is None:
+            return {"active_seconds": None, "spent_usd": None, "retry": False}
+        caps = dict(self.config.get("budget") or {})
+        spend = campaign.load_budget(self.root, str(row["work_branch"])) or {}
+        try:
+            active = float(spend.get("active_seconds") or 0.0)
+            spent = float(spend.get("spent_usd") or 0.0)
+        except (TypeError, ValueError):
+            active, spent = 0.0, 0.0
+        try:
+            wall_cap = float(caps.get("wall_seconds") or 0) or None
+        except (TypeError, ValueError):
+            wall_cap = None
+        try:
+            cost_cap = float(caps.get("cost_usd") or 0) or None
+        except (TypeError, ValueError):
+            cost_cap = None
+        near = (
+            (wall_cap is not None and active >= 0.8 * wall_cap)
+            or (cost_cap is not None and spent >= 0.8 * cost_cap)
+        )
+        return {
+            "active_seconds": active,
+            "spent_usd": spent,
+            "wall_seconds_cap": wall_cap,
+            "cost_usd_cap": cost_cap,
+            "retry": not near,
         }
 
     def status(self) -> dict[str, Any]:
@@ -390,6 +524,7 @@ class StatusVerbs:
         branch = self.config.get("work_branch")
         dag = campaign.load_dag(self.root, branch) if branch else None
         status_state = self._node_states(branch) if branch else {}
+        counts = self._node_counts(branch) if branch else {}
         nodes = [n for n in (dag or {}).get("nodes") or [] if n.get("id")]
         node_ids = [str(n["id"]) for n in nodes]
 
@@ -434,13 +569,22 @@ class StatusVerbs:
             status = campaign.node_status(status_state, node_id)
             label = node.get("label")
             suffix = f" — {label}" if label else ""
-            lines.append(f"  w{phase} {node_id} {status}{suffix}")
+            node_counts = counts.get(node_id) or {}
+            detail = ""
+            if node_counts.get("stalls"):
+                detail += f" stalls {node_counts['stalls']}"
+            if node_counts.get("tries", 1) != 1:
+                detail += f" tries {node_counts['tries']}"
+            lines.append(f"  w{phase} {node_id} {status}{suffix}{detail}")
             node_rows.append(
                 {
                     "id": node_id,
                     "phase": phase,
                     "status": status,
                     "label": label,
+                    "tries": node_counts.get("tries"),
+                    "stalls": node_counts.get("stalls"),
+                    "waited_ms": node_counts.get("waited_ms"),
                 }
             )
         for entry in dag_phases:

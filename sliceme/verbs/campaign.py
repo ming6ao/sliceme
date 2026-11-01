@@ -356,6 +356,7 @@ class CampaignVerbs:
                     node=node_id,
                     campaign=self.campaign_key(),
                     empty=True,
+                    tries=self._node_tries(None, node_id),
                 )
                 empties.append(node_id)
                 continue
@@ -383,15 +384,23 @@ class CampaignVerbs:
                     or f"commit failed for {node_id}"
                 )
             head = gitutil.head_commit(worktree)
+            tries = self._node_tries(None, node_id)
             cid = self.store.create_record(
                 head_commit=head,
                 summary=summary,
                 node=node_id,
                 campaign=self.campaign_key(),
+                tries=tries,
             )
             created.append(self.store.get_record(cid))
             results.append(
-                {"node": node_id, "reason": "ok", "paths": paths, "record": int(cid)}
+                {
+                    "node": node_id,
+                    "reason": "ok",
+                    "paths": paths,
+                    "record": int(cid),
+                    "tries": tries,
+                }
             )
         self.store.conn.commit()
         return {
@@ -404,6 +413,164 @@ class CampaignVerbs:
             "changed": [path for _, path, _ in entries],
             "reason": "ok",
             "results": results,
+        }
+
+    def _node_tries(self, branch: str | None, node_id: str) -> int:
+        """One node's try count, extracted from its progress tail.
+
+        The extension hook stamps every progress event with the workflow
+        child's run key (``node-<id>``, a salvage retake ``node-<id>-try-2``),
+        so the distinct ``run_id`` values of the tail are the tries.  A child
+        that never wrote progress (its `sliceme_progress` tool stays unused)
+        counts as one try, never zero.
+        """
+        from .. import progress as progress_channel
+
+        branch = branch or self.config.get("work_branch") or "main"
+        events = progress_channel.read_tail(
+            campaign.progress_tail_path(self.root, branch, node_id)
+        )
+        return progress_channel.try_count(events)
+
+    def recover_nodes(self, node_ids: list[str]) -> dict[str, Any]:
+        """Print one node's progress tail and restore that node's directory.
+
+        The reset target is ``git restore --source=HEAD -- <owned dir>``, so
+        only the named node's own directory moves and the sibling work of the
+        phase stays untouched.  The verb refuses a finished campaign like
+        ``reopen`` does, and the dispatch serializes it with the workspace
+        lock like ``record``.  A node the session descriptor still marks
+        ``running`` refuses the restore, because the reset would move the
+        work under a live child.  A node that owns the whole worktree (a
+        ``.`` root node) refuses the restore, because ``.`` is not one node's
+        directory; its tail is still printed.  A clean directory skips the
+        restore call: the reset would be a no-op.
+        """
+        from .. import progress as progress_channel
+        import time
+
+        row = self.require_campaign()
+        # The service caches the bound row; re-read the delivery state.
+        row = self.store.get_campaign(str(row["key"])) or row
+        state = str(row.get("state") or "")
+        if state in {"landed", "delivered", "closed"}:
+            raise SlicemeError(
+                f"refusing to recover {[str(n) for n in node_ids]}: "
+                f"the campaign is {state}"
+            )
+        if not node_ids:
+            raise SlicemeError("recover requires --node <id>")
+        branch = str(row["work_branch"])
+        # The workspace lock cannot see a live pi child, so the descriptor is
+        # the one place a running node is visible (``docs/reference.md`` §3):
+        # restore no directory of a node the descriptor still marks running,
+        # because that reset would move the work under the child.  A record is
+        # durable evidence the node finished, so a record wins over a stale
+        # ``running`` mark.
+        desc_nodes = campaign.descriptor_nodes(campaign.load_session(self.root, branch))
+        recorded = {
+            str(entry["node"])
+            for entry in self.store.list_records(campaign=str(row["key"]))
+            if entry.get("node")
+        }
+        self.normalize_dag()
+        dag = campaign.load_dag(self.root, branch) or {}
+        by_id = {
+            str(node["id"]): node
+            for node in dag.get("nodes") or []
+            if node.get("id")
+        }
+        worktree = self.campaign_worktree()
+        if worktree is None or not worktree.exists():
+            raise SlicemeError(
+                "refusing to recover: the campaign worktree is missing; "
+                "run `sliceme open` first"
+            )
+        restored: list[str] = []
+        results: list[dict[str, Any]] = []
+        for raw in node_ids:
+            node_id = str(raw)
+            node = by_id.get(node_id)
+            if node is None:
+                raise SlicemeError(f"recover: unknown node '{node_id}'")
+            status = campaign.merge_node_status(desc_nodes, recorded, node_id)
+            if status == "running":
+                raise SlicemeError(
+                    f"refusing to recover node '{node_id}': the descriptor "
+                    f"marks it running; wait for the child to end"
+                )
+            directory = node_dir(node)
+            outcome = "restored"
+            events = progress_channel.read_tail(
+                campaign.progress_tail_path(self.root, branch, node_id)
+            )
+            if directory is None:
+                outcome = "no-owned-directory"
+            elif str(directory) in {"", ".", "./"}:
+                outcome = "root-node-refused"
+            else:
+                dirty = gitutil.git(
+                    worktree,
+                    "status",
+                    "--porcelain",
+                    "--",
+                    str(directory),
+                    check=False,
+                )
+                if not dirty.ok:
+                    results.append(
+                        {
+                            "node": node_id,
+                            "dir": directory,
+                            "restore": "status-failed",
+                            "error": dirty.stderr.strip() or dirty.stdout.strip(),
+                            "tail": events,
+                            "progress": progress_channel.node_row(
+                                node_id, events, now=time.time()
+                            ),
+                        }
+                    )
+                    continue
+                if not dirty.stdout.strip():
+                    # A clean directory restores nothing: the reset is a
+                    # no-op, so no restore call runs.
+                    outcome = "clean"
+                else:
+                    result = gitutil.git(
+                        worktree, "restore", "--source=HEAD", "--", str(directory),
+                        check=False,
+                    )
+                    if not result.ok:
+                        results.append(
+                            {
+                                "node": node_id,
+                                "dir": directory,
+                                "restore": "restore-failed",
+                                "error": result.stderr.strip() or result.stdout.strip(),
+                                "tail": events,
+                                "progress": progress_channel.node_row(
+                                    node_id, events, now=time.time()
+                                ),
+                            }
+                        )
+                        continue
+                    restored.append(str(directory))
+            results.append(
+                {
+                    "node": node_id,
+                    "dir": directory,
+                    "restore": outcome,
+                    "tail": events,
+                    "progress": progress_channel.node_row(node_id, events, now=time.time()),
+                }
+            )
+        return {
+            "campaign": row.get("name") or row["key"],
+            "branch": branch,
+            "worktree": str(worktree),
+            "restored": restored,
+            "nodes": results,
+            "reason": "ok",
         }
 
     def checks(self):

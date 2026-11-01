@@ -38,6 +38,8 @@
     "integrations/pi/agents/",
     "integrations/pi/common.ts",
     "integrations/pi/budget.ts",
+    "integrations/pi/progress.ts",
+    "integrations/pi/stall-wave.ts",
     "integrations/pi/campaign-resource.ts",
     "integrations/pi/plan-resource.ts",
     "integrations/pi/coordinator.ts",

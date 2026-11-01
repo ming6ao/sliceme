@@ -541,6 +541,8 @@ confirmation before `deliver`.
 | Failure | Response |
 |---|---|
 | Worker produces no record / fails the checks | The coordinator retries (bounded), splits the node, or stops. |
+| One worker child fails its phase | Each child ends with a structured `status`. A failed child relaunches once with a new run key and a salvage prompt: the child reads its own bounded progress tail, resets its own directory with one `git restore` directive, and redoes the node; a child that owns no directory carries no reset directive, because there is no partial work to restore. Sibling work stays untouched. A second failure returns `state: "blocked"`; the phase still records, and the return names the node, the reason, and the try count. |
+| One worker child stops writing progress | The extension writes one event per tool result, at most one line per second, to `.sliceme/<key>.progress/<node>.jsonl`. The coordinator's 15-second tick reads the mirrors, marks the stall in the session descriptor, and notifies the session; a node the descriptor marks finished is skipped, because its frozen mirror is finished work, not a stall. The tick never aborts a turn; the child still ends at its own deadline. |
 | Reviewer reports a problem | The coordinator retries, splits the node, or stops, with the findings attached. |
 | A phase record changes a path outside its node's `dir` | The record is rejected; the coordinator corrects the `dir` or adds a `depends_on` edge and runs the node again. |
 | Merge conflict at `deliver` | The `merge-tree` pre-check refuses delivery; findings surface. Nothing is pushed. |
@@ -554,4 +556,5 @@ cost caps bound the cost of each campaign. The phase cap is 10 because the host
 allows at most 32 authority grants and each phase needs three. A capped run
 returns `state: "capped"` with a `next` field. Run the resource again to
 continue a longer plan or to confirm completion of a plan with exactly 10
-phases.
+phases. A near-spent campaign takes no salvage try: the `ready` reply carries
+the spend verdict, and the retry loop reads it through that engine call only.

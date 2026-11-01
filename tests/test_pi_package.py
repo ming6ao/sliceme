@@ -129,12 +129,18 @@ class PiPackageTests(unittest.TestCase):
         # The tool forwards the engine verbs and their flags; it does not own a
         # scheduler.
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for verb in ("start", "status", "ready", "plan", "open", "record", "check", "report", "evidence", "deliver"):
+        for verb in (
+            "start", "status", "ready", "plan", "open", "record", "check",
+            "progress", "recover", "report", "evidence", "deliver",
+        ):
             self.assertIn(f'"{verb}"', coordinator, verb)
         self.assertIn("ENGINE_ACTIONS", coordinator)
         self.assertIn("ACTION_FLAGS", coordinator)
         self.assertIn('name: "sliceme"', coordinator)
         self.assertIn("function engineArgs(", coordinator)
+        # The two progress-watchdog verbs carry a repeatable node list.
+        self.assertIn('progress: ["node", "campaign"]', coordinator)
+        self.assertIn('recover: ["node", "campaign"]', coordinator)
 
     def test_the_single_gate_is_documented(self):
         # After the campaign resource completes, the coordinator writes the
@@ -249,9 +255,11 @@ class PiPackageTests(unittest.TestCase):
             self.assertNotIn(gone, source, gone)
 
     def test_retired_actions_are_gone(self):
-        # The executor queue verbs, attempts, progress, review comments, and the
-        # browser server are retired; the engine exposes one ready verb and one
-        # campaign review verb.
+        # The executor queue verbs, attempts, review comments, and the browser
+        # server are retired; the engine exposes one ready verb, one campaign
+        # review verb, and the two progress-watchdog verbs. The retired
+        # `progress` of the executor queue returned as the per-node child
+        # progress channel reader (docs/progress-watchdog.md).
         names = {a.name for a in surface.ACTIONS}
         for gone in (
             "submit",
@@ -262,13 +270,15 @@ class PiPackageTests(unittest.TestCase):
             "commit",
             "exec",
             "attempt",
-            "progress",
         ):
             self.assertNotIn(gone, names)
-        for present in ("deliver", "report", "open", "record", "check", "ready", "status"):
+        for present in (
+            "deliver", "report", "open", "record", "check", "ready", "status",
+            "progress", "recover",
+        ):
             self.assertIn(present, names)
         coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
-        for gone in ("spawn", "record", "verify", "exec", "progress"):
+        for gone in ("spawn", "verify", "exec"):
             self.assertNotIn(f'case "{gone}"', coordinator)
 
     def test_campaign_actions_are_documented(self):
@@ -458,6 +468,41 @@ class PiPackageTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_progress_unit_test(self):
+        # The progress writer is a plain-Node module: the harness pins the
+        # binding parsing, the throttle, the mirror update, and the rotation.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "progress_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stall_wave_unit_test(self):
+        # The tick's stall wave is a plain-Node module (`stall-wave.ts`): the
+        # harness pins the one-notify-per-frozen-last_ts mark, the waited_ms
+        # accumulation, the descriptor write, and the recorded-node filter.
+        node = shutil.which("node")
+        harness = REPO_ROOT / "tests" / "stall_test.mjs"
+        if node is None or not harness.is_file():
+            self.skipTest("node is not installed")
+        if not _node_strip_supported(node):
+            self.skipTest("this node cannot strip TypeScript types")
+        result = subprocess.run(
+            [node, "--no-warnings", "--experimental-strip-types", str(harness)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_budget_unit_test(self):
         # The budget module is pure: the harness pins the caps, the
         # active-second accumulator, the cost sum, and the trip test.
@@ -474,6 +519,39 @@ class PiPackageTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_progress_writer_registers_in_children(self):
+        # The package extension writes the per-node progress channel in a
+        # bound child: it parses the launcher's extension bindings, registers
+        # the write-only `sliceme_progress` tool (the fallback path), listens
+        # to `tool_result` throttled to one line per second, and the
+        # coordinator's 15-second tick reads the mirrors to mark stalls
+        # (docs/progress-watchdog.md §3.2, §4.3).
+        progress = (PI_DIR / "progress.ts").read_text(encoding="utf-8")
+        stall_wave = (PI_DIR / "stall-wave.ts").read_text(encoding="utf-8")
+        coordinator = PI_COORDINATOR.read_text(encoding="utf-8")
+        self.assertTrue((PI_DIR / "progress.ts").is_file())
+        self.assertTrue((PI_DIR / "stall-wave.ts").is_file())
+        self.assertIn("PI_SUBAGENT_EXTENSION_BINDINGS", progress)
+        self.assertIn('SLICEME_BINDING_NAMESPACE = "sliceme/1"', progress)
+        self.assertIn("export function parseProgressBindings", progress)
+        self.assertIn("export class ProgressWriter", progress)
+        self.assertIn("export function rotateTail", progress)
+        # The coordinator wires the writer and the tick stall wave.
+        self.assertIn("startChildProgressWriter", coordinator)
+        self.assertIn('name: "sliceme_progress"', coordinator)
+        self.assertIn('pi.on("tool_result"', coordinator)
+        self.assertIn("measureStalls(ctx, branch)", coordinator)
+        self.assertIn("measureStallWave({", coordinator)
+        # The wave's threshold, its recorded-node filter, and its accumulator
+        # live in the plain-Node module.
+        self.assertIn("STALL_AFTER_MS = 120_000", stall_wave)
+        self.assertIn("isFinishedStatus", stall_wave)
+        self.assertIn("waited_ms", stall_wave)
+        # The writer and the wave modules ship in the package files list.
+        manifest = json.loads(PACKAGE.read_text(encoding="utf-8"))
+        self.assertIn("integrations/pi/progress.ts", manifest.get("files", []))
+        self.assertIn("integrations/pi/stall-wave.ts", manifest.get("files", []))
 
     def test_typescript_extensions_type_check(self):
         # `npm run typecheck` must pass on the pi extensions. It resolves the pi

@@ -8,7 +8,7 @@
  */
 
 export const CAMPAIGN_RESOURCE = "sliceme.campaign";
-export const CAMPAIGN_RESOURCE_VERSION = 2;
+export const CAMPAIGN_RESOURCE_VERSION = 3;
 
 /** The pi-subagents preview cap for standard output and for standard error. */
 export const HOST_PREVIEW_BYTES = 4096;
@@ -18,6 +18,26 @@ export const HOST_CUT_MARKER = "...";
 
 /** How much `record` or `check` text one reviewer task carries. */
 export const EVIDENCE_LIMIT = 1600;
+
+/** One worker's hard deadline per tool call (an open tool ends the run). */
+export const WORKER_TOOL_TIMEOUT_MS = 600_000;
+
+/** One worker's run deadline. Expiration is terminal. */
+export const WORKER_NODE_TIMEOUT_MS = 3_600_000;
+
+/** The runner steers "checkpoint and stop" this long before the kill. */
+export const WORKER_CHECKPOINT_MS = 180_000;
+
+/** The single structured status every worker must return. */
+export const WORKER_RESULT_SCHEMA = {
+	type: "object",
+	properties: { status: { type: "string", enum: ["done", "blocked"] } },
+	required: ["status"],
+	additionalProperties: false,
+} as const;
+
+/** The per-node salvage allowance: one relaunch, one new key, then blocked. */
+export const SALVAGE_TRY = 2;
 
 /** The only variable text in a generated command. */
 export const CAMPAIGN_TOKEN = /^[A-Za-z0-9._-]{1,128}$/;
@@ -75,6 +95,12 @@ export function campaignCommands(engine: string[], campaign?: string): CampaignC
  * once per phase, and the runtime forbids a repeated key, so every iteration
  * gets its own keyed grant (`ready-0`, `record-0`, ...). The final `status`
  * call uses one key. `phaseCap` bounds how many iterations exist.
+ *
+ * The per-node retry stays inside the loop and grants nothing: the salvage
+ * retake resets its own directory with the one `git restore` directive the
+ * salvage prompt carries, and the engine derives the try counts from the
+ * progress channel. The host authority authorizes exact fixed commands
+ * only, so a node id can never ride in a granted command.
  */
 export function campaignGrants(
 	engine: string[],
@@ -139,8 +165,72 @@ export function buildCampaignScript(
 		`  const shown = text.length > EVIDENCE_LIMIT ? text.slice(0, EVIDENCE_LIMIT) : text;`,
 		`  return shown + "\\n[" + verb + " output cut: received " + text.length + " characters; full output: " + hostCapturePath(res) + "]";`,
 		`}`,
+		`const RESULT_STATUS = ${JSON.stringify(WORKER_RESULT_SCHEMA)};`,
 		`let phases = 0;`,
 		`let nodes = 0;`,
+		`const blocked = [];`,
+		`function stateDirOf(planPath) {`,
+		`  // The plan file sits at <root>/.sliceme/<key>.dag.json, so the parent of
+// its parent names the plane root. The child runs in the campaign worktree,
+// and the engine's progress channel lives at the root, so the bindings carry
+// the absolute state directory.`,
+		`  function parent(p) { const i = p.lastIndexOf("/"); return i > 0 ? p.slice(0, i) : p; }`,
+		`  return parent(parent(planPath)) + "/.sliceme";`,
+		`}`,
+		`function childOptions(id, key, keyOfCampaign, stateDir) {`,
+		`  return {`,
+		`    toolTimeoutMs: ${WORKER_TOOL_TIMEOUT_MS},`,
+		`    timeoutMs: ${WORKER_NODE_TIMEOUT_MS},`,
+		`    checkpointBeforeDeadlineMs: ${WORKER_CHECKPOINT_MS},`,
+		`    extensionBindings: { "sliceme/1": { campaign: keyOfCampaign, node: id, run: key, dir: stateDir } },`,
+		`    outputSchema: RESULT_STATUS,`,
+		`  };`,
+		`}`,
+		`function childOutcome(id, result, error) {`,
+		`  if (error) {`,
+		`    const text = error && error.message ? error.message : String(error);`,
+		`    return { id: id, ok: false, reason: text, timedOut: /timed ?-?out|timeout/i.test(text) };`,
+		`  }`,
+		`  const good = result && result.ok === true && result.structuredOutput && result.structuredOutput.status === "done";`,
+		`  return { id: id, ok: good, reason: good ? "" : failureOf({ result: result }), timedOut: result ? result.timedOut === true || result.state === "timedOut" : false };`,
+		`}`,
+		`function workerTask(node, id, worktree, plan) {`,
+		`  const label = node.label ? " (" + node.label + ")" : "";`,
+		`  return "Implement Sliceme DAG node '" + id + "'" + label + ".\\nWorktree: " + worktree + "\\nOwned directory: " + (node.dir || "(none)") + "\\nPlan file: " + plan + "\\nRead the plan file and use the entry in its nodes array with id '" + id + "': its goal and its tasks are your instruction. Read no other file under .sliceme/.\\nEdit only files inside the owned directory. Do not run git, do not commit, and do not run the test suite.\\nEnd with your structured status: \\"done\\" when every task is complete, \\"blocked\\" with a report of what stopped you.";`,
+		`}`,
+		/** The node's bounded progress-tail path: one relative dir per phase. */
+		`function tailPathOf(id, progressDir, stateDir) {`,
+		`  return progressDir ? stateDir + "/" + progressDir + "/" + id + ".jsonl" : "";`,
+		`}`,
+		`function salvageTask(node, id, reason, timedOut, worktree, plan, tail) {`,
+		`  const lines = [`,
+		`    "You are retaking Sliceme DAG node '" + id + "' after your first run failed.",`,
+		`    // The terminal reason is unbounded error text: cap it at the same`,
+		`    // reviewer evidence budget the plan gives the salvage prompt.`,
+		`    "Your first run ended with: " + reason.slice(0, EVIDENCE_LIMIT) + ".",`,
+		`    "First read your own bounded progress tail: " + (tail || "(no event reached the channel for this node)"),`,
+		`  ];`,
+		`  // A node that declares no directory owns no partial work to restore, and`,
+		`  // a reset at the worktree root would destroy every sibling's work, so a`,
+		`  // no-directory retake carries no reset directive at all.`,
+		`  if (node.dir) {`,
+		`    lines.push("Then reset your own partial work with exactly: git restore --source=HEAD -- " + node.dir + ". That one git command is ordered by the coordinator for this retake only; run git for nothing else, and touch no sibling work.");`,
+		`  }`,
+		`  if (timedOut) {`,
+		`    lines.push("Your command or tool call hung once; run it again with a short timeout first.");`,
+		`  } else {`,
+		`    lines.push("Finish every task in order before you end.");`,
+		`  }`,
+		`  lines.push(workerTask(node, id, worktree, plan));`,
+		`  return lines.join("\\n");`,
+		`}`,
+		`function failureOf(job) {`,
+		`  if (job.reason) return job.reason;`,
+		`  const result = job.result;`,
+		`  if (result && result.structuredOutput && result.structuredOutput.status === "blocked") return "the child ended with status blocked";`,
+		`  if (result && (result.timedOut === true || result.state === "timedOut")) return "timedOut";`,
+		`  return "the child ended without status done" + (result && result.error ? ": " + String(result.error) : "");`,
+		`}`,
 		`while (true) {`,
 		`  const readyRes = await ${hostCall('"ready-" + phases', commands.ready)};`,
 		`  if (!readyRes.ok) throw new Error("sliceme ready failed: " + (readyRes.error || readyRes.stderr || readyRes.exitCode));`,
@@ -156,17 +246,49 @@ export function buildCampaignScript(
 		`  if (!plan) throw new Error("sliceme: the ready reply has no plan path; run sliceme start first");`,
 		`  const definitions = Array.isArray(ready.nodes) ? ready.nodes : [];`,
 		`  const byId = new Map(definitions.map(function (node) { return [node.id, node]; }));`,
-		`  const workers = ids.map(function (id) {`,
+		`  const branchKey = typeof ready.branch_key === "string" && ready.branch_key ? ready.branch_key : "";`,
+		`  const stateDir = stateDirOf(plan);`,
+		`  // The brief reply names the channel once, relative to its state dir.`,
+		`  const progressDir = typeof ready.progress_dir === "string" && ready.progress_dir ? ready.progress_dir : "";`,
+		`  const jobs = ids.map(function (id) {`,
 		`    const node = byId.get(id) || {};`,
-		`    const label = node.label ? " (" + node.label + ")" : "";`,
-		`    return {`,
-		`      key: "node-" + id,`,
+		`    const key = "node-" + id;`,
+		`    return runs.run(key, Object.assign({`,
 		`      agent: "sliceme-worker",`,
 		`      cwd: worktree,`,
-		`      task: "Implement Sliceme DAG node '" + id + "'" + label + ".\\nWorktree: " + worktree + "\\nOwned directory: " + (node.dir || "(none)") + "\\nPlan file: " + plan + "\\nRead the plan file and use the entry in its nodes array with id '" + id + "': its goal and its tasks are your instruction. Read no other file under .sliceme/.\\nEdit only files inside the owned directory. Do not run git, do not commit, and do not run the test suite."`,
-		`    };`,
+		`      task: workerTask(node, id, worktree, plan),`,
+		`    }, childOptions(id, key, branchKey, stateDir))).then(`,
+		`      function (result) { return childOutcome(id, result, null); },`,
+		`      function (error) { return childOutcome(id, null, error); },`,
+		`    );`,
 		`  });`,
-		`  await runs.all(workers);`,
+		`  const settled = await Promise.all(jobs);`,
+		`  nodes += ids.length;`,
+		`  const failed = settled.filter(function (outcome) { return !outcome.ok; });`,
+		`  const spend = ready.spend || {};`,
+		`  if (failed.length > 0 && spend.retry === false) {`,
+		`    for (const job of failed) {`,
+		`      blocked.push({ node: job.id, reason: "the campaign spend is at its cap", tries: 1 });`,
+		`    }`,
+		`  } else if (failed.length > 0) {`,
+		`    const retakes = await Promise.all(failed.map(function (job) {`,
+		`      const node = byId.get(job.id) || {};`,
+		`      const key = "node-" + job.id + "-try-2";`,
+		`      return runs.run(key, Object.assign({`,
+		`        agent: "sliceme-worker",`,
+		`        cwd: worktree,`,
+		`        task: salvageTask(node, job.id, failureOf(job), job.timedOut === true, worktree, plan, tailPathOf(job.id, progressDir, stateDir)),`,
+		`      }, childOptions(job.id, key, branchKey, stateDir))).then(`,
+		`        function (result) { return childOutcome(job.id, result, null); },`,
+		`        function (error) { return childOutcome(job.id, null, error); },`,
+		`      );`,
+		`    }));`,
+		`    for (const retake of retakes) {`,
+		`      if (!retake.ok) {`,
+		`        blocked.push({ node: retake.id, reason: failureOf(retake), tries: 2 });`,
+		`      }`,
+		`    }`,
+		`  }`,
 		`  const recordRes = await ${hostCall('"record-" + phases', commands.record)};`,
 		`  if (!recordRes.ok) throw new Error("sliceme record failed: " + (recordRes.error || recordRes.stderr || recordRes.exitCode));`,
 		`  const checkRes = await ${hostCall('"check-" + phases', commands.check)};`,
@@ -174,9 +296,11 @@ export function buildCampaignScript(
 		`  const reviewTask = "Review the recorded phase evidence for Sliceme phase " + (ready.phase === undefined ? "?" : ready.phase) + ".\\nRecorded: " + hostEvidence("record", recordRes) + "\\nChecks: " + hostEvidence("check", checkRes) + "\\nReport concrete findings, or state that the phase is clean. Do not edit files.";`,
 		`  await runs.run("review-" + (ready.phase === undefined ? phases : ready.phase), { agent: "reviewer", cwd: worktree, task: reviewTask });`,
 		`  phases += 1;`,
-		`  nodes += ids.length;`,
+		`  if (blocked.length > 0) {`,
+		`    return { state: "blocked", blocked: blocked, phases: phases, nodes: nodes, phase: ready.phase === undefined ? null : ready.phase, next: "resolve the blocked nodes, then run the sliceme.campaign resource again" };`,
+		`  }`,
 		`  if ((PHASE_CAP > 0 && phases >= PHASE_CAP) || (NODE_CAP > 0 && nodes >= NODE_CAP)) {`,
-		`    return { state: "capped", phases: phases, nodes: nodes, next: "run the sliceme.campaign resource again to continue or confirm completion" };`,
+		`    return { state: "capped", phases: phases, nodes: nodes, blocked: blocked, next: "run the sliceme.campaign resource again to continue or confirm completion" };`,
 		`  }`,
 		`}`,
 		`const statusRes = await ${hostCall('"status"', commands.status)};`,
@@ -188,7 +312,7 @@ export function buildCampaignScript(
 		`} else {`,
 		`  statusError = "the status command failed: " + (statusRes.error || statusRes.stderr || statusRes.exitCode);`,
 		`}`,
-		`return { state: "complete", phases: phases, nodes: nodes, status: summary, status_error: statusError };`,
+		`return { state: "complete", phases: phases, nodes: nodes, blocked: blocked, status: summary, status_error: statusError };`,
 	].join("\n");
 }
 
